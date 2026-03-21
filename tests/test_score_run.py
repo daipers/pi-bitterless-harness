@@ -9,6 +9,7 @@ import sys
 
 import score_run
 from harnesslib import default_run_contract
+from score_run import ScoreContext
 
 TASK_TEXT = """# Task
 Check score generation.
@@ -77,15 +78,36 @@ def make_run_dir(isolated_repo: pathlib.Path) -> pathlib.Path:
     return run_dir
 
 
+def make_context(
+    run_dir: pathlib.Path,
+    *,
+    isolated_repo: pathlib.Path,
+    task_path: pathlib.Path | None = None,
+    exit_code_path: pathlib.Path | None = None,
+    out_path: pathlib.Path | None = None,
+    schema_path: pathlib.Path | None = None,
+    event_log_path: pathlib.Path | None = None,
+) -> ScoreContext:
+    return ScoreContext(
+        task_path=(task_path or (run_dir / "task.md")).resolve(),
+        run_dir=run_dir.resolve(),
+        exit_code_path=(exit_code_path or (run_dir / "pi.exit_code.txt")).resolve(),
+        out_path=(out_path or (run_dir / "score.json")).resolve(),
+        schema_path=(schema_path or (run_dir / "result.schema.json")).resolve(),
+        event_log_path=(event_log_path or (run_dir / "run-events.jsonl")).resolve(),
+        repo_root=(isolated_repo / "starter").resolve(),
+    )
+
+
 def test_score_run_helpers_cover_blocked_and_timeout_paths(
     isolated_repo: pathlib.Path,
     tmp_path: pathlib.Path,
 ) -> None:
-    score_run.run_dir = tmp_path
-    score_run.repo_root = isolated_repo / "starter"
     (tmp_path / "score").mkdir()
+    context = make_context(tmp_path, isolated_repo=isolated_repo)
 
     blocked = score_run.run_evaluation(
+        context,
         {
             "raw": "curl https://example.com",
             "argv": ["curl", "https://example.com"],
@@ -103,6 +125,7 @@ def test_score_run_helpers_cover_blocked_and_timeout_paths(
     assert blocked["failure_classification"] == "contract_invalid"
 
     network_only = score_run.run_evaluation(
+        context,
         {
             "raw": "python3 ../tests/fixtures/pass_eval.py",
             "argv": ["python3", "../tests/fixtures/pass_eval.py"],
@@ -119,6 +142,7 @@ def test_score_run_helpers_cover_blocked_and_timeout_paths(
     assert network_only["blocked"] is True
 
     timeout = score_run.run_evaluation(
+        context,
         {
             "raw": "python3 ../tests/fixtures/sleep_eval.py",
             "argv": ["python3", "../tests/fixtures/sleep_eval.py"],
@@ -184,20 +208,37 @@ python3 ../tests/fixtures/pass_eval.py
     (run_dir / "RUN.md").write_text("# Run\n", encoding="utf-8")
     (run_dir / "pi.exit_code.txt").write_text("nope\n", encoding="utf-8")
     (run_dir / "result.json").write_text("[]\n", encoding="utf-8")
-    score_run.task_path = run_dir / "task.md"
-    score_run.run_dir = run_dir
-    score_run.exit_code_path = run_dir / "pi.exit_code.txt"
-    score_run.out_path = run_dir / "score.json"
-    score_run.schema_path = run_dir / "missing.schema.json"
-    score_run.event_log_path = run_dir / "run-events.jsonl"
-    score_run.repo_root = isolated_repo / "starter"
     monkeypatch.setenv("HARNESS_ALLOW_DANGEROUS_EVAL", "0")
 
-    payload = score_run.build_score_payload(cancelled=True)
+    payload = score_run.build_score_payload(
+        make_context(
+            run_dir,
+            isolated_repo=isolated_repo,
+            schema_path=run_dir / "missing.schema.json",
+        ),
+        cancelled=True,
+    )
 
     assert "model_invocation_failed" in payload["failure_classifications"]
     assert "result_invalid" in payload["failure_classifications"]
     assert "eval_failed" in payload["failure_classifications"]
+
+
+def test_build_context_derives_repo_root_from_run_directory(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = isolated_repo / "starter" / "runs" / "score-test"
+    context = score_run.build_context(
+        [
+            str(run_dir / "task.md"),
+            str(run_dir),
+            str(run_dir / "pi.exit_code.txt"),
+            str(run_dir / "score.json"),
+        ]
+    )
+
+    assert context.repo_root == (isolated_repo / "starter").resolve()
+    assert context.schema_path == (run_dir / "result.schema.json").resolve()
 
 
 def test_score_run_happy_path(isolated_repo: pathlib.Path) -> None:

@@ -21,8 +21,12 @@ npm install -g @mariozechner/pi-coding-agent
 Install local dev/test tooling:
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
+starter/bin/setup-dev-env.sh
 ```
+
+This creates `.venv/` and installs the Python tooling that `starter/bin/preflight.sh`
+expects. The ship gate automatically prefers `.venv/bin` when it exists, so you do not
+need to activate the virtual environment first.
 
 CI installs the full ship-gate toolchain, including `shellcheck`, `jq`, and `trivy`, before running `starter/bin/preflight.sh`.
 

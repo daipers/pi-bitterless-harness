@@ -14,7 +14,19 @@ def collect_files(root: pathlib.Path) -> list[pathlib.Path]:
         if child.is_dir():
             continue
         if any(
-            part in {"home", "session", ".git", "node_modules", ".pytest_cache"}
+            part
+            in {
+                "home",
+                "session",
+                ".git",
+                "node_modules",
+                ".pytest_cache",
+                ".ruff_cache",
+                ".hypothesis",
+                ".venv",
+                "__pycache__",
+                "dist",
+            }
             for part in child.parts
         ):
             continue

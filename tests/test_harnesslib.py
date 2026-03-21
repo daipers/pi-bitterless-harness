@@ -66,7 +66,8 @@ def test_validate_result_payload_and_secret_helpers(tmp_path: pathlib.Path, monk
     assert fallback_issues
 
     secret_file = tmp_path / "secret.txt"
-    secret_file.write_text("OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz1234", encoding="utf-8")
+    fake_key = "sk-" + "abcdefghijklmnopqrstuvwxyz1234"
+    secret_file.write_text(f"OPENAI_API_KEY={fake_key}", encoding="utf-8")
     assert scan_text_for_secrets(secret_file.read_text(encoding="utf-8"))
     assert scan_paths_for_secrets([secret_file])
 

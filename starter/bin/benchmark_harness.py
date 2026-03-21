@@ -6,7 +6,7 @@ import os
 import pathlib
 import shutil
 import statistics
-import subprocess
+import subprocess  # nosec B404 - harness benchmark uses fixed local subprocess invocations
 import tempfile
 import time
 
@@ -25,7 +25,7 @@ def main() -> None:
             harness_root,
             ignore=shutil.ignore_patterns("runs"),
         )
-        subprocess.run(
+        subprocess.run(  # nosec B603 - fixed local harness script path and static argv
             [str(harness_root / "bin" / "new-task.sh"), "benchmark task"],
             cwd=str(harness_root),
             text=True,
@@ -42,7 +42,7 @@ def main() -> None:
         (run_dir / "task.md").write_text(task_text, encoding="utf-8")
         for _ in range(3):
             started = time.perf_counter()
-            subprocess.run(
+            subprocess.run(  # nosec B603 - fixed local harness script path and controlled env
                 [str(harness_root / "bin" / "run-task.sh"), str(run_dir)],
                 cwd=str(harness_root),
                 check=True,

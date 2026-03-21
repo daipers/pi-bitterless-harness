@@ -4,6 +4,10 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 
+if [[ -d "$repo_root/.venv/bin" ]]; then
+  export PATH="$repo_root/.venv/bin:$PATH"
+fi
+
 "$script_dir/check-tools.sh"
 
 for script in "$script_dir"/*.sh; do
@@ -21,4 +25,3 @@ if [[ -f "$repo_root/Dockerfile" ]]; then
 else
   echo "trivy placeholder: no container image or Dockerfile present"
 fi
-
