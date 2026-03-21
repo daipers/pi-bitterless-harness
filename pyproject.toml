@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+addopts = [
+  "--cov=harnesslib",
+  "--cov=parse_task",
+  "--cov=score_run",
+  "--cov-report=term-missing",
+  "--cov-fail-under=90",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

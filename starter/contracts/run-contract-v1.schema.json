@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/run-contract-v1.schema.json",
+  "title": "Bitterless Harness Run Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_contract_version",
+    "result_interface_version",
+    "required_run_files",
+    "required_directories",
+    "required_task_sections",
+    "result_schema_path",
+    "result_template_path",
+    "manifest_path",
+    "event_log_path",
+    "eval_policy"
+  ],
+  "properties": {
+    "run_contract_version": {
+      "const": "v1"
+    },
+    "result_interface_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_run_files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 4
+    },
+    "required_directories": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 4
+    },
+    "required_task_sections": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 6
+    },
+    "result_schema_path": {
+      "type": "string",
+      "const": "result.schema.json"
+    },
+    "result_template_path": {
+      "type": "string",
+      "const": "result.template.json"
+    },
+    "manifest_path": {
+      "type": "string",
+      "const": "outputs/run_manifest.json"
+    },
+    "event_log_path": {
+      "type": "string",
+      "const": "run-events.jsonl"
+    },
+    "eval_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opt_in_env",
+        "allow_network_env",
+        "allowed_programs",
+        "blocked_programs"
+      ],
+      "properties": {
+        "opt_in_env": {
+          "type": "string",
+          "const": "HARNESS_ALLOW_DANGEROUS_EVAL"
+        },
+        "allow_network_env": {
+          "type": "string",
+          "const": "HARNESS_ALLOW_NETWORK_TASKS"
+        },
+        "allowed_programs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "blocked_programs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      }
+    }
+  }
+}
+

@@ -1,0 +1,55 @@
+name: ship
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+
+jobs:
+  ship-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck jq
+
+      - name: Install pi
+        run: npm install -g @mariozechner/pi-coding-agent
+
+      - name: Install Python tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-dev.txt
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Verify version and changelog
+        run: |
+          version="$(cat VERSION)"
+          grep -q "## ${version}" CHANGELOG.md
+
+      - name: Run preflight
+        env:
+          PYTHONPATH: ${{ github.workspace }}/starter/bin
+        run: starter/bin/preflight.sh
+
+      - name: Build release artifacts
+        run: starter/bin/build-release-artifacts.sh

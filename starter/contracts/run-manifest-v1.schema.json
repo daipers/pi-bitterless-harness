@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bitterless Harness Run Manifest v1",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "runner_version",
+    "run_id",
+    "trace_id",
+    "state",
+    "phase",
+    "run_contract_version",
+    "dependencies",
+    "timings",
+    "invariants",
+    "audit"
+  ],
+  "properties": {
+    "manifest_version": {
+      "const": "v1"
+    },
+    "runner_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "type": "string",
+      "enum": ["new", "running", "partial", "complete", "cancelled"]
+    },
+    "phase": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_contract_version": {
+      "const": "v1"
+    },
+    "dependencies": {
+      "type": "object"
+    },
+    "timings": {
+      "type": "object"
+    },
+    "invariants": {
+      "type": "object"
+    },
+    "audit": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}
+

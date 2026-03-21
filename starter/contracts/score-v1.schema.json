@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bitterless Harness Score v1",
+  "type": "object",
+  "required": [
+    "pi_exit_code",
+    "result_json_present",
+    "result_json_valid_schema",
+    "result_json_validations",
+    "evaluations",
+    "required_artifacts",
+    "failure_classifications",
+    "overall_pass"
+  ],
+  "properties": {
+    "pi_exit_code": {
+      "type": "integer"
+    },
+    "result_json_present": {
+      "type": "boolean"
+    },
+    "result_json_valid_schema": {
+      "type": "boolean"
+    },
+    "result_json_validations": {
+      "type": "array"
+    },
+    "evaluations": {
+      "type": "array"
+    },
+    "required_artifacts": {
+      "type": "array"
+    },
+    "failure_classifications": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "overall_pass": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": true
+}
+
