@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import pathlib
+import random
 import shutil
 import statistics
 import subprocess  # nosec B404 - harness benchmark uses fixed local subprocess invocations
@@ -13,7 +14,9 @@ import tempfile
 import time
 from typing import Any
 
+from build_replay_corpus import excerpt_lines
 from harnesslib import default_run_contract
+from harvester import harvest
 from retrieval_index import load_retrieval_profile
 
 SUMMARY_METRIC_KEYS = (
@@ -455,17 +458,395 @@ def benchmark_retrieval(
     return retrieval
 
 
+def load_replay_corpus(corpus_path: pathlib.Path) -> list[dict[str, Any]]:
+    payload = load_json(corpus_path)
+    if not isinstance(payload, list):
+        raise ValueError("replay benchmark corpus must be a JSON array")
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def replay_scenario_for_record(record: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    labels = {str(item) for item in record.get("benchmark_labels", []) if str(item)}
+    if "retry_recovered" in labels or "retry" in labels:
+        return {"scenario": "startup_fail_once"}, "python3 ../tests/fixtures/pass_eval.py"
+    if "result_invalid" in labels:
+        return {"scenario": "invalid_result"}, "python3 ../tests/fixtures/pass_eval.py"
+    if "auth_failure" in labels:
+        return {"scenario": "auth_failure"}, "python3 ../tests/fixtures/pass_eval.py"
+    if "timeout" in labels or "deadline_exceeded" in labels:
+        return {"scenario": "partial_transcript_hang", "sleep_seconds": 2}, (
+            "python3 ../tests/fixtures/pass_eval.py"
+        )
+    if "model_invocation_failed" in labels:
+        return {"scenario": "startup_failure"}, "python3 ../tests/fixtures/pass_eval.py"
+    if "contract_invalid" in labels:
+        return {"scenario": "happy_path"}, "python3 -c 'print(1)'"
+    if "eval_failed" in labels:
+        return {"scenario": "happy_path"}, "python3 ../tests/fixtures/fail_eval.py"
+    if "transcript_flood" in labels:
+        return {"scenario": "transcript_flood", "event_count": 1024}, (
+            "python3 ../tests/fixtures/pass_eval.py"
+        )
+    return {"scenario": "happy_path"}, "python3 ../tests/fixtures/pass_eval.py"
+
+
+def write_replay_task(
+    task_path: pathlib.Path,
+    *,
+    schema_text: str,
+    title: str,
+    goal: str,
+    eval_command: str,
+) -> None:
+    write_task(
+        task_path,
+        schema_text=schema_text,
+        title=title,
+        goal=goal,
+        constraints=["Stay local.", "Use the replay evidence only as a representative workload."],
+        done=["Score is written.", "outputs/run_manifest.json is written."],
+    )
+    set_eval_command(task_path, eval_command)
+
+
+def prepare_replay_runs(
+    harness_root: pathlib.Path,
+    corpus: list[dict[str, Any]],
+    *,
+    max_runs: int,
+) -> list[dict[str, Any]]:
+    runs_root = harness_root / "runs"
+    schema_text = (harness_root / "result.schema.json").read_text(encoding="utf-8").rstrip()
+    selected_records = corpus[: max(1, min(max_runs, len(corpus)))]
+    prepared: list[dict[str, Any]] = []
+    for index, record in enumerate(selected_records):
+        run_dir = create_benchmark_run(harness_root, f"replay workload {index + 1}")
+        scenario_payload, eval_command = replay_scenario_for_record(record)
+        evidence = record.get("evidence", {}) if isinstance(record.get("evidence"), dict) else {}
+        task_excerpt = evidence.get("task_excerpt", [])
+        goal = "Replay representative production-like evidence."
+        if isinstance(task_excerpt, list):
+            goal = "\n".join(str(line) for line in task_excerpt[:3] if str(line).strip()) or goal
+        write_replay_task(
+            run_dir / "task.md",
+            schema_text=schema_text,
+            title=f"Replay benchmark {record.get('run_id', index + 1)}",
+            goal=goal,
+            eval_command=eval_command,
+        )
+        (run_dir / ".fake-pi-scenario.json").write_text(
+            json.dumps(scenario_payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        prepared.append(
+            {
+                "run_dir": run_dir,
+                "record": record,
+                "scenario": scenario_payload["scenario"],
+            }
+        )
+    assert runs_root.exists()
+    return prepared
+
+
+def run_orchestrator_benchmark(
+    harness_root: pathlib.Path,
+    fake_pi: pathlib.Path,
+    *,
+    max_model_workers: int,
+    max_score_workers: int,
+) -> dict[str, Any]:
+    runs_root = harness_root / "runs"
+    benchmark_duration_seconds = max(
+        2,
+        int(os.environ.get("HARNESS_BENCHMARK_ORCHESTRATOR_DURATION_SECONDS", "5")),
+    )
+    env = os.environ | {
+        "PYTHONPATH": str(harness_root / "bin"),
+        "HARNESS_PI_BIN": str(fake_pi),
+        "HARNESS_ORCHESTRATOR_MODEL_TIMEOUT_SECONDS": "1",
+        "HARNESS_ORCHESTRATOR_SCORE_TIMEOUT_SECONDS": "30",
+    }
+    started = time.perf_counter()
+    subprocess.run(
+        [
+            sys.executable,
+            str(harness_root / "bin" / "orchestrator.py"),
+            "--runs-root",
+            str(runs_root),
+            "--max-model-workers",
+            str(max_model_workers),
+            "--max-score-workers",
+            str(max_score_workers),
+            "--duration-seconds",
+            str(benchmark_duration_seconds),
+        ],
+        cwd=str(harness_root),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    metrics = harvest(runs_root, window_days=1)
+    metrics["duration_ms"]["wall_clock"] = round((time.perf_counter() - started) * 1000.0, 2)
+    return metrics
+
+
+def append_history_snapshot(
+    history_dir: pathlib.Path,
+    *,
+    stem: str,
+    payload: dict[str, Any],
+    row: dict[str, Any],
+) -> None:
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_path = history_dir / f"{stem}.history.jsonl"
+    with history_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    snapshot_index = len(history_path.read_text(encoding="utf-8").splitlines())
+    snapshot_path = history_dir / f"{stem}-{snapshot_index}.summary.json"
+    snapshot_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def benchmark_replay(
+    harness_root: pathlib.Path,
+    fake_pi: pathlib.Path,
+    *,
+    corpus_path: pathlib.Path,
+    max_runs: int,
+    history_dir: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    corpus = load_replay_corpus(corpus_path)
+    sampled = corpus[: max(1, min(max_runs, len(corpus)))]
+    workload_metrics: list[dict[str, Any]] = []
+
+    for concurrency in (1, 2):
+        clear_runs_dir(harness_root / "runs")
+        prepared = prepare_replay_runs(harness_root, sampled, max_runs=max_runs)
+        metrics = run_orchestrator_benchmark(
+            harness_root,
+            fake_pi,
+            max_model_workers=concurrency,
+            max_score_workers=concurrency,
+        )
+        retry_records = [
+            item
+            for item in prepared
+            if "retry" in {str(label) for label in item["record"].get("benchmark_labels", [])}
+            or item["scenario"] == "startup_fail_once"
+        ]
+        retry_successes = 0
+        for item in retry_records:
+            score_payload = load_json(item["run_dir"] / "score.json")
+            if score_payload.get("overall_pass") is True:
+                retry_successes += 1
+        terminal_total = (
+            metrics["totals"]["complete"] + metrics["totals"]["cancelled"] + metrics["totals"]["failed"]
+        )
+        workload_metrics.append(
+            {
+                "concurrency": concurrency,
+                "sampled_runs": len(prepared),
+                "completion_rate": round(
+                    terminal_total / max(1, metrics["totals"]["total_runs"]),
+                    2,
+                ),
+                "pass_rate_percent": metrics["pass_rate_percent"],
+                "timeout_rate": round(
+                    metrics["failure_classification_counts"].get("deadline_exceeded", 0)
+                    / max(1, metrics["totals"]["total_runs"]),
+                    2,
+                ),
+                "retry_recovery_rate": round(
+                    retry_successes / max(1, len(retry_records)),
+                    2,
+                ),
+                "queue_saturation_events": metrics["queue_saturation"]["events_total"],
+                "p95_duration_ms": metrics["duration_ms"]["p95"],
+                "p99_duration_ms": metrics["duration_ms"]["p99"],
+                "wall_clock_ms": metrics["duration_ms"]["wall_clock"],
+            }
+        )
+
+    payload = {
+        "corpus_size": len(corpus),
+        "sampled_run_count": len(sampled),
+        "source_corpus_path": str(corpus_path),
+        "workload_metrics": workload_metrics,
+    }
+    if history_dir is not None and workload_metrics:
+        latest = workload_metrics[-1]
+        append_history_snapshot(
+            history_dir,
+            stem="replay-benchmark",
+            payload=payload,
+            row={
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "sampled_run_count": payload["sampled_run_count"],
+                "pass_rate_percent": latest["pass_rate_percent"],
+                "queue_saturation_events": latest["queue_saturation_events"],
+                "p95_duration_ms": latest["p95_duration_ms"],
+                "p99_duration_ms": latest["p99_duration_ms"],
+            },
+        )
+    return payload
+
+
+def benchmark_fault_injection(
+    harness_root: pathlib.Path,
+    fake_pi: pathlib.Path,
+    *,
+    sample_count: int,
+    seed: int,
+    corpus_out: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    schema_text = (harness_root / "result.schema.json").read_text(encoding="utf-8").rstrip()
+    rng = random.Random(seed)
+    cases = [
+        ("invalid_result", {"scenario": "invalid_result"}, "python3 ../tests/fixtures/pass_eval.py"),
+        ("startup_failure", {"scenario": "startup_failure"}, "python3 ../tests/fixtures/pass_eval.py"),
+        ("auth_failure", {"scenario": "auth_failure"}, "python3 ../tests/fixtures/pass_eval.py"),
+        (
+            "partial_transcript_hang",
+            {"scenario": "partial_transcript_hang", "sleep_seconds": 2},
+            "python3 ../tests/fixtures/pass_eval.py",
+        ),
+        ("permission_denied", {"scenario": "permission_denied"}, "python3 ../tests/fixtures/pass_eval.py"),
+        ("transcript_flood", {"scenario": "transcript_flood", "event_count": 2048}, "python3 ../tests/fixtures/pass_eval.py"),
+        ("contract_invalid", {"scenario": "happy_path"}, "python3 -c 'print(1)'"),
+    ]
+    selected = [cases[rng.randrange(len(cases))] for _ in range(max(1, sample_count))]
+    clear_runs_dir(harness_root / "runs")
+
+    results: list[dict[str, Any]] = []
+    novel_failure_records: list[dict[str, Any]] = []
+    observed_failures: set[str] = set()
+    env = os.environ | {
+        "PYTHONPATH": str(harness_root / "bin"),
+        "HARNESS_PI_BIN": str(fake_pi),
+        "HARNESS_MODEL_TIMEOUT_SECONDS": "1",
+        "HARNESS_MAX_TRANSCRIPT_BYTES": "4096",
+    }
+
+    for index, case in enumerate(selected):
+        case_name, scenario_payload, eval_command = case
+        run_dir = create_benchmark_run(harness_root, f"fault injection {index + 1}")
+        write_replay_task(
+            run_dir / "task.md",
+            schema_text=schema_text,
+            title=f"Generated fault {case_name}",
+            goal=f"Exercise generated fault case {case_name}.",
+            eval_command=eval_command,
+        )
+        (run_dir / ".fake-pi-scenario.json").write_text(
+            json.dumps(scenario_payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [str(harness_root / "bin" / "run-task.sh"), str(run_dir)],
+            cwd=str(harness_root),
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        score_payload = load_json(run_dir / "score.json")
+        manifest = load_json(run_dir / "outputs" / "run_manifest.json")
+        failures = sorted(
+            {
+                str(item)
+                for item in (
+                    (score_payload.get("failure_classifications") or [])
+                    + (manifest.get("failure_classifications") or [])
+                )
+                if str(item)
+            }
+        )
+        novel = [item for item in failures if item not in observed_failures]
+        observed_failures.update(failures)
+        result = {
+            "case": case_name,
+            "scenario": scenario_payload["scenario"],
+            "exit_code": completed.returncode,
+            "failures": failures,
+            "novel_failures": novel,
+        }
+        results.append(result)
+        if novel:
+            novel_failure_records.append(
+                {
+                    "record_version": "v1",
+                    "run_id": run_dir.name,
+                    "source_label": "generated_fault_injection",
+                    "benchmark_labels": failures or [case_name],
+                    "metadata": {
+                        "generated_case": case_name,
+                        "overall_pass": score_payload.get("overall_pass"),
+                    },
+                    "evidence": {
+                        "manifest": manifest,
+                        "score": score_payload,
+                        "event_excerpt": excerpt_lines(run_dir / "run-events.jsonl", line_limit=10),
+                        "transcript_excerpt": excerpt_lines(run_dir / "transcript.jsonl", line_limit=10),
+                        "stderr_excerpt": excerpt_lines(run_dir / "pi.stderr.log", line_limit=10),
+                    },
+                }
+            )
+
+    if corpus_out is not None:
+        corpus_out.parent.mkdir(parents=True, exist_ok=True)
+        corpus_out.write_text(json.dumps(novel_failure_records, indent=2) + "\n", encoding="utf-8")
+
+    return {
+        "sample_count": sample_count,
+        "seed": seed,
+        "cases": results,
+        "novel_failure_records": len(novel_failure_records),
+        "fault_corpus_path": str(corpus_out) if corpus_out is not None else None,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark Bitterless Harness")
     parser.add_argument(
         "--mode",
-        choices=["all", "run-task", "retrieval"],
+        choices=["all", "run-task", "retrieval", "replay", "fault-injection"],
         default="all",
         help="which benchmark set to run",
     )
     parser.add_argument(
         "--profile-path",
         help="override the retrieval profile used for retrieval benchmarks",
+    )
+    parser.add_argument(
+        "--replay-corpus",
+        help="path to a replay corpus JSON file",
+    )
+    parser.add_argument(
+        "--replay-runs",
+        type=int,
+        default=6,
+        help="maximum number of replay records to exercise",
+    )
+    parser.add_argument(
+        "--fault-samples",
+        type=int,
+        default=6,
+        help="number of generated fault-injection cases to execute",
+    )
+    parser.add_argument(
+        "--fault-seed",
+        type=int,
+        default=7,
+        help="seed for generated fault-injection sampling",
+    )
+    parser.add_argument(
+        "--fault-corpus-out",
+        help="optional output path for novel generated failure records",
+    )
+    parser.add_argument(
+        "--history-dir",
+        help="optional directory for replay benchmark history snapshots",
     )
     parser.add_argument(
         "--out",
@@ -477,7 +858,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     repo_root = pathlib.Path(__file__).resolve().parents[2]
-    fake_pi = repo_root / "tests" / "fixtures" / "fake_pi.py"
     payload: dict[str, object] = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "backpressure_policy": {
@@ -488,20 +868,44 @@ def main() -> None:
         },
     }
     profile_path = pathlib.Path(args.profile_path).resolve() if args.profile_path else None
+    replay_corpus_path = pathlib.Path(args.replay_corpus).resolve() if args.replay_corpus else None
+    history_dir = pathlib.Path(args.history_dir).resolve() if args.history_dir else None
+    fault_corpus_out = pathlib.Path(args.fault_corpus_out).resolve() if args.fault_corpus_out else None
     with tempfile.TemporaryDirectory(prefix="bitterless-bench-") as tmp_dir_name:
         tmp_dir = pathlib.Path(tmp_dir_name)
         harness_root = tmp_dir / "starter"
+        temp_tests_root = tmp_dir / "tests"
         shutil.copytree(
             repo_root / "starter",
             harness_root,
             ignore=shutil.ignore_patterns("runs"),
         )
+        shutil.copytree(repo_root / "tests", temp_tests_root)
+        fake_pi = temp_tests_root / "fixtures" / "fake_pi.py"
         if args.mode in {"all", "run-task"}:
             payload["run_task"] = benchmark_run_task(harness_root, fake_pi)
         if args.mode in {"all", "retrieval"}:
             payload["retrieval"] = benchmark_retrieval(
                 harness_root,
                 profile_path=profile_path,
+            )
+        if args.mode in {"all", "replay"}:
+            if replay_corpus_path is None:
+                raise ValueError("--replay-corpus is required for replay mode")
+            payload["replay"] = benchmark_replay(
+                harness_root,
+                fake_pi,
+                corpus_path=replay_corpus_path,
+                max_runs=max(1, args.replay_runs),
+                history_dir=history_dir,
+            )
+        if args.mode in {"all", "fault-injection"}:
+            payload["fault_injection"] = benchmark_fault_injection(
+                harness_root,
+                fake_pi,
+                sample_count=max(1, args.fault_samples),
+                seed=args.fault_seed,
+                corpus_out=fault_corpus_out,
             )
 
     serialized = json.dumps(payload, indent=2)

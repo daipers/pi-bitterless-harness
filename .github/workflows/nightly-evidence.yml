@@ -1,0 +1,84 @@
+name: nightly-evidence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * *"
+
+jobs:
+  nightly-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pi
+        run: npm install -g @mariozechner/pi-coding-agent@$(cat PI_VERSION)
+
+      - name: Install Python tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-dev.txt
+
+      - name: Materialize pi auth
+        env:
+          PI_AUTH_JSON: ${{ secrets.PI_AUTH_JSON }}
+        run: |
+          if [[ -z "${PI_AUTH_JSON}" ]]; then
+            echo "missing required PI_AUTH_JSON secret" >&2
+            exit 1
+          fi
+          auth_path="$RUNNER_TEMP/pi-auth.json"
+          printf '%s' "${PI_AUTH_JSON}" > "$auth_path"
+          chmod 600 "$auth_path"
+          echo "HARNESS_PI_AUTH_JSON=$auth_path" >> "$GITHUB_ENV"
+
+      - name: Run real pi canary
+        env:
+          HARNESS_REAL_PI_MODEL: ${{ vars.PI_MODEL }}
+          HARNESS_REAL_CANARY_SUMMARY_PATH: ${{ runner.temp }}/real-pi-canary.summary.json
+        run: python3 starter/bin/run_real_canary.py
+
+      - name: Build replay corpus from fresh nightly runs
+        run: |
+          python3 starter/bin/build_replay_corpus.py \
+            --runs-root starter/runs \
+            --out "${{ runner.temp }}/replay-corpus.json" \
+            --limit 12
+
+      - name: Run replay benchmark
+        run: |
+          python3 starter/bin/benchmark_harness.py \
+            --mode replay \
+            --replay-corpus "${{ runner.temp }}/replay-corpus.json" \
+            --replay-runs 6 \
+            --history-dir "${{ runner.temp }}/replay-history" \
+            --out "${{ runner.temp }}/replay-benchmark.json"
+
+      - name: Run generated fault-injection benchmark
+        run: |
+          python3 starter/bin/benchmark_harness.py \
+            --mode fault-injection \
+            --fault-samples 10 \
+            --fault-seed 11 \
+            --fault-corpus-out "${{ runner.temp }}/fault-novel.json" \
+            --out "${{ runner.temp }}/fault-benchmark.json"
+
+      - name: Upload nightly evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-evidence
+          path: |
+            ${{ runner.temp }}/real-pi-canary.summary.json
+            ${{ runner.temp }}/replay-corpus.json
+            ${{ runner.temp }}/replay-benchmark.json
+            ${{ runner.temp }}/fault-benchmark.json
+            ${{ runner.temp }}/fault-novel.json
+            ${{ runner.temp }}/replay-history

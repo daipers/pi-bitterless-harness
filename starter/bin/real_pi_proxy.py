@@ -5,6 +5,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 
 
 def find_task_path(argv: list[str]) -> pathlib.Path | None:
@@ -31,6 +32,16 @@ def main() -> int:
             sentinel.parent.mkdir(parents=True, exist_ok=True)
             sentinel.write_text("failed-once\n", encoding="utf-8")
             return 75
+
+    if mode == "auth-fail":
+        print("authentication failed: token expired", file=sys.stderr)
+        return 77
+
+    if mode == "partial-transcript-hang":
+        print('{"event":"partial","status":"waiting"}')
+        sys.stdout.flush()
+        time.sleep(float(os.environ.get("HARNESS_REAL_PI_PROXY_SLEEP_SECONDS", "5")))
+        return 124
 
     completed = subprocess.run([target_bin, *sys.argv[1:]], check=False)
 

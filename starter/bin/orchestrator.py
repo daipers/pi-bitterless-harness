@@ -2149,7 +2149,7 @@ class Orchestrator:
                 )
 
     def _discover_backlog_exists(self) -> bool:
-        return any(bool(self._discover_model_queue()) or bool(self._discover_score_candidates()))
+        return bool(self._discover_model_queue()) or bool(self._discover_score_candidates())
 
     def run(self) -> int:
         if not self.runs_root.exists():
@@ -2267,7 +2267,7 @@ def _attach_signal_handlers(orchestrator: Orchestrator) -> list[tuple[int, Any]]
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    config = Orchestrator.from_environment()
+    config = Orchestrator.from_environment().config
     if args.runs_root:
         config.runs_root = pathlib.Path(args.runs_root).resolve()
     if args.run_queue_path:

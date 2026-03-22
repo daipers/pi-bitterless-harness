@@ -61,6 +61,18 @@ USAGE = (
 )
 REQUIRED_RUN_TOOLS = ("bash", "python3", "cat", "git")
 BASE_DIRECTORIES = ("outputs", "home", "session", "score")
+PRIMARY_ERROR_CODE_PRECEDENCE = (
+    "cancelled",
+    "guardrail_pre_run_denied",
+    "guardrail_pre_score_dispatch_denied",
+    "contract_invalid",
+    "orchestrator_queue_timeout",
+    "orchestrator_worker_unavailable",
+    "deadline_exceeded",
+    "model_invocation_failed",
+    "result_invalid",
+    "eval_failed",
+)
 
 
 def _to_positive_int(value: str, *, default: int) -> int:
@@ -75,6 +87,38 @@ def _to_positive_int(value: str, *, default: int) -> int:
 
 def usage() -> str:
     return USAGE
+
+
+def split_error_codes(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raw = str(value).strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def unique_codes(*values: Any) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for value in values:
+        for code in split_error_codes(value):
+            if code in seen:
+                continue
+            seen.add(code)
+            normalized.append(code)
+    return normalized
+
+
+def primary_error_code_for_codes(codes: list[str]) -> str | None:
+    if not codes:
+        return None
+    for code in PRIMARY_ERROR_CODE_PRECEDENCE:
+        if code in codes:
+            return code
+    return sorted(codes)[0]
 
 
 def parse_args(
@@ -633,6 +677,11 @@ class RunTaskRunner:
         if self.policy:
             self._write_guardrails_artifact()
         score_payload = read_json(self.run_dir / "score.json") or {}
+        manifest_failure_classifications = unique_codes(
+            score_payload.get("failure_classifications"),
+            error,
+        )
+        primary_error_code = primary_error_code_for_codes(manifest_failure_classifications)
         context_payload = (
             read_json(self.run_dir / self.context_manifest_rel)
             if self.context_enabled == "1" and self.context_manifest_rel
@@ -653,6 +702,8 @@ class RunTaskRunner:
             "state": state,
             "phase": phase_name,
             "error_code": error or None,
+            "primary_error_code": primary_error_code,
+            "failure_classifications": manifest_failure_classifications,
             "run_contract_version": "v1",
             "paths": {
                 "task_md": "task.md",

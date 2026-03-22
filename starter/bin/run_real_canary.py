@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pathlib
 import signal
 import subprocess
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -15,6 +17,34 @@ BIN_DIR = STARTER_ROOT / "bin"
 SCHEMA_TEXT = (STARTER_ROOT / "result.schema.json").read_text(encoding="utf-8").rstrip()
 CHECK_CLAIM = "../tests/fixtures/check_claim.py"
 REAL_PI_PROXY = BIN_DIR / "real_pi_proxy.py"
+
+
+def now_iso() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def git_sha() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return ""
+    return completed.stdout.strip()
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the real pi lifecycle canary.")
+    parser.add_argument(
+        "--summary-path",
+        default=os.environ.get("HARNESS_REAL_CANARY_SUMMARY_PATH"),
+        help="optional explicit output path for the canary summary JSON",
+    )
+    return parser.parse_args(argv)
 
 
 def base_env() -> dict[str, str]:
@@ -240,11 +270,16 @@ def scenario_partial_recovery(env: dict[str, str], model: str) -> dict[str, Any]
     return {"run_dir": str(run_dir), "recovery_entries": recovery_entries}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     env = base_env()
     model = env.get("HARNESS_REAL_PI_MODEL", "")
     summary_name = f"real-canary-{time.strftime('%Y%m%d-%H%M%S')}.summary.json"
-    summary_path = STARTER_ROOT / "runs" / summary_name
+    summary_path = (
+        pathlib.Path(args.summary_path).resolve()
+        if args.summary_path
+        else STARTER_ROOT / "runs" / summary_name
+    )
     scenarios = [
         ("success", scenario_success),
         ("corrupt_result", scenario_corrupt_result),
@@ -256,19 +291,56 @@ def main() -> int:
 
     results: list[dict[str, Any]] = []
     exit_code = 0
+    started_at = now_iso()
+    started_monotonic = time.perf_counter()
     for name, func in scenarios:
+        scenario_started_at = now_iso()
+        scenario_started = time.perf_counter()
         try:
             details = func(env, model)
         except Exception as exc:
             exit_code = 1
-            results.append({"scenario": name, "ok": False, "error": str(exc)})
+            results.append(
+                {
+                    "scenario": name,
+                    "ok": False,
+                    "error": str(exc),
+                    "started_at": scenario_started_at,
+                    "finished_at": now_iso(),
+                    "duration_ms": round((time.perf_counter() - scenario_started) * 1000.0, 2),
+                }
+            )
         else:
-            results.append({"scenario": name, "ok": True, **details})
+            results.append(
+                {
+                    "scenario": name,
+                    "ok": True,
+                    "started_at": scenario_started_at,
+                    "finished_at": now_iso(),
+                    "duration_ms": round((time.perf_counter() - scenario_started) * 1000.0, 2),
+                    **details,
+                }
+            )
 
     summary_path.parent.mkdir(parents=True, exist_ok=True)
+    passed = sum(1 for result in results if result["ok"])
     summary = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "summary_version": "v2",
+        "generated_at": now_iso(),
+        "started_at": started_at,
+        "finished_at": now_iso(),
+        "duration_ms": round((time.perf_counter() - started_monotonic) * 1000.0, 2),
         "supported_pi_version": (REPO_ROOT / "PI_VERSION").read_text(encoding="utf-8").strip(),
+        "model": model or None,
+        "git_sha": git_sha() or os.environ.get("GITHUB_SHA", ""),
+        "git_ref": os.environ.get("GITHUB_REF", ""),
+        "git_ref_name": os.environ.get("GITHUB_REF_NAME", ""),
+        "scenario_totals": {
+            "total": len(results),
+            "passed": passed,
+            "failed": len(results) - passed,
+        },
+        "overall_ok": exit_code == 0,
         "results": results,
     }
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

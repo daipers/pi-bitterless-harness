@@ -285,7 +285,7 @@ python3 starter/bin/analyze_retrieval_benchmarks.py starter/runs/retrieval-lates
 
 ## Real `pi` coverage and canaries
 
-Broad production readiness requires at least one automated path that talks to the real `pi` CLI.
+Operator-controlled production readiness should be justified primarily by recent real-`pi` canary history and replayable production-like evidence, not fixture-only coverage.
 
 Optional real-`pi` pytest coverage:
 
@@ -304,7 +304,22 @@ export HARNESS_REAL_PI_MODEL=anthropic/claude-sonnet-4
 python3 starter/bin/run_real_canary.py
 ```
 
-The canary covers success, forced invalid `result.json`, timeout, interruption, retry, and partial-run recovery. Evidence is written under `starter/runs/`.
+The canary covers success, forced invalid `result.json`, timeout, interruption, retry, and partial-run recovery. Evidence is written under `starter/runs/`, and each canary summary now includes scenario rollups, `PI_VERSION`, model, commit SHA, and referenced run directories.
+
+Build a sanitized replay corpus from real run evidence:
+
+```bash
+python3 starter/bin/build_replay_corpus.py --runs-root starter/runs --out starter/benchmarks/replay-corpus.json
+```
+
+Run replay/load and generated fault-injection benchmarks:
+
+```bash
+python3 starter/bin/benchmark_harness.py --mode replay --replay-corpus starter/benchmarks/replay-corpus.json --history-dir starter/runs --out starter/runs/replay-latest.json
+python3 starter/bin/benchmark_harness.py --mode fault-injection --fault-samples 6 --fault-seed 7 --fault-corpus-out starter/runs/fault-novel.json --out starter/runs/fault-latest.json
+```
+
+For automation-facing failure handling, use `outputs/run_manifest.json.primary_error_code` and `outputs/run_manifest.json.failure_classifications`. The legacy aggregate `error_code` remains for compatibility, and the raw evidence in `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` remains the richer source of truth.
 
 ## Release Gate
 
@@ -327,6 +342,8 @@ CI enforces:
 - release artifact validation
 - changelog/version consistency
 - supported Python + `pi` runtime verification
+- trusted `main` pushes must pass auth-backed real-`pi` tests plus a fresh canary summary
+- `v*` tag promotion must pass `starter/bin/verify_release_evidence.py` against recent successful `main` canary artifacts
 
 See the operator-facing runbook at [docs/operator-runbook.md](./docs/operator-runbook.md) for install, auth, retention, recovery, and canary procedures.
 

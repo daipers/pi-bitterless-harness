@@ -155,6 +155,8 @@ def test_runner_happy_path_records_manifest(isolated_repo: pathlib.Path) -> None
     score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
     assert manifest["state"] == "complete"
     assert manifest["execution"]["profile"] == "strict"
+    assert manifest["primary_error_code"] is None
+    assert manifest["failure_classifications"] == []
     assert score["overall_pass"] is True
     assert score["execution_profile"] == "strict"
 
@@ -262,7 +264,10 @@ def test_runner_invalid_result_is_scored_as_failure(isolated_repo: pathlib.Path)
     completed = run_harness(isolated_repo, run_dir, "invalid_result")
 
     assert completed.returncode == 0
+    manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
     score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+    assert manifest["primary_error_code"] == "result_invalid"
+    assert "result_invalid" in manifest["failure_classifications"]
     assert "result_invalid" in score["failure_classifications"]
 
 

@@ -99,3 +99,99 @@ def test_analyze_retrieval_benchmarks_records_history_and_emits_trend(
     assert analysis_payload["trend"]["history_length"] == 2
     assert "delta_vs_previous" in analysis_payload["trend"]
     assert "prune_candidates" in analysis_payload["latest_analysis"]
+
+
+def test_benchmark_harness_emits_replay_workload_metrics(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    env = os.environ | {"PYTHONPATH": str(starter / "bin")}
+    replay_corpus = starter / "benchmarks" / "replay-corpus.json"
+    history_dir = starter / "runs" / "history"
+    replay_corpus.write_text(
+        json.dumps(
+            [
+                {
+                    "run_id": "replay-success",
+                    "benchmark_labels": ["success"],
+                    "evidence": {"task_excerpt": ["# Task", "Replay success workload"]},
+                },
+                {
+                    "run_id": "replay-invalid",
+                    "benchmark_labels": ["result_invalid"],
+                    "evidence": {"task_excerpt": ["# Task", "Replay invalid result workload"]},
+                },
+                {
+                    "run_id": "replay-retry",
+                    "benchmark_labels": ["retry"],
+                    "evidence": {"task_excerpt": ["# Task", "Replay retry workload"]},
+                },
+            ],
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(starter / "bin" / "benchmark_harness.py"),
+            "--mode",
+            "replay",
+            "--replay-corpus",
+            str(replay_corpus),
+            "--replay-runs",
+            "3",
+            "--history-dir",
+            str(history_dir),
+        ],
+        cwd=starter,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    payload = json.loads(completed.stdout)["replay"]
+    assert payload["corpus_size"] == 3
+    assert payload["sampled_run_count"] == 3
+    assert len(payload["workload_metrics"]) == 2
+    assert payload["workload_metrics"][0]["concurrency"] == 1
+    assert payload["workload_metrics"][1]["concurrency"] == 2
+    assert (history_dir / "replay-benchmark.history.jsonl").exists()
+    assert sorted(history_dir.glob("replay-benchmark-*.summary.json"))
+
+
+def test_benchmark_harness_emits_generated_fault_injection_metrics(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    env = os.environ | {"PYTHONPATH": str(starter / "bin")}
+    novel_out = starter / "runs" / "fault-novel.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(starter / "bin" / "benchmark_harness.py"),
+            "--mode",
+            "fault-injection",
+            "--fault-samples",
+            "4",
+            "--fault-seed",
+            "11",
+            "--fault-corpus-out",
+            str(novel_out),
+        ],
+        cwd=starter,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    payload = json.loads(completed.stdout)["fault_injection"]
+    assert payload["sample_count"] == 4
+    assert payload["seed"] == 11
+    assert len(payload["cases"]) == 4
+    assert novel_out.exists()

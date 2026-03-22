@@ -53,4 +53,18 @@ jobs:
       - name: Run real pi lifecycle canary
         env:
           HARNESS_REAL_PI_MODEL: ${{ vars.PI_MODEL }}
+          HARNESS_REAL_CANARY_SUMMARY_PATH: ${{ runner.temp }}/real-pi-canary.summary.json
         run: python3 starter/bin/run_real_canary.py
+
+      - name: Verify canary summary
+        run: |
+          python3 starter/bin/verify_release_evidence.py \
+            --summary-glob "${{ runner.temp }}/real-pi-canary.summary.json" \
+            --min-runs 1 \
+            --freshness-hours 36
+
+      - name: Upload canary summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-pi-canary-summary
+          path: ${{ runner.temp }}/real-pi-canary.summary.json

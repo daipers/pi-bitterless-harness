@@ -34,13 +34,19 @@ starter/bin/preflight.sh
 starter/bin/build-release-artifacts.sh
 ```
 
-For broad production-readiness, also run:
+For operator-controlled production readiness, also run:
 
 ```bash
 export HARNESS_PI_AUTH_JSON=/absolute/path/to/auth.json
 export HARNESS_REAL_PI_MODEL=anthropic/claude-sonnet-4
 .venv/bin/python -m pytest tests/test_real_pi_integration.py -q
 python3 starter/bin/run_real_canary.py
+```
+
+Treat the recent canary history as the primary promotion signal. Before tagging a release, verify recent successful canary artifacts from `main`:
+
+```bash
+python3 starter/bin/verify_release_evidence.py --summary-glob "starter/runs/real-canary-*.summary.json" --min-runs 2 --freshness-hours 36
 ```
 
 ## Operational defaults
@@ -62,6 +68,13 @@ literal network indicators still require `HARNESS_ALLOW_NETWORK_TASKS=1`.
 - `eval_failed`: eval commands, artifact checks, secret scans, cancellations, or post-run checks failed
 - `model_invocation_failed`: the `pi` invocation exited non-zero or timed out
 - `result_invalid`: `result.json` is missing, unparsable, non-object, or schema-invalid
+
+Automation should read:
+
+- `outputs/run_manifest.json.primary_error_code`
+- `outputs/run_manifest.json.failure_classifications`
+
+The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` when diagnosis needs richer context.
 
 ## Evidence retention and recovery
 
@@ -92,6 +105,30 @@ literal network indicators still require `HARNESS_ALLOW_NETWORK_TASKS=1`.
 - partial-run recovery
 
 It writes a summary JSON file under `starter/runs/real-canary-*.summary.json`.
+
+Each summary includes:
+
+- scenario pass/fail rollups
+- `PI_VERSION`
+- model
+- commit SHA
+- timestamps
+- referenced run directories
+
+Use those summaries to build replay corpora and trend evidence rather than relying only on handcrafted fixtures.
+
+Generate a sanitized replay corpus from recent run evidence:
+
+```bash
+python3 starter/bin/build_replay_corpus.py --runs-root starter/runs --out starter/benchmarks/replay-corpus.json
+```
+
+Run replay/load and generated fault-injection benchmarks:
+
+```bash
+python3 starter/bin/benchmark_harness.py --mode replay --replay-corpus starter/benchmarks/replay-corpus.json --history-dir starter/runs --out starter/runs/replay-latest.json
+python3 starter/bin/benchmark_harness.py --mode fault-injection --fault-samples 6 --fault-seed 7 --fault-corpus-out starter/runs/fault-novel.json --out starter/runs/fault-latest.json
+```
 
 ## Security posture
 
