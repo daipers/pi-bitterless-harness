@@ -20,12 +20,14 @@ Describe the desired outcome in plain language.
 ```bash
 # One command per non-comment line
 # Use plain argv-style commands only.
+# Wrapper forms like `bash -c`, `sh -c`, `python -c`, and `env ... python3 -c` require dangerous-eval opt-in.
 # Avoid pipes, redirects, shell chaining, or networked commands unless you opt in explicitly.
 # Example:
 # python3 -m pytest tests/test_runner_e2e.py -q
 ```
 
 ## Required Artifacts
+# Required artifacts must be relative paths that stay inside this run directory.
 - result.json
 - outputs/run_manifest.json
 

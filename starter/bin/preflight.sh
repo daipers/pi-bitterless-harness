@@ -9,6 +9,7 @@ if [[ -d "$repo_root/.venv/bin" ]]; then
 fi
 
 "$script_dir/check-tools.sh"
+"$script_dir/check-supported-runtime.sh"
 
 for script in "$script_dir"/*.sh; do
   bash -n "$script"

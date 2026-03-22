@@ -33,6 +33,7 @@ version = sys.argv[2]
 tarball = pathlib.Path(sys.argv[3])
 checksum_file = pathlib.Path(sys.argv[4])
 provenance_file = pathlib.Path(sys.argv[5])
+pi_version_file = repo_root / "PI_VERSION"
 
 git_sha = subprocess.run(
     ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
@@ -48,9 +49,11 @@ payload = {
     "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "git_sha": git_sha,
     "python_version": subprocess.run(["python3", "--version"], text=True, capture_output=True, check=False).stdout.strip(),
+    "supported_pi_version": pi_version_file.read_text(encoding="utf-8").strip()
+    if pi_version_file.exists()
+    else None,
 }
 provenance_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
 
 echo "$tarball"
-

@@ -9,7 +9,7 @@ if [[ -d "$repo_root/.venv/bin" ]]; then
 fi
 
 missing=0
-for tool in python3 bash git jq ruff pytest shellcheck bandit pip-audit trivy; do
+for tool in python3 bash git jq pi ruff pytest shellcheck bandit pip-audit trivy; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing required tool: $tool" >&2
     missing=1

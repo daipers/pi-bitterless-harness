@@ -15,7 +15,7 @@ This is a deterministic, file-based harness for running model-assisted tasks thr
 Install pi:
 
 ```bash
-npm install -g @mariozechner/pi-coding-agent
+npm install -g @mariozechner/pi-coding-agent@$(cat PI_VERSION)
 ```
 
 Install local dev/test tooling:
@@ -28,7 +28,24 @@ This creates `.venv/` and installs the Python tooling that `starter/bin/prefligh
 expects. The ship gate automatically prefers `.venv/bin` when it exists, so you do not
 need to activate the virtual environment first.
 
-CI installs the full ship-gate toolchain, including `shellcheck`, `jq`, and `trivy`, before running `starter/bin/preflight.sh`.
+Supported local readiness workflow:
+
+```bash
+starter/bin/setup-dev-env.sh
+starter/bin/check-supported-runtime.sh
+.venv/bin/python -m pytest
+starter/bin/preflight.sh
+```
+
+CI installs the full ship-gate toolchain, including `shellcheck`, `jq`, `trivy`, and the pinned `pi` version from `PI_VERSION`, before running `starter/bin/preflight.sh`.
+
+## Supported runtime policy
+
+- Supported Python runtime for release candidates: `3.12.x` (`.python-version` pins CI to `3.12.9`)
+- Supported `pi` CLI runtime for release candidates: [`PI_VERSION`](../PI_VERSION) currently `0.61.1`
+- Node.js `22` is used in CI to install the supported `pi` CLI package
+
+`starter/bin/check-supported-runtime.sh` is the source-of-truth verifier for the supported runtime policy.
 
 ## Required contract files
 
@@ -37,6 +54,9 @@ CI installs the full ship-gate toolchain, including `shellcheck`, `jq`, and `tri
 - `RUN.template.md`
 - `result.schema.json`
 - `contracts/run-contract-v1.schema.json`
+- `contracts/run-contract-v2.schema.json`
+- `policies/strict.json`
+- `policies/capability.json`
 - `bin/check-run-contract.sh` (must be executable)
 
 ## Quick start
@@ -69,6 +89,15 @@ Optional model override:
 bin/run-task.sh runs/<run-id> anthropic/claude-sonnet-4
 ```
 
+Optional profile selection:
+
+```bash
+bin/new-task.sh --profile capability "investigate prior successful runs"
+bin/run-task.sh --profile capability runs/<run-id>
+```
+
+V2 defaults to the `strict` profile. `capability` keeps the same eval/network policy in this release, but adds explicit retrieval context materialization from prior successful runs.
+
 ## Run directory contract
 
 Each run creates:
@@ -92,20 +121,36 @@ Each run creates:
   - `score/eval-<n>.stderr.log`
 - `home/` (isolated run HOME)
 - `session/` (pi session state)
+- `context/` (capability-profile retrieval context, only when enabled)
+  - `context/retrieval-manifest.json`
+  - `context/retrieval-summary.md`
+  - `context/source-runs/<run-id>/...`
 
 ## Task format
 
 Use `task.template.md` and keep these required sections:
 
 - `## Eval` with a fenced ` ```bash ` block containing one command per non-comment line
-- `## Eval` commands must be plain argv-style commands by default; shell chaining, redirects, blocked programs, and networked commands require explicit opt-in via env flags
-- `## Required Artifacts` bullet list
+- `## Eval` commands must be plain argv-style commands by default; wrapper forms like `bash -c`, `sh -c`, `python -c`, and `env ... python3 -c`, plus shell chaining, redirects, blocked programs, and networked commands, require explicit opt-in via env flags
+- `## Required Artifacts` bullet list using relative paths that resolve inside the run directory
 - `## Result JSON schema (source of truth)` section (auto-injected from `result.schema.json`)
 - `result.template.json` is generated for each run from the same schema
 
 Everything else is for humans and the model.
 
 `parse_task.py` is the canonical parser and returns structured errors plus normalized eval command metadata.
+
+## Execution profiles
+
+- `strict` is the default profile for new V2 runs.
+- `capability` adds explicit retrieval context under `context/` before launch.
+- Existing V1 run directories still execute unchanged; the runner detects the contract version from `run.contract.json`.
+
+Profile precedence at runtime:
+
+1. CLI `--profile`
+2. `run.contract.json.execution_profile`
+3. default `strict`
 
 ## Evaluation behavior
 
@@ -114,16 +159,27 @@ Everything else is for humans and the model.
 - Resolves run state as `new`, `running`, `partial`, or `complete`
 - Probes dependencies (`pi`, `bash`, `python3`, `git`, `cat`) and validates write access before launch
 - Validates `run.contract.json`, `task.md`, and `result.schema.json`
+- Resolves the active execution profile and policy file
+- Materializes retrieval context for V2 capability runs under `context/`
 - Emits structured lifecycle events to `run-events.jsonl`
 - Captures `transcript.jsonl` and `pi.stderr.log`
 - Writes `pi.exit_code.txt`
 - Captures `git.status.txt` and `patch.diff`
 - Runs eval commands from `task.md` sequentially and records pass/fail, duration, and log paths
 - Validates `result.json` against `result.schema.json`, canonicalizes JSON formatting, and records validation findings
-- Scans run artifacts for likely secrets
+- Rejects required artifact declarations that point outside the run directory
+- Scans run artifacts and archived recovery evidence for likely secrets
 - Captures schema snapshot metadata (`result_json_schema` and `result_schema_path|sha256|available`) in `score.json`
 - Emits `outputs/run_manifest.json` with timings, dependency hashes, git SHA, invariants, audit flags, and failure classifications
 - Writes `score.json` with `overall_pass`
+- Records execution profile, policy path, and retrieval provenance in `score.json` and `outputs/run_manifest.json`
+
+Failure classifications currently emitted in `score.json`:
+
+- `contract_invalid`
+- `eval_failed`
+- `model_invocation_failed`
+- `result_invalid`
 
 ### Result JSON examples
 
@@ -180,21 +236,50 @@ Do not merge them.
 
 This harness intentionally avoids copying full global pi settings. It creates an isolated `HOME` and only copies a specific file when `HARNESS_PI_AUTH_JSON` is set.
 
+For broad production-readiness checks, point `HARNESS_PI_AUTH_JSON` at a minimal auth file used only for this harness or CI canary job.
+
 ## Feature Flags
 
 - `HARNESS_STRICT_MODE=1` keeps strict contract and backpressure checks on. This is the default.
 - `HARNESS_ALLOW_DANGEROUS_EVAL=1` allows eval commands that would otherwise be blocked by the default allowlist policy.
-- `HARNESS_ALLOW_NETWORK_TASKS=1` allows eval commands that access the network.
+- `HARNESS_ALLOW_NETWORK_TASKS=1` allows eval commands that access the network, including wrapper payloads with literal network indicators.
 - `HARNESS_FORCE_RERUN=1` reruns a `complete` run directory instead of returning its prior state.
 - `HARNESS_MODEL_TIMEOUT_SECONDS=900` changes the bounded `pi` runtime timeout.
+- `HARNESS_PI_RETRY_COUNT=2` changes the model startup retry budget.
+- `HARNESS_EVAL_TIMEOUT_SECONDS=300` changes the timeout for each eval command.
+
+## Real `pi` coverage and canaries
+
+Broad production readiness requires at least one automated path that talks to the real `pi` CLI.
+
+Optional real-`pi` pytest coverage:
+
+```bash
+export HARNESS_RUN_REAL_PI_TESTS=1
+export HARNESS_PI_AUTH_JSON=/absolute/path/to/auth.json
+export HARNESS_REAL_PI_MODEL=anthropic/claude-sonnet-4
+.venv/bin/python -m pytest tests/test_real_pi_integration.py -q
+```
+
+Lifecycle canary with the real CLI:
+
+```bash
+export HARNESS_PI_AUTH_JSON=/absolute/path/to/auth.json
+export HARNESS_REAL_PI_MODEL=anthropic/claude-sonnet-4
+python3 starter/bin/run_real_canary.py
+```
+
+The canary covers success, forced invalid `result.json`, timeout, interruption, retry, and partial-run recovery. Evidence is written under `starter/runs/`.
 
 ## Release Gate
 
 Use the ship gate before tagging a release:
 
 ```bash
+starter/bin/setup-dev-env.sh
+starter/bin/check-supported-runtime.sh
+.venv/bin/python -m pytest
 starter/bin/preflight.sh
-python3 -m pytest
 starter/bin/build-release-artifacts.sh
 ```
 
@@ -206,6 +291,9 @@ CI enforces:
 - security scans
 - release artifact validation
 - changelog/version consistency
+- supported Python + `pi` runtime verification
+
+See the operator-facing runbook at [docs/operator-runbook.md](./docs/operator-runbook.md) for install, auth, retention, recovery, and canary procedures.
 
 This README is the canonical release readiness document for v1.
 

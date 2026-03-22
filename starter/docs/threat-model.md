@@ -13,12 +13,13 @@
 
 ## Guardrails
 - `run-task.sh` always uses an isolated run `HOME`.
-- Eval commands are parsed into normalized commands, blocked on dangerous patterns by default, and require explicit opt-in for unsafe/network behavior.
-- `score_run.py` scans run artifacts for likely secrets before reporting a clean pass.
+- Eval commands are parsed into normalized commands, wrapper-style shell and interpreter escapes are blocked by default, and explicit opt-in is required for unsafe or networked behavior.
+- Required artifact declarations must stay within the run directory and cannot point at host paths outside the run.
+- `score_run.py` scans current run artifacts and archived recovery evidence for likely secrets before reporting a clean pass.
 - `outputs/run_manifest.json` records contract version, dependency versions, hashes, timing data, and failure classifications.
 - Release artifacts are emitted with detached SHA-256 checksums and provenance JSON.
 
 ## Residual Risk
 - A user can still opt into dangerous eval or network tasks explicitly; this is intentional but auditable through manifest fields and event logs.
+- Once dangerous eval is explicitly enabled, inline interpreter code is still treated as high-risk and should be reviewed like arbitrary local code execution.
 - The harness does not sandbox the model or the shell beyond normal OS permissions, so CI and human review remain part of the safety boundary.
-

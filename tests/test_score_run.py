@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import runpy
 import signal
 import subprocess
 import sys
 
+import pytest
 import score_run
 from harnesslib import default_run_contract
 from score_run import ScoreContext
@@ -60,7 +62,12 @@ python3 ../tests/fixtures/pass_eval.py
 """
 
 
-def make_run_dir(isolated_repo: pathlib.Path) -> pathlib.Path:
+def make_run_dir(
+    isolated_repo: pathlib.Path,
+    *,
+    contract_version: str = "v2",
+    execution_profile: str = "strict",
+) -> pathlib.Path:
     run_dir = isolated_repo / "starter" / "runs" / "score-test"
     (run_dir / "outputs").mkdir(parents=True)
     (run_dir / "score").mkdir()
@@ -72,7 +79,11 @@ def make_run_dir(isolated_repo: pathlib.Path) -> pathlib.Path:
     (run_dir / "result.schema.json").write_text(schema_text, encoding="utf-8")
     (run_dir / "result.template.json").write_text("{}", encoding="utf-8")
     (run_dir / "run.contract.json").write_text(
-        json.dumps(default_run_contract(), indent=2) + "\n",
+        json.dumps(
+            default_run_contract(version=contract_version, execution_profile=execution_profile),
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     return run_dir
@@ -241,6 +252,99 @@ def test_build_context_derives_repo_root_from_run_directory(
     assert context.schema_path == (run_dir / "result.schema.json").resolve()
 
 
+def test_resolve_repo_root_for_non_runs_directory(tmp_path: pathlib.Path) -> None:
+    run_dir = tmp_path / "custom-run"
+    run_dir.mkdir()
+
+    assert score_run.resolve_repo_root(run_dir) == tmp_path.resolve()
+
+
+def test_score_run_metadata_helpers_cover_remaining_path_and_env_branches(
+    isolated_repo: pathlib.Path,
+    monkeypatch,
+) -> None:
+    run_dir = make_run_dir(isolated_repo, execution_profile="capability")
+    context = make_context(run_dir, isolated_repo=isolated_repo)
+    outside_path = (isolated_repo / "outside.txt").resolve()
+
+    assert score_run._relative_to_run_dir(context, None) is None
+    assert score_run._relative_to_run_dir(context, outside_path) == str(outside_path)
+
+    monkeypatch.setenv("HARNESS_CONTEXT_SOURCE_RUN_IDS", "alpha,beta")
+    metadata = score_run._load_execution_metadata(context)
+
+    assert metadata["context_source_run_ids"] == ["alpha", "beta"]
+
+
+def test_collect_evaluations_marks_invalid_task_without_commands(
+    isolated_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    context = make_context(tmp_path, isolated_repo=isolated_repo)
+    (tmp_path / "score").mkdir()
+
+    result = score_run._collect_evaluations(
+        context,
+        {"ok": False, "eval_command_details": []},
+        eval_timeout_seconds=1,
+        allow_dangerous_eval=True,
+        allow_network_tasks=True,
+    )
+
+    assert result.evaluations == ()
+    assert result.failure_classifications == frozenset({"contract_invalid"})
+
+
+def test_check_required_artifacts_rejects_out_of_scope_paths(
+    isolated_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "outputs").mkdir(parents=True)
+    (run_dir / "score").mkdir()
+    (run_dir / "home").mkdir()
+    (run_dir / "session").mkdir()
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    (run_dir / "outside-link.txt").symlink_to(outside)
+
+    result = score_run._check_required_artifacts(
+        make_context(run_dir, isolated_repo=isolated_repo),
+        [str(outside), "../outside.txt", "outside-link.txt"],
+    )
+
+    assert result.failure_classifications == frozenset({"contract_invalid"})
+    assert {item["status"] for item in result.required_artifacts} == {"invalid_out_of_run_scope"}
+    assert all(item["exists"] is False for item in result.required_artifacts)
+
+
+def test_collect_evaluations_defaults_failed_eval_classification(
+    isolated_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    context = make_context(tmp_path, isolated_repo=isolated_repo)
+    (tmp_path / "score").mkdir()
+
+    monkeypatch.setattr(
+        score_run,
+        "run_evaluation",
+        lambda *args, **kwargs: {"passed": False},
+    )
+
+    result = score_run._collect_evaluations(
+        context,
+        {"ok": True, "eval_command_details": [{"argv": ["python3"], "raw": "python3"}]},
+        eval_timeout_seconds=1,
+        allow_dangerous_eval=True,
+        allow_network_tasks=True,
+    )
+
+    assert result.failure_classifications == frozenset({"eval_failed"})
+    assert result.evaluations == ({"passed": False},)
+
+
 def test_score_run_happy_path(isolated_repo: pathlib.Path) -> None:
     run_dir = make_run_dir(isolated_repo)
     (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
@@ -280,6 +384,9 @@ def test_score_run_happy_path(isolated_repo: pathlib.Path) -> None:
     payload = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
     assert payload["overall_pass"] is True
     assert payload["failure_classifications"] == []
+    assert payload["execution_profile"] == "strict"
+    assert payload["policy_path"] == "policies/strict.json"
+    assert payload["retrieval"]["enabled"] is False
 
 
 def test_score_run_reports_invalid_result(isolated_repo: pathlib.Path) -> None:
@@ -308,3 +415,265 @@ def test_score_run_reports_invalid_result(isolated_repo: pathlib.Path) -> None:
 
     payload = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
     assert "result_invalid" in payload["failure_classifications"]
+
+
+def test_validate_result_json_reports_parse_errors_in_process(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "result.json").write_text("{broken\n", encoding="utf-8")
+
+    validation = score_run._validate_result_json(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert validation.result_json_present is True
+    assert validation.result_json_valid_schema is False
+    assert "json parse error:" in validation.result_json_validations[0]["observed"]
+
+
+def test_score_run_reports_missing_result_json(isolated_repo: pathlib.Path) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["result_json_present"] is False
+    assert payload["result_json_valid_schema"] is False
+    assert "result_invalid" in payload["failure_classifications"]
+    assert payload["result_json_validations"][0]["observed"] == "missing file"
+
+
+def test_score_run_reports_non_object_result_json(isolated_repo: pathlib.Path) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "result.json").write_text("[]\n", encoding="utf-8")
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["result_json_present"] is True
+    assert payload["result_json_valid_schema"] is False
+    assert payload["result_json_validations"][0]["observed"] == "list"
+
+
+def test_score_run_secret_findings_fail_score(isolated_repo: pathlib.Path) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "outputs" / "secret.txt").write_text(
+        "OPENAI_API_KEY=" + ("sk-" + "abcdefghijklmnopqrstuvwxyz1234"),
+        encoding="utf-8",
+    )
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["overall_pass"] is False
+    assert "eval_failed" in payload["failure_classifications"]
+    assert payload["secret_scan"]["findings"]
+
+
+def test_discover_secret_scan_paths_excludes_isolated_state(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    visible = run_dir / "outputs" / "claim.txt"
+    visible.write_text("ok\n", encoding="utf-8")
+    hidden_home = run_dir / "home" / "secret.txt"
+    hidden_home.write_text("ignore\n", encoding="utf-8")
+    hidden_session = run_dir / "session" / "session.txt"
+    hidden_session.write_text("ignore\n", encoding="utf-8")
+    recovery_file = run_dir / "recovery" / "recovery.txt"
+    recovery_file.parent.mkdir()
+    recovery_file.write_text("scan me\n", encoding="utf-8")
+
+    candidates = score_run.discover_secret_scan_paths(
+        make_context(run_dir, isolated_repo=isolated_repo)
+    )
+
+    assert visible in candidates
+    assert hidden_home not in candidates
+    assert hidden_session not in candidates
+    assert recovery_file in candidates
+
+
+def test_score_run_recovery_secret_findings_fail_score(isolated_repo: pathlib.Path) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    recovery_secret = run_dir / "recovery" / "secret.txt"
+    recovery_secret.parent.mkdir()
+    recovery_secret.write_text(
+        "OPENAI_API_KEY=" + ("sk-" + "abcdefghijklmnopqrstuvwxyz1234"),
+        encoding="utf-8",
+    )
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["overall_pass"] is False
+    assert "eval_failed" in payload["failure_classifications"]
+    assert any(
+        "recovery/secret.txt" in finding["path"]
+        for finding in payload["secret_scan"]["findings"]
+    )
+
+
+def test_main_writes_partial_payload_when_interrupted(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    context = ScoreContext(
+        task_path=tmp_path / "task.md",
+        run_dir=tmp_path / "run",
+        exit_code_path=tmp_path / "pi.exit_code.txt",
+        out_path=tmp_path / "score.json",
+        schema_path=tmp_path / "result.schema.json",
+        event_log_path=tmp_path / "run-events.jsonl",
+        repo_root=tmp_path,
+    )
+    context.run_dir.mkdir()
+
+    calls: list[bool] = []
+
+    def fake_build_context(_argv: list[str]) -> ScoreContext:
+        return context
+
+    def fake_build_score_payload(
+        _context: ScoreContext,
+        *,
+        cancelled: bool = False,
+    ) -> dict[str, object]:
+        calls.append(cancelled)
+        if not cancelled:
+            raise RuntimeError("boom")
+        return {
+            "overall_pass": False,
+            "overall_error_code": "eval_failed",
+            "failure_classifications": ["eval_failed"],
+            "cancelled": True,
+        }
+
+    monkeypatch.setattr(score_run, "build_context", fake_build_context)
+    monkeypatch.setattr(score_run, "build_score_payload", fake_build_score_payload)
+    monkeypatch.setattr(score_run, "append_event", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        score_run.main(["task.md", "run", "pi.exit_code.txt", "score.json"])
+
+    payload = json.loads(context.out_path.read_text(encoding="utf-8"))
+    captured = capsys.readouterr()
+    assert calls == [False, True]
+    assert payload["interruption"] == "boom"
+    assert str(context.out_path) in captured.out
+
+
+def test_score_run_script_main_entrypoint(
+    isolated_repo: pathlib.Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(pathlib.Path(score_run.__file__).resolve()),
+            str(run_dir / "task.md"),
+            str(run_dir),
+            str(run_dir / "pi.exit_code.txt"),
+            str(run_dir / "score.json"),
+            str(run_dir / "result.schema.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_path(str(pathlib.Path(score_run.__file__).resolve()), run_name="__main__")
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 0
+    assert str(run_dir / "score.json") in captured.out
+
+
+def test_score_run_records_retrieval_provenance(
+    isolated_repo: pathlib.Path,
+    monkeypatch,
+) -> None:
+    run_dir = make_run_dir(isolated_repo, execution_profile="capability")
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "context").mkdir()
+    (run_dir / "context" / "retrieval-manifest.json").write_text(
+        json.dumps({"selected_source_run_ids": ["old-run-1", "old-run-2"]}) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_EXECUTION_PROFILE", "capability")
+    monkeypatch.setenv("HARNESS_POLICY_PATH", "policies/capability.json")
+    monkeypatch.setenv("HARNESS_CONTEXT_ENABLED", "1")
+    monkeypatch.setenv("HARNESS_CONTEXT_MANIFEST_PATH", "context/retrieval-manifest.json")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["execution_profile"] == "capability"
+    assert payload["policy_path"] == "policies/capability.json"
+    assert payload["retrieval"]["enabled"] is True
+    assert payload["retrieval"]["source_run_ids"] == ["old-run-1", "old-run-2"]
+    assert payload["retrieval"]["context_manifest_path"] == "context/retrieval-manifest.json"

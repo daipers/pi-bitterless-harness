@@ -1,0 +1,56 @@
+name: real-pi-canary
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 13 * * *"
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pi
+        run: npm install -g @mariozechner/pi-coding-agent@$(cat PI_VERSION)
+
+      - name: Install Python tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-dev.txt
+
+      - name: Materialize pi auth
+        env:
+          PI_AUTH_JSON: ${{ secrets.PI_AUTH_JSON }}
+        run: |
+          if [[ -z "${PI_AUTH_JSON}" ]]; then
+            echo "missing required PI_AUTH_JSON secret" >&2
+            exit 1
+          fi
+          auth_path="$RUNNER_TEMP/pi-auth.json"
+          printf '%s' "${PI_AUTH_JSON}" > "$auth_path"
+          chmod 600 "$auth_path"
+          echo "HARNESS_PI_AUTH_JSON=$auth_path" >> "$GITHUB_ENV"
+
+      - name: Verify supported runtimes
+        run: starter/bin/check-supported-runtime.sh
+
+      - name: Run real pi integration tests
+        env:
+          HARNESS_RUN_REAL_PI_TESTS: "1"
+          HARNESS_REAL_PI_MODEL: ${{ vars.PI_MODEL }}
+          PYTHONPATH: ${{ github.workspace }}/starter/bin
+        run: python3 -m pytest tests/test_real_pi_integration.py -q
+
+      - name: Run real pi lifecycle canary
+        env:
+          HARNESS_REAL_PI_MODEL: ${{ vars.PI_MODEL }}
+        run: python3 starter/bin/run_real_canary.py

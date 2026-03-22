@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pathlib
+import runpy
 
 import parse_task
+import pytest
 from harnesslib import parse_task_file, parse_task_text
 from hypothesis import given
 from hypothesis import strategies as st
@@ -93,6 +95,28 @@ def test_parse_task_main_usage_error(capsys) -> None:
     assert "usage: parse_task.py" in captured.err
 
 
+def test_parse_task_script_main_entrypoint(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_path = tmp_path / "task.md"
+    task_path.write_text(VALID_TASK, encoding="utf-8")
+
+    monkeypatch.setattr(
+        parse_task.sys,
+        "argv",
+        [str(pathlib.Path(parse_task.__file__).resolve()), str(task_path)],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_path(str(pathlib.Path(parse_task.__file__).resolve()), run_name="__main__")
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 0
+    assert "\"ok\": true" in captured.out
+
+
 def test_parse_task_reports_duplicate_and_unknown_sections() -> None:
     text = VALID_TASK + "\n## Goal\nDuplicate\n\n## Bonus\nUnexpected\n"
 
@@ -119,6 +143,55 @@ def test_parse_task_reports_schema_block_errors() -> None:
     bad_schema = VALID_TASK.replace('"x-interface-version": "v1"', '"x-interface-version": "v2"')
     payload = parse_task_text(bad_schema, source="inline")
     assert "result schema x-interface-version must be v1" in payload["errors"]
+
+
+def test_parse_task_reports_invalid_schema_json() -> None:
+    invalid_schema = VALID_TASK.replace('"type": "object"', '"type": }')
+
+    payload = parse_task_text(invalid_schema, source="inline")
+
+    assert any("result schema JSON is invalid:" in error for error in payload["errors"])
+    assert payload["result_schema_block_present"] is True
+
+
+def test_parse_task_ignores_comments_and_blank_lines_in_eval_block() -> None:
+    text = VALID_TASK.replace(
+        "python3 ../tests/fixtures/pass_eval.py",
+        "\n# comment only\npython3 ../tests/fixtures/pass_eval.py\n\n",
+    )
+
+    payload = parse_task_text(text, source="inline")
+
+    assert payload["ok"] is True
+    assert payload["eval_commands"] == ["python3 ../tests/fixtures/pass_eval.py"]
+
+
+def test_parse_task_requires_exactly_one_eval_block() -> None:
+    zero_blocks = VALID_TASK.replace(
+        "```bash\npython3 ../tests/fixtures/pass_eval.py\n```",
+        "no bash block here",
+    )
+    payload = parse_task_text(zero_blocks, source="inline")
+    assert "Eval section must contain exactly one fenced ```bash block" in payload["errors"]
+
+    multiple_blocks = VALID_TASK.replace(
+        "```bash\npython3 ../tests/fixtures/pass_eval.py\n```",
+        (
+            "```bash\npython3 ../tests/fixtures/pass_eval.py\n```\n\n"
+            "```bash\npython3 ../tests/fixtures/pass_eval.py\n```"
+        ),
+    )
+    payload = parse_task_text(multiple_blocks, source="inline")
+    assert "Eval section must contain exactly one fenced ```bash block" in payload["errors"]
+
+
+def test_parse_task_reports_duplicate_final_section() -> None:
+    text = VALID_TASK + "\n## Goal\nDuplicate at end"
+
+    payload = parse_task_text(text, source="inline")
+
+    assert payload["ok"] is False
+    assert "duplicate section heading: Goal" in payload["errors"]
 
 
 @given(st.text(max_size=400))

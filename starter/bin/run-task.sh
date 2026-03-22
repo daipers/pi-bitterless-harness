@@ -1,8 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+profile_override=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      if [[ $# -lt 2 ]]; then
+        echo "usage: $0 [--profile strict|capability] runs/<run-id> [model-pattern]" >&2
+        exit 2
+      fi
+      profile_override="$2"
+      shift 2
+      ;;
+    --profile=*)
+      profile_override="${1#*=}"
+      shift
+      ;;
+    --help|-h)
+      echo "usage: $0 [--profile strict|capability] runs/<run-id> [model-pattern]" >&2
+      exit 0
+      ;;
+    --*)
+      echo "unknown option: $1" >&2
+      echo "usage: $0 [--profile strict|capability] runs/<run-id> [model-pattern]" >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 runs/<run-id> [model-pattern]" >&2
+  echo "usage: $0 [--profile strict|capability] runs/<run-id> [model-pattern]" >&2
   exit 2
 fi
 
@@ -25,6 +55,15 @@ strict_mode="${HARNESS_STRICT_MODE:-1}"
 force_rerun="${HARNESS_FORCE_RERUN:-0}"
 model_timeout_seconds="${HARNESS_MODEL_TIMEOUT_SECONDS:-900}"
 retry_count="${HARNESS_PI_RETRY_COUNT:-2}"
+
+case "${profile_override:-}" in
+  ""|strict|capability)
+    ;;
+  *)
+    echo "unsupported profile override: $profile_override" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! -d "$run_dir" ]]; then
   echo "run directory not found: $run_dir" >&2
@@ -58,6 +97,14 @@ pi_finished_epoch_ms=""
 score_started_epoch_ms=""
 score_finished_epoch_ms=""
 run_finished_epoch_ms=""
+run_contract_version=""
+execution_profile="strict"
+policy_path="policies/strict.json"
+context_enabled="0"
+context_manifest_rel=""
+context_summary_rel=""
+context_source_run_ids=""
+context_bootstrap_mode="best_effort"
 
 mkdir -p "$run_dir/outputs" "$run_dir/home" "$run_dir/session" "$run_dir/score"
 mkdir -p "$run_dir/home/.pi/agent"
@@ -102,6 +149,10 @@ write_manifest() {
   SCORE_FINISHED_EPOCH_MS="$score_finished_epoch_ms" RUN_FINISHED_EPOCH_MS="$run_finished" \
   PI_BIN="$pi_bin" STRICT_MODE="$strict_mode" FORCE_RERUN="$force_rerun" \
   MODEL_TIMEOUT_SECONDS="$model_timeout_seconds" RETRY_COUNT="$retry_count" \
+  RUN_CONTRACT_VERSION="$run_contract_version" EXECUTION_PROFILE="$execution_profile" \
+  POLICY_PATH="$policy_path" CONTEXT_ENABLED="$context_enabled" \
+  CONTEXT_MANIFEST_REL="$context_manifest_rel" CONTEXT_SUMMARY_REL="$context_summary_rel" \
+  CONTEXT_SOURCE_RUN_IDS="$context_source_run_ids" CONTEXT_BOOTSTRAP_MODE="$context_bootstrap_mode" \
   PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
 from __future__ import annotations
 
@@ -228,6 +279,20 @@ manifest = {
         "retry_count": int(os.environ["RETRY_COUNT"]),
         "score_failure_classifications": score_payload.get("failure_classifications", []),
     },
+    "execution": {
+        "contract_version": os.environ["RUN_CONTRACT_VERSION"] or None,
+        "profile": os.environ["EXECUTION_PROFILE"],
+        "policy_path": os.environ["POLICY_PATH"],
+    },
+    "context": {
+        "enabled": os.environ["CONTEXT_ENABLED"] == "1",
+        "manifest_path": os.environ["CONTEXT_MANIFEST_REL"] or None,
+        "summary_path": os.environ["CONTEXT_SUMMARY_REL"] or None,
+        "source_run_ids": [
+            item for item in os.environ["CONTEXT_SOURCE_RUN_IDS"].split(",") if item
+        ],
+        "bootstrap_mode": os.environ["CONTEXT_BOOTSTRAP_MODE"] or None,
+    },
 }
 write_json(manifest_path, manifest)
 PY
@@ -343,9 +408,36 @@ from harnesslib import default_run_contract, write_json
 import pathlib
 import sys
 
-write_json(pathlib.Path(sys.argv[1]), default_run_contract())
+write_json(pathlib.Path(sys.argv[1]), default_run_contract(version="v2", execution_profile="strict"))
 PY
 fi
+
+execution_settings=()
+while IFS= read -r line; do
+  execution_settings+=("$line")
+done < <(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$run_contract_path" "$profile_override" <<'PY'
+import pathlib
+import sys
+
+from harnesslib import load_run_contract, resolve_execution_settings
+
+run_contract = load_run_contract(pathlib.Path(sys.argv[1]))
+profile_override = sys.argv[2] or None
+settings = resolve_execution_settings(run_contract, profile_override=profile_override)
+print(settings["run_contract_version"])
+print(settings["execution_profile"])
+print(settings["policy_path"])
+print("1" if settings["retrieval_enabled"] else "0")
+print(settings["context_manifest_path"])
+print(settings["context_summary_path"])
+PY
+)
+run_contract_version="${execution_settings[0]:-}"
+execution_profile="${execution_settings[1]:-strict}"
+policy_path="${execution_settings[2]:-policies/strict.json}"
+context_enabled="${execution_settings[3]:-0}"
+context_manifest_rel="${execution_settings[4]:-context/retrieval-manifest.json}"
+context_summary_rel="${execution_settings[5]:-context/retrieval-summary.md}"
 
 for exe in bash python3 cat git; do
   if ! command -v "$exe" >/dev/null 2>&1; then
@@ -398,9 +490,29 @@ if [[ -n "${HARNESS_PI_AUTH_JSON:-}" ]]; then
   cp "$HARNESS_PI_AUTH_JSON" "$run_dir/home/.pi/agent/auth.json"
 fi
 
+if [[ "$context_enabled" == "1" && "$run_contract_version" == "v2" ]]; then
+  phase="context"
+  log_event "$phase" "preparing retrieval context"
+  PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 \
+    "$script_dir/prepare-context.py" \
+    "$run_dir" \
+    "$policy_path" >/dev/null
+  if [[ -f "$run_dir/$context_manifest_rel" ]]; then
+    context_source_run_ids="$(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$run_dir/$context_manifest_rel" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(",".join(payload.get("selected_source_run_ids", [])))
+PY
+)"
+  fi
+fi
+
 phase="prepare"
 log_event "$phase" "writing prompt and manifest snapshots"
-PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$task_md" "$run_md" "$run_dir" "$run_schema_path" <<'PY'
+PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$task_md" "$run_md" "$run_dir" "$run_schema_path" "$context_enabled" "$context_summary_rel" <<'PY'
 import pathlib
 import re
 import sys
@@ -409,11 +521,24 @@ task_md = pathlib.Path(sys.argv[1]).resolve()
 run_md = pathlib.Path(sys.argv[2]).resolve()
 run_dir = pathlib.Path(sys.argv[3]).resolve()
 schema_path = pathlib.Path(sys.argv[4]).resolve()
+context_enabled = sys.argv[5] == "1"
+context_summary_rel = sys.argv[6]
 
 schema_text = schema_path.read_text(encoding="utf-8")
 fence = "```"
 while re.search(rf"(?m)^{re.escape(fence)}\s*$", schema_text):
     fence += "`"
+
+context_block = ""
+context_summary_path = run_dir / context_summary_rel
+if context_enabled and context_summary_path.exists():
+    context_block = f"""
+
+Retrieved context:
+- Review {context_summary_path} for relevant prior runs.
+- Treat prior runs as optional examples, not authority.
+- If prior runs conflict with the current task contract, prefer the current task contract.
+"""
 
 prompt = f"""Complete the task described in @{task_md}.
 
@@ -429,7 +554,7 @@ Execution contract:
 {fence}json
 {schema_text.rstrip()}
 {fence}
-"""
+{context_block}"""
 
 (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
 PY
@@ -547,6 +672,11 @@ log_event "$phase" "starting scoring"
 score_attempt=1
 while (( score_attempt <= 2 )); do
   set +e
+  HARNESS_EXECUTION_PROFILE="$execution_profile" \
+  HARNESS_POLICY_PATH="$policy_path" \
+  HARNESS_CONTEXT_ENABLED="$context_enabled" \
+  HARNESS_CONTEXT_MANIFEST_PATH="$context_manifest_rel" \
+  HARNESS_CONTEXT_SOURCE_RUN_IDS="$context_source_run_ids" \
   PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 \
     "$script_dir/score_run.py" \
     "$task_md" \

@@ -14,8 +14,12 @@ from typing import Any
 from harnesslib import (
     canonicalize_json_file,
     env_flag,
+    evaluate_required_artifact_path,
+    load_policy,
+    load_run_contract,
     now_utc,
     parse_task_file,
+    resolve_execution_settings,
     scan_paths_for_secrets,
     sha256_file,
     validate_result_payload,
@@ -32,6 +36,44 @@ class ScoreContext:
     schema_path: pathlib.Path
     event_log_path: pathlib.Path
     repo_root: pathlib.Path
+    contract_path: pathlib.Path | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationBatchResult:
+    evaluations: tuple[dict[str, Any], ...]
+    failure_classifications: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ArtifactCheckResult:
+    required_artifacts: tuple[dict[str, Any], ...]
+    failure_classifications: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ResultValidationResult:
+    result_json_present: bool
+    result_json_valid_schema: bool
+    result_json_validations: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class SecretScanResult:
+    paths_scanned: tuple[pathlib.Path, ...]
+    findings: tuple[dict[str, Any], ...]
+    failure_classifications: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ScoreAssemblyInput:
+    parsed_task: dict[str, Any]
+    evaluations: EvaluationBatchResult
+    artifacts: ArtifactCheckResult
+    pi_exit_code: int
+    result_validation: ResultValidationResult
+    secret_scan: SecretScanResult
+    cancelled: bool
 
 
 def usage() -> None:
@@ -62,6 +104,7 @@ def build_context(argv: list[str]) -> ScoreContext:
             argv[5] if len(argv) == 6 else (run_dir / "run-events.jsonl")
         ).resolve(),
         repo_root=resolve_repo_root(run_dir),
+        contract_path=(run_dir / "run.contract.json").resolve(),
     )
 
 
@@ -106,16 +149,71 @@ def load_json(path: pathlib.Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _relative_to_run_dir(context: ScoreContext, path: pathlib.Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(context.run_dir.resolve()))
+    except Exception:
+        return str(path)
+
+
+def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
+    contract_path = context.contract_path or (context.run_dir / "run.contract.json")
+    run_contract = (
+        load_run_contract(contract_path)
+        if contract_path.exists()
+        else {"run_contract_version": "v1"}
+    )
+    profile_override = os.environ.get("HARNESS_EXECUTION_PROFILE") or None
+    settings = resolve_execution_settings(run_contract, profile_override=profile_override)
+    policy_path = os.environ.get("HARNESS_POLICY_PATH") or settings["policy_path"]
+    policy = load_policy(policy_path, repo_root=context.repo_root)
+
+    manifest_path_setting = os.environ.get("HARNESS_CONTEXT_MANIFEST_PATH") or settings[
+        "context_manifest_path"
+    ]
+    manifest_path = context.run_dir / manifest_path_setting
+    source_run_ids: list[str] = []
+    if os.environ.get("HARNESS_CONTEXT_SOURCE_RUN_IDS"):
+        source_run_ids = [
+            item for item in os.environ["HARNESS_CONTEXT_SOURCE_RUN_IDS"].split(",") if item
+        ]
+    elif manifest_path.exists():
+        manifest_payload = load_json(manifest_path)
+        if isinstance(manifest_payload, dict):
+            source_run_ids = list(manifest_payload.get("selected_source_run_ids", []))
+
+    context_enabled_env = os.environ.get("HARNESS_CONTEXT_ENABLED")
+    if context_enabled_env is None:
+        context_enabled = bool(settings["retrieval_enabled"])
+    else:
+        context_enabled = context_enabled_env not in {"", "0", "false", "False"}
+
+    return {
+        "run_contract_version": settings["run_contract_version"],
+        "execution_profile": settings["execution_profile"],
+        "policy": policy,
+        "policy_path": (
+            settings["policy_path"]
+            if os.environ.get("HARNESS_POLICY_PATH") is None
+            else os.environ["HARNESS_POLICY_PATH"]
+        ),
+        "context_enabled": context_enabled,
+        "context_manifest_path": manifest_path if context_enabled else None,
+        "context_summary_path": (
+            context.run_dir / settings["context_summary_path"] if context_enabled else None
+        ),
+        "context_source_run_ids": source_run_ids,
+    }
+
+
 def discover_secret_scan_paths(context: ScoreContext) -> list[pathlib.Path]:
     candidates: list[pathlib.Path] = []
     for child in context.run_dir.rglob("*"):
         if child.is_dir():
             continue
-        if (
-            "home" in child.parts
-            or "session" in child.parts
-            or "recovery" in child.parts
-        ):
+        if any(part in {"home", "session"} for part in child.parts):
             continue
         candidates.append(child)
     return candidates
@@ -263,27 +361,76 @@ def _read_pi_exit_code(exit_code_path: pathlib.Path) -> int:
         return 1
 
 
-def _required_artifact_status(
+def _collect_evaluations(
+    context: ScoreContext,
+    parsed_task: dict[str, Any],
+    *,
+    eval_timeout_seconds: int,
+    allow_dangerous_eval: bool,
+    allow_network_tasks: bool,
+) -> EvaluationBatchResult:
+    evaluations: list[dict[str, Any]] = []
+    failure_classifications: set[str] = set()
+    if not parsed_task["ok"]:
+        failure_classifications.add("contract_invalid")
+
+    score_dir = context.run_dir / "score"
+    for index, detail in enumerate(parsed_task["eval_command_details"], start=1):
+        evaluation = run_evaluation(
+            context,
+            detail,
+            score_dir,
+            index,
+            eval_timeout_seconds=eval_timeout_seconds,
+            allow_dangerous_eval=allow_dangerous_eval,
+            allow_network_tasks=allow_network_tasks,
+        )
+        evaluations.append(evaluation)
+        if not evaluation["passed"]:
+            failure_classifications.add(evaluation.get("failure_classification", "eval_failed"))
+
+    return EvaluationBatchResult(
+        evaluations=tuple(evaluations),
+        failure_classifications=frozenset(failure_classifications),
+    )
+
+
+def _check_required_artifacts(
     context: ScoreContext, required_paths: list[str]
-) -> tuple[list[dict[str, Any]], set[str]]:
+) -> ArtifactCheckResult:
     payload: list[dict[str, Any]] = []
     failure_classifications: set[str] = set()
     for rel_path in required_paths:
-        candidate = pathlib.Path(rel_path)
-        exists = (
-            candidate.exists()
-            if candidate.is_absolute()
-            else (context.run_dir / candidate).exists()
+        validated = evaluate_required_artifact_path(context.run_dir, rel_path)
+        if not validated["valid"]:
+            payload.append(
+                {
+                    "path": rel_path,
+                    "exists": False,
+                    "status": validated["status"],
+                    "reason": validated["reason"],
+                }
+            )
+            failure_classifications.add("contract_invalid")
+            continue
+
+        exists = (context.run_dir / pathlib.Path(rel_path)).exists()
+        payload.append(
+            {
+                "path": rel_path,
+                "exists": exists,
+                "status": "present" if exists else "missing",
+            }
         )
-        payload.append({"path": rel_path, "exists": exists})
         if not exists:
             failure_classifications.add("eval_failed")
-    return payload, failure_classifications
+    return ArtifactCheckResult(
+        required_artifacts=tuple(payload),
+        failure_classifications=frozenset(failure_classifications),
+    )
 
 
-def _result_validation_payload(
-    context: ScoreContext,
-) -> tuple[bool, bool, list[dict[str, Any]]]:
+def _validate_result_json(context: ScoreContext) -> ResultValidationResult:
     result_json_path = context.run_dir / "result.json"
     result_json_present = result_json_path.exists()
     result_json_validations: list[dict[str, Any]] = []
@@ -323,16 +470,95 @@ def _result_validation_payload(
             }
         )
 
-    return result_json_present, len(result_json_validations) == 0, result_json_validations
+    return ResultValidationResult(
+        result_json_present=result_json_present,
+        result_json_valid_schema=len(result_json_validations) == 0,
+        result_json_validations=tuple(result_json_validations),
+    )
+
+
+def _scan_for_secrets(context: ScoreContext) -> SecretScanResult:
+    paths_scanned = tuple(discover_secret_scan_paths(context))
+    findings = tuple(scan_paths_for_secrets(list(paths_scanned)))
+    failure_classifications = frozenset({"eval_failed"} if findings else set())
+    return SecretScanResult(
+        paths_scanned=paths_scanned,
+        findings=findings,
+        failure_classifications=failure_classifications,
+    )
+
+
+def _collect_failure_classifications(inputs: ScoreAssemblyInput) -> set[str]:
+    failure_classifications = set(inputs.evaluations.failure_classifications)
+    failure_classifications.update(inputs.artifacts.failure_classifications)
+    failure_classifications.update(inputs.secret_scan.failure_classifications)
+
+    if inputs.pi_exit_code != 0:
+        failure_classifications.add("model_invocation_failed")
+    if not inputs.result_validation.result_json_valid_schema:
+        failure_classifications.add("result_invalid")
+    if inputs.cancelled:
+        failure_classifications.add("eval_failed")
+
+    return failure_classifications
+
+
+def _assemble_score_payload(
+    context: ScoreContext,
+    inputs: ScoreAssemblyInput,
+    *,
+    execution_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    failure_classifications = _collect_failure_classifications(inputs)
+    overall_pass = len(failure_classifications) == 0
+    overall_error_code = "none" if overall_pass else ",".join(sorted(failure_classifications))
+
+    return {
+        "pi_exit_code": inputs.pi_exit_code,
+        "result_json_present": inputs.result_validation.result_json_present,
+        "result_json_valid_minimal": inputs.result_validation.result_json_valid_schema,
+        "result_json_valid_schema": inputs.result_validation.result_json_valid_schema,
+        "result_json_validations": list(inputs.result_validation.result_json_validations),
+        "result_json_schema": {
+            "schema_path": str(context.schema_path),
+            "schema_available": context.schema_path.is_file(),
+            "schema_sha256": sha256_file(context.schema_path),
+        },
+        "evaluations": list(inputs.evaluations.evaluations),
+        "required_artifacts": list(inputs.artifacts.required_artifacts),
+        "task_parse": {
+            "ok": inputs.parsed_task["ok"],
+            "errors": inputs.parsed_task["errors"],
+            "dangerous_eval_commands": inputs.parsed_task["dangerous_eval_commands"],
+        },
+        "secret_scan": {
+            "paths_scanned": len(inputs.secret_scan.paths_scanned),
+            "findings": list(inputs.secret_scan.findings),
+        },
+        "execution_profile": execution_metadata["execution_profile"],
+        "policy_path": execution_metadata["policy_path"],
+        "retrieval": {
+            "enabled": execution_metadata["context_enabled"],
+            "source_run_ids": list(execution_metadata["context_source_run_ids"]),
+            "context_manifest_path": _relative_to_run_dir(
+                context, execution_metadata["context_manifest_path"]
+            ),
+        },
+        "failure_classifications": sorted(failure_classifications),
+        "overall_error_code": overall_error_code,
+        "overall_pass": overall_pass,
+        "cancelled": inputs.cancelled,
+    }
 
 
 def build_score_payload(context: ScoreContext, *, cancelled: bool = False) -> dict[str, Any]:
     score_dir = context.run_dir / "score"
     score_dir.mkdir(parents=True, exist_ok=True)
 
-    parsed_task = parse_task_file(context.task_path)
-    allow_dangerous_eval = env_flag("HARNESS_ALLOW_DANGEROUS_EVAL", default=False)
-    allow_network_tasks = env_flag("HARNESS_ALLOW_NETWORK_TASKS", default=False)
+    execution_metadata = _load_execution_metadata(context)
+    parsed_task = parse_task_file(context.task_path, eval_policy=execution_metadata["policy"])
+    allow_dangerous_eval = env_flag(execution_metadata["policy"]["opt_in_env"], default=False)
+    allow_network_tasks = env_flag(execution_metadata["policy"]["allow_network_env"], default=False)
     eval_timeout_seconds = int(os.environ.get("HARNESS_EVAL_TIMEOUT_SECONDS", "300"))
 
     append_event(
@@ -342,89 +568,39 @@ def build_score_payload(context: ScoreContext, *, cancelled: bool = False) -> di
         extra={
             "allow_dangerous_eval": allow_dangerous_eval,
             "allow_network_tasks": allow_network_tasks,
+            "execution_profile": execution_metadata["execution_profile"],
         },
     )
 
-    evaluations: list[dict[str, Any]] = []
-    failure_classifications: set[str] = set()
-    if not parsed_task["ok"]:
-        failure_classifications.add("contract_invalid")
-
-    for index, detail in enumerate(parsed_task["eval_command_details"], start=1):
-        evaluation = run_evaluation(
-            context,
-            detail,
-            score_dir,
-            index,
-            eval_timeout_seconds=eval_timeout_seconds,
-            allow_dangerous_eval=allow_dangerous_eval,
-            allow_network_tasks=allow_network_tasks,
-        )
-        evaluations.append(evaluation)
-        if not evaluation["passed"]:
-            failure_classifications.add(evaluation.get("failure_classification", "eval_failed"))
-
-    required_artifacts, artifact_failures = _required_artifact_status(
-        context, parsed_task["required_artifacts"]
+    evaluations = _collect_evaluations(
+        context,
+        parsed_task,
+        eval_timeout_seconds=eval_timeout_seconds,
+        allow_dangerous_eval=allow_dangerous_eval,
+        allow_network_tasks=allow_network_tasks,
     )
-    failure_classifications.update(artifact_failures)
-
-    pi_exit_code = _read_pi_exit_code(context.exit_code_path)
-    if pi_exit_code != 0:
-        failure_classifications.add("model_invocation_failed")
-
-    (
-        result_json_present,
-        result_json_valid_schema,
-        result_json_validations,
-    ) = _result_validation_payload(context)
-    if not result_json_valid_schema:
-        failure_classifications.add("result_invalid")
-
-    secret_scan_paths = discover_secret_scan_paths(context)
-    secret_findings = scan_paths_for_secrets(secret_scan_paths)
-    if secret_findings:
-        failure_classifications.add("eval_failed")
-
-    if cancelled:
-        failure_classifications.add("eval_failed")
-
-    overall_pass = len(failure_classifications) == 0
-    overall_error_code = "none" if overall_pass else ",".join(sorted(failure_classifications))
-
-    payload = {
-        "pi_exit_code": pi_exit_code,
-        "result_json_present": result_json_present,
-        "result_json_valid_minimal": result_json_valid_schema,
-        "result_json_valid_schema": result_json_valid_schema,
-        "result_json_validations": result_json_validations,
-        "result_json_schema": {
-            "schema_path": str(context.schema_path),
-            "schema_available": context.schema_path.is_file(),
-            "schema_sha256": sha256_file(context.schema_path),
-        },
-        "evaluations": evaluations,
-        "required_artifacts": required_artifacts,
-        "task_parse": {
-            "ok": parsed_task["ok"],
-            "errors": parsed_task["errors"],
-            "dangerous_eval_commands": parsed_task["dangerous_eval_commands"],
-        },
-        "secret_scan": {
-            "paths_scanned": len(secret_scan_paths),
-            "findings": secret_findings,
-        },
-        "failure_classifications": sorted(failure_classifications),
-        "overall_error_code": overall_error_code,
-        "overall_pass": overall_pass,
-        "cancelled": cancelled,
-    }
+    artifacts = _check_required_artifacts(context, parsed_task["required_artifacts"])
+    result_validation = _validate_result_json(context)
+    secret_scan = _scan_for_secrets(context)
+    payload = _assemble_score_payload(
+        context,
+        ScoreAssemblyInput(
+            parsed_task=parsed_task,
+            evaluations=evaluations,
+            artifacts=artifacts,
+            pi_exit_code=_read_pi_exit_code(context.exit_code_path),
+            result_validation=result_validation,
+            secret_scan=secret_scan,
+            cancelled=cancelled,
+        ),
+        execution_metadata=execution_metadata,
+    )
     append_event(
         context,
         "score",
         "score generation complete",
-        error_code="" if overall_pass else overall_error_code,
-        extra={"overall_pass": overall_pass},
+        error_code="" if payload["overall_pass"] else payload["overall_error_code"],
+        extra={"overall_pass": payload["overall_pass"]},
     )
     return payload
 

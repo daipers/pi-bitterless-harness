@@ -1,15 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+profile="strict"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      if [[ $# -lt 2 ]]; then
+        echo "usage: $0 [--profile strict|capability] \"short task title\"" >&2
+        exit 2
+      fi
+      profile="$2"
+      shift 2
+      ;;
+    --profile=*)
+      profile="${1#*=}"
+      shift
+      ;;
+    --help|-h)
+      echo "usage: $0 [--profile strict|capability] \"short task title\"" >&2
+      exit 0
+      ;;
+    --*)
+      echo "unknown option: $1" >&2
+      echo "usage: $0 [--profile strict|capability] \"short task title\"" >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 \"short task title\"" >&2
+  echo "usage: $0 [--profile strict|capability] \"short task title\"" >&2
   exit 2
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 schema_source="$repo_root/result.schema.json"
-contract_source="$repo_root/contracts/run-contract-v1.schema.json"
+contract_source="$repo_root/contracts/run-contract-v2.schema.json"
 title="$*"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 slug="$(printf '%s' "$title" \
@@ -139,12 +170,15 @@ write_json(pathlib.Path(sys.argv[1]), make_result_template())
 PY
 fi
 
-PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$run_contract_path" <<'PY'
+PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$run_contract_path" "$profile" <<'PY'
 from harnesslib import default_run_contract, write_json
 import pathlib
 import sys
 
-write_json(pathlib.Path(sys.argv[1]), default_run_contract())
+write_json(
+    pathlib.Path(sys.argv[1]),
+    default_run_contract(version="v2", execution_profile=sys.argv[2]),
+)
 PY
 
 if [[ -f "$contract_source" ]]; then
@@ -179,3 +213,11 @@ task_path.write_text(task_text, encoding="utf-8")
 PY
 
 echo "runs/${run_id}"
+case "$profile" in
+  strict|capability)
+    ;;
+  *)
+    echo "unsupported profile: $profile" >&2
+    exit 2
+    ;;
+esac

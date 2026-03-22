@@ -4,7 +4,7 @@ addopts = [
   "--cov=parse_task",
   "--cov=score_run",
   "--cov-report=term-missing",
-  "--cov-fail-under=90",
+  "--cov-fail-under=93",
 ]
 testpaths = ["tests"]
 
