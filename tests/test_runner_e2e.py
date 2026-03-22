@@ -227,8 +227,20 @@ def test_runner_profile_override_capability_materializes_context(
     assert "context/retrieval-summary.md" in prompt_text
     assert manifest["execution"]["profile"] == "capability"
     assert manifest["context"]["enabled"] is True
+    assert manifest["context"]["bootstrap_mode"] == "cold_build"
+    assert manifest["context"]["candidate_run_count"] >= 1
+    assert manifest["context"]["eligible_run_count"] >= 1
+    assert manifest["context"]["selected_count"] >= 1
+    assert manifest["context"]["ranking_latency_ms"] >= 0
+    assert manifest["context"]["artifact_bytes_copied"] >= 0
     assert score["execution_profile"] == "capability"
     assert score["retrieval"]["enabled"] is True
+    assert score["retrieval"]["index_mode"] == "cold_build"
+    assert score["retrieval"]["candidate_run_count"] >= 1
+    assert score["retrieval"]["eligible_run_count"] >= 1
+    assert score["retrieval"]["selected_count"] >= 1
+    assert score["retrieval"]["ranking_latency_ms"] >= 0
+    assert score["retrieval"]["artifact_bytes_copied"] >= 0
     assert "20260320-000000-prior-success" in retrieval_manifest["selected_source_run_ids"]
 
 

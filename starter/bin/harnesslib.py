@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shlex
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,9 +32,12 @@ TASK_OPTIONAL_SECTIONS = {"Notes"}
 DEFAULT_RETRIEVAL_CONFIG = {
     "enabled": False,
     "source": "prior_runs",
+    "strategy": "hybrid_v1",
     "max_source_runs": 3,
+    "max_candidates": 25,
     "max_artifacts_per_run": 3,
     "max_artifact_bytes": 65536,
+    "artifact_selection": "evidence_first",
 }
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 NETWORK_TOKEN_RE = re.compile(r"\b(?:curl|nc|ping|scp|ssh|telnet|wget)\b")
@@ -325,15 +329,26 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
     if not isinstance(retrieval, dict):
         errors.append("retrieval must be an object")
     else:
-        for key in DEFAULT_RETRIEVAL_CONFIG:
+        for key in ["enabled", "source", "max_source_runs", "max_artifacts_per_run", "max_artifact_bytes"]:
             if key not in retrieval:
                 errors.append(f"missing retrieval field: {key}")
         if retrieval.get("source") != DEFAULT_RETRIEVAL_CONFIG["source"]:
             errors.append("retrieval.source must be 'prior_runs'")
+        if "strategy" in retrieval and retrieval["strategy"] != DEFAULT_RETRIEVAL_CONFIG["strategy"]:
+            errors.append("retrieval.strategy must be 'hybrid_v1'")
+        if (
+            "artifact_selection" in retrieval
+            and retrieval["artifact_selection"] != DEFAULT_RETRIEVAL_CONFIG["artifact_selection"]
+        ):
+            errors.append("retrieval.artifact_selection must be 'evidence_first'")
         for key in ["max_source_runs", "max_artifacts_per_run", "max_artifact_bytes"]:
             value = retrieval.get(key)
             if not isinstance(value, int) or value < 1:
                 errors.append(f"retrieval.{key} must be a positive integer")
+        if "max_candidates" in retrieval:
+            value = retrieval.get("max_candidates")
+            if not isinstance(value, int) or value < 1:
+                errors.append("retrieval.max_candidates must be a positive integer")
         if "enabled" in retrieval and not isinstance(retrieval["enabled"], bool):
             errors.append("retrieval.enabled must be a boolean")
     return errors
@@ -422,6 +437,22 @@ def _split_sections(text: str) -> tuple[list[str], dict[str, str], list[str]]:
 
     _commit_section(current, lines, sections=sections, order=order, duplicates=duplicates)
     return order, sections, duplicates
+
+
+def _extract_task_title(text: str) -> str:
+    saw_task_heading = False
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not saw_task_heading:
+            if re.match(r"^#\s+Task\s*$", stripped):
+                saw_task_heading = True
+            continue
+        if not stripped:
+            continue
+        if stripped.startswith("## "):
+            break
+        return stripped
+    return ""
 
 
 def _extract_json_block(section_text: str) -> tuple[str | None, str | None]:
@@ -648,6 +679,7 @@ def parse_task_text(
         "ok": len(errors) == 0,
         "source": source,
         "task_heading_present": has_task_heading,
+        "task_title": _extract_task_title(text),
         "section_order": section_order,
         "sections": sections,
         "missing_sections": missing_sections,
@@ -752,14 +784,20 @@ def scan_text_for_secrets(text: str) -> list[dict[str, Any]]:
 
 
 def scan_paths_for_secrets(paths: list[pathlib.Path]) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    for path in paths:
+    def scan_path(path: pathlib.Path) -> list[dict[str, Any]]:
         if not path.exists() or not path.is_file():
-            continue
+            return []
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
-            continue
+            return []
+        path_findings: list[dict[str, Any]] = []
         for finding in scan_text_for_secrets(text):
-            findings.append({"path": str(path), **finding})
-    return findings
+            path_findings.append({"path": str(path), **finding})
+        return path_findings
+
+    findings: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(paths)))) as executor:
+        for path_findings in executor.map(scan_path, paths):
+            findings.extend(path_findings)
+    return sorted(findings, key=lambda item: (str(item["path"]), str(item["pattern"])))

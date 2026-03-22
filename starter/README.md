@@ -161,6 +161,7 @@ Profile precedence at runtime:
 - Validates `run.contract.json`, `task.md`, and `result.schema.json`
 - Resolves the active execution profile and policy file
 - Materializes retrieval context for V2 capability runs under `context/`
+  - Reuses a derived retrieval index under `runs/.index/retrieval-v1/` when available
 - Emits structured lifecycle events to `run-events.jsonl`
 - Captures `transcript.jsonl` and `pi.stderr.log`
 - Writes `pi.exit_code.txt`
@@ -168,7 +169,7 @@ Profile precedence at runtime:
 - Runs eval commands from `task.md` sequentially and records pass/fail, duration, and log paths
 - Validates `result.json` against `result.schema.json`, canonicalizes JSON formatting, and records validation findings
 - Rejects required artifact declarations that point outside the run directory
-- Scans run artifacts and archived recovery evidence for likely secrets
+- Scans current-run evidence roots plus archived recovery evidence for likely secrets
 - Captures schema snapshot metadata (`result_json_schema` and `result_schema_path|sha256|available`) in `score.json`
 - Emits `outputs/run_manifest.json` with timings, dependency hashes, git SHA, invariants, audit flags, and failure classifications
 - Writes `score.json` with `overall_pass`
@@ -247,6 +248,20 @@ For broad production-readiness checks, point `HARNESS_PI_AUTH_JSON` at a minimal
 - `HARNESS_MODEL_TIMEOUT_SECONDS=900` changes the bounded `pi` runtime timeout.
 - `HARNESS_PI_RETRY_COUNT=2` changes the model startup retry budget.
 - `HARNESS_EVAL_TIMEOUT_SECONDS=300` changes the timeout for each eval command.
+
+## Retrieval Index Utility
+
+Rebuild the derived retrieval index at any time without modifying run artifacts:
+
+```bash
+python3 starter/bin/rebuild_retrieval_index.py
+```
+
+Benchmark the warm-reuse path separately from the general runner:
+
+```bash
+python3 starter/bin/benchmark_harness.py --mode retrieval
+```
 
 ## Real `pi` coverage and canaries
 

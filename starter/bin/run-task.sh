@@ -104,7 +104,7 @@ context_enabled="0"
 context_manifest_rel=""
 context_summary_rel=""
 context_source_run_ids=""
-context_bootstrap_mode="best_effort"
+context_bootstrap_mode=""
 
 mkdir -p "$run_dir/outputs" "$run_dir/home" "$run_dir/session" "$run_dir/score"
 mkdir -p "$run_dir/home/.pi/agent"
@@ -205,6 +205,11 @@ def duration(start: str, end: str) -> int | None:
 
 
 score_payload = read_json(run_dir / "score.json") or {}
+context_payload = (
+    read_json(run_dir / os.environ["CONTEXT_MANIFEST_REL"])
+    if os.environ["CONTEXT_ENABLED"] == "1" and os.environ["CONTEXT_MANIFEST_REL"]
+    else {}
+) or {}
 dependencies = {
     "pi": command_output([os.environ["PI_BIN"], "--version"]),
     "python3": command_output(["python3", "--version"]),
@@ -278,6 +283,17 @@ manifest = {
         "model_timeout_seconds": int(os.environ["MODEL_TIMEOUT_SECONDS"]),
         "retry_count": int(os.environ["RETRY_COUNT"]),
         "score_failure_classifications": score_payload.get("failure_classifications", []),
+        "secret_scan": {
+            "scanned_path_count": (
+                (score_payload.get("secret_scan") or {}).get("scanned_path_count")
+            ),
+            "skipped_path_count": (
+                (score_payload.get("secret_scan") or {}).get("skipped_path_count")
+            ),
+            "skipped_reason_counts": (
+                (score_payload.get("secret_scan") or {}).get("skipped_reason_counts")
+            ),
+        },
     },
     "execution": {
         "contract_version": os.environ["RUN_CONTRACT_VERSION"] or None,
@@ -292,6 +308,11 @@ manifest = {
             item for item in os.environ["CONTEXT_SOURCE_RUN_IDS"].split(",") if item
         ],
         "bootstrap_mode": os.environ["CONTEXT_BOOTSTRAP_MODE"] or None,
+        "candidate_run_count": context_payload.get("candidate_run_count"),
+        "eligible_run_count": context_payload.get("eligible_run_count"),
+        "selected_count": context_payload.get("selected_count"),
+        "ranking_latency_ms": context_payload.get("ranking_latency_ms"),
+        "artifact_bytes_copied": context_payload.get("artifact_bytes_copied"),
     },
 }
 write_json(manifest_path, manifest)
@@ -498,15 +519,25 @@ if [[ "$context_enabled" == "1" && "$run_contract_version" == "v2" ]]; then
     "$run_dir" \
     "$policy_path" >/dev/null
   if [[ -f "$run_dir/$context_manifest_rel" ]]; then
-    context_source_run_ids="$(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$run_dir/$context_manifest_rel" <<'PY'
+    while IFS= read -r line; do
+      case "$line" in
+        source_run_ids=*)
+          context_source_run_ids="${line#source_run_ids=}"
+          ;;
+        index_mode=*)
+          context_bootstrap_mode="${line#index_mode=}"
+          ;;
+      esac
+    done < <(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$run_dir/$context_manifest_rel" <<'PY'
 import json
 import pathlib
 import sys
 
 payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-print(",".join(payload.get("selected_source_run_ids", [])))
+print("source_run_ids=" + ",".join(payload.get("selected_source_run_ids", [])))
+print("index_mode=" + str(payload.get("index_mode", "")))
 PY
-)"
+)
   fi
 fi
 

@@ -66,11 +66,15 @@ literal network indicators still require `HARNESS_ALLOW_NETWORK_TASKS=1`.
 ## Evidence retention and recovery
 
 - Keep run evidence in `starter/runs/<run-id>/`
+- Derived retrieval cache lives under `starter/runs/.index/retrieval-v1/` and may be rebuilt anytime
 - Archive evidence with `starter/bin/archive-run-evidence.sh`
+- Rebuild retrieval cache with `python3 starter/bin/rebuild_retrieval_index.py`
 - Restore an archived run with `starter/bin/restore-run-evidence.sh`
 - Partial reruns are automatically moved into `runs/<run-id>/recovery/<timestamp>/`
 - Recovery evidence is included in secret scanning; reruns fail if archived recovery artifacts
   still contain likely secrets
+- Imported retrieval payloads under `context/source-runs/` are treated as historical references and
+  are excluded from current-run secret scanning
 - Review `outputs/run_manifest.json`, `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` before signing off a canary
 
 ## Real canary expectations

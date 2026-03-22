@@ -101,7 +101,15 @@
         "source": {
           "const": "prior_runs"
         },
+        "strategy": {
+          "type": "string",
+          "const": "hybrid_v1"
+        },
         "max_source_runs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_candidates": {
           "type": "integer",
           "minimum": 1
         },
@@ -112,6 +120,10 @@
         "max_artifact_bytes": {
           "type": "integer",
           "minimum": 1
+        },
+        "artifact_selection": {
+          "type": "string",
+          "const": "evidence_first"
         }
       }
     }

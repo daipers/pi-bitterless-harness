@@ -499,6 +499,12 @@ def test_discover_secret_scan_paths_excludes_isolated_state(
     recovery_file = run_dir / "recovery" / "recovery.txt"
     recovery_file.parent.mkdir()
     recovery_file.write_text("scan me\n", encoding="utf-8")
+    imported_context = run_dir / "context" / "source-runs" / "old-run" / "artifact.txt"
+    imported_context.parent.mkdir(parents=True)
+    imported_context.write_text("historical\n", encoding="utf-8")
+    retrieval_summary = run_dir / "context" / "retrieval-summary.md"
+    retrieval_summary.parent.mkdir(exist_ok=True)
+    retrieval_summary.write_text("summary\n", encoding="utf-8")
 
     candidates = score_run.discover_secret_scan_paths(
         make_context(run_dir, isolated_repo=isolated_repo)
@@ -508,6 +514,8 @@ def test_discover_secret_scan_paths_excludes_isolated_state(
     assert hidden_home not in candidates
     assert hidden_session not in candidates
     assert recovery_file in candidates
+    assert imported_context not in candidates
+    assert retrieval_summary in candidates
 
 
 def test_score_run_recovery_secret_findings_fail_score(isolated_repo: pathlib.Path) -> None:
@@ -543,6 +551,51 @@ def test_score_run_recovery_secret_findings_fail_score(isolated_repo: pathlib.Pa
         "recovery/secret.txt" in finding["path"]
         for finding in payload["secret_scan"]["findings"]
     )
+
+
+def test_score_run_records_secret_scan_stats_and_skipped_roots(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "context").mkdir()
+    (run_dir / "context" / "retrieval-manifest.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "context" / "retrieval-summary.md").write_text("summary\n", encoding="utf-8")
+    imported_context = run_dir / "context" / "source-runs" / "old-run" / "artifact.txt"
+    imported_context.parent.mkdir(parents=True)
+    imported_context.write_text(
+        "OPENAI_API_KEY=" + ("sk-" + "abcdefghijklmnopqrstuvwxyz1234"),
+        encoding="utf-8",
+    )
+    (run_dir / "home" / "secret.txt").write_text("ignore\n", encoding="utf-8")
+    (run_dir / "session" / "session.txt").write_text("ignore\n", encoding="utf-8")
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["overall_pass"] is True
+    assert payload["secret_scan"]["scanned_path_count"] >= 4
+    assert payload["secret_scan"]["skipped_path_count"] == 3
+    assert payload["secret_scan"]["skipped_reason_counts"] == {
+        "context/source-runs": 1,
+        "home": 1,
+        "session": 1,
+    }
+    assert payload["secret_scan"]["findings"] == []
 
 
 def test_main_writes_partial_payload_when_interrupted(
@@ -647,7 +700,18 @@ def test_score_run_records_retrieval_provenance(
     (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
     (run_dir / "context").mkdir()
     (run_dir / "context" / "retrieval-manifest.json").write_text(
-        json.dumps({"selected_source_run_ids": ["old-run-1", "old-run-2"]}) + "\n",
+        json.dumps(
+            {
+                "selected_source_run_ids": ["old-run-1", "old-run-2"],
+                "index_mode": "warm_reuse",
+                "candidate_run_count": 5,
+                "eligible_run_count": 4,
+                "selected_count": 2,
+                "ranking_latency_ms": 1.25,
+                "artifact_bytes_copied": 99,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     (run_dir / "result.json").write_text(
@@ -677,3 +741,9 @@ def test_score_run_records_retrieval_provenance(
     assert payload["retrieval"]["enabled"] is True
     assert payload["retrieval"]["source_run_ids"] == ["old-run-1", "old-run-2"]
     assert payload["retrieval"]["context_manifest_path"] == "context/retrieval-manifest.json"
+    assert payload["retrieval"]["index_mode"] == "warm_reuse"
+    assert payload["retrieval"]["candidate_run_count"] == 5
+    assert payload["retrieval"]["eligible_run_count"] == 4
+    assert payload["retrieval"]["selected_count"] == 2
+    assert payload["retrieval"]["ranking_latency_ms"] == 1.25
+    assert payload["retrieval"]["artifact_bytes_copied"] == 99

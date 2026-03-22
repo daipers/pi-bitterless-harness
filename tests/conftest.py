@@ -22,6 +22,7 @@ def isolated_repo(tmp_path: pathlib.Path) -> pathlib.Path:
         destination,
         ignore=shutil.ignore_patterns(
             ".git",
+            "runs",
             "starter/runs",
             ".pytest_cache",
             ".ruff_cache",

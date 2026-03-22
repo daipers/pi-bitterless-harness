@@ -27,6 +27,9 @@ def test_run_contract_and_template_helpers(tmp_path: pathlib.Path) -> None:
     contract = default_run_contract()
     assert validate_run_contract(contract) == []
     assert contract["run_contract_version"] == "v2"
+    assert contract["retrieval"]["strategy"] == "hybrid_v1"
+    assert contract["retrieval"]["max_candidates"] == 25
+    assert contract["retrieval"]["artifact_selection"] == "evidence_first"
     assert len(make_result_template()["artifacts"]) == 1
     assert compute_dependencies_hash({"python": "3.12"})
 
@@ -313,8 +316,11 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
     broken_v2["retrieval"] = {
         "enabled": "yes",
         "source": "memory",
+        "strategy": "hybrid_v2",
         "max_source_runs": 0,
+        "max_candidates": 0,
         "max_artifact_bytes": 0,
+        "artifact_selection": "random",
     }
     v2_errors = validate_run_contract(broken_v2)
     assert "result_interface_version must be v1" in v2_errors
@@ -323,8 +329,11 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
     assert "policy_path must be a non-empty string" in v2_errors
     assert "missing retrieval field: max_artifacts_per_run" in v2_errors
     assert "retrieval.source must be 'prior_runs'" in v2_errors
+    assert "retrieval.strategy must be 'hybrid_v1'" in v2_errors
     assert "retrieval.max_source_runs must be a positive integer" in v2_errors
+    assert "retrieval.max_candidates must be a positive integer" in v2_errors
     assert "retrieval.max_artifact_bytes must be a positive integer" in v2_errors
+    assert "retrieval.artifact_selection must be 'evidence_first'" in v2_errors
     assert "retrieval.enabled must be a boolean" in v2_errors
 
 

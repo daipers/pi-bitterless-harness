@@ -62,6 +62,9 @@ class ResultValidationResult:
 class SecretScanResult:
     paths_scanned: tuple[pathlib.Path, ...]
     findings: tuple[dict[str, Any], ...]
+    scanned_path_count: int
+    skipped_path_count: int
+    skipped_reason_counts: dict[str, int]
     failure_classifications: frozenset[str]
 
 
@@ -174,15 +177,14 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
         "context_manifest_path"
     ]
     manifest_path = context.run_dir / manifest_path_setting
+    manifest_payload = load_json(manifest_path) if manifest_path.exists() else None
     source_run_ids: list[str] = []
     if os.environ.get("HARNESS_CONTEXT_SOURCE_RUN_IDS"):
         source_run_ids = [
             item for item in os.environ["HARNESS_CONTEXT_SOURCE_RUN_IDS"].split(",") if item
         ]
-    elif manifest_path.exists():
-        manifest_payload = load_json(manifest_path)
-        if isinstance(manifest_payload, dict):
-            source_run_ids = list(manifest_payload.get("selected_source_run_ids", []))
+    elif isinstance(manifest_payload, dict):
+        source_run_ids = list(manifest_payload.get("selected_source_run_ids", []))
 
     context_enabled_env = os.environ.get("HARNESS_CONTEXT_ENABLED")
     if context_enabled_env is None:
@@ -205,18 +207,61 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
             context.run_dir / settings["context_summary_path"] if context_enabled else None
         ),
         "context_source_run_ids": source_run_ids,
+        "context_manifest_payload": manifest_payload if isinstance(manifest_payload, dict) else {},
     }
 
 
 def discover_secret_scan_paths(context: ScoreContext) -> list[pathlib.Path]:
+    paths, _, _ = _discover_secret_scan_selection(context)
+    return paths
+
+
+def _root_secret_scan_files(run_dir: pathlib.Path) -> list[pathlib.Path]:
+    return sorted([path for path in run_dir.iterdir() if path.is_file()])
+
+
+def _walk_secret_scan_dir(root: pathlib.Path) -> list[pathlib.Path]:
+    if not root.exists():
+        return []
+    return sorted([path for path in root.rglob("*") if path.is_file()])
+
+
+def _discover_secret_scan_selection(
+    context: ScoreContext,
+) -> tuple[list[pathlib.Path], int, dict[str, int]]:
     candidates: list[pathlib.Path] = []
-    for child in context.run_dir.rglob("*"):
-        if child.is_dir():
-            continue
-        if any(part in {"home", "session"} for part in child.parts):
-            continue
-        candidates.append(child)
-    return candidates
+    skipped_reason_counts: dict[str, int] = {}
+
+    def add_skipped(reason: str, count: int = 1) -> None:
+        if count <= 0:
+            return
+        skipped_reason_counts[reason] = skipped_reason_counts.get(reason, 0) + count
+
+    candidates.extend(_root_secret_scan_files(context.run_dir))
+    for rel_dir in ["outputs", "score", "recovery"]:
+        candidates.extend(_walk_secret_scan_dir(context.run_dir / rel_dir))
+
+    for rel_file in [
+        "context/retrieval-manifest.json",
+        "context/retrieval-summary.md",
+    ]:
+        candidate = context.run_dir / rel_file
+        if candidate.is_file():
+            candidates.append(candidate)
+
+    for skipped_root in [
+        context.run_dir / "home",
+        context.run_dir / "session",
+        context.run_dir / "context" / "source-runs",
+    ]:
+        if skipped_root.exists():
+            add_skipped(
+                str(skipped_root.relative_to(context.run_dir)),
+                count=1,
+            )
+
+    unique_candidates = sorted({path.resolve(): path for path in candidates}.values())
+    return unique_candidates, sum(skipped_reason_counts.values()), skipped_reason_counts
 
 
 def _result_log_paths(
@@ -478,12 +523,18 @@ def _validate_result_json(context: ScoreContext) -> ResultValidationResult:
 
 
 def _scan_for_secrets(context: ScoreContext) -> SecretScanResult:
-    paths_scanned = tuple(discover_secret_scan_paths(context))
+    paths_scanned_list, skipped_path_count, skipped_reason_counts = _discover_secret_scan_selection(
+        context
+    )
+    paths_scanned = tuple(paths_scanned_list)
     findings = tuple(scan_paths_for_secrets(list(paths_scanned)))
     failure_classifications = frozenset({"eval_failed"} if findings else set())
     return SecretScanResult(
         paths_scanned=paths_scanned,
         findings=findings,
+        scanned_path_count=len(paths_scanned),
+        skipped_path_count=skipped_path_count,
+        skipped_reason_counts=skipped_reason_counts,
         failure_classifications=failure_classifications,
     )
 
@@ -533,6 +584,9 @@ def _assemble_score_payload(
         },
         "secret_scan": {
             "paths_scanned": len(inputs.secret_scan.paths_scanned),
+            "scanned_path_count": inputs.secret_scan.scanned_path_count,
+            "skipped_path_count": inputs.secret_scan.skipped_path_count,
+            "skipped_reason_counts": dict(sorted(inputs.secret_scan.skipped_reason_counts.items())),
             "findings": list(inputs.secret_scan.findings),
         },
         "execution_profile": execution_metadata["execution_profile"],
@@ -542,6 +596,20 @@ def _assemble_score_payload(
             "source_run_ids": list(execution_metadata["context_source_run_ids"]),
             "context_manifest_path": _relative_to_run_dir(
                 context, execution_metadata["context_manifest_path"]
+            ),
+            "index_mode": execution_metadata["context_manifest_payload"].get("index_mode"),
+            "candidate_run_count": execution_metadata["context_manifest_payload"].get(
+                "candidate_run_count"
+            ),
+            "eligible_run_count": execution_metadata["context_manifest_payload"].get(
+                "eligible_run_count"
+            ),
+            "selected_count": execution_metadata["context_manifest_payload"].get("selected_count"),
+            "ranking_latency_ms": execution_metadata["context_manifest_payload"].get(
+                "ranking_latency_ms"
+            ),
+            "artifact_bytes_copied": execution_metadata["context_manifest_payload"].get(
+                "artifact_bytes_copied"
             ),
         },
         "failure_classifications": sorted(failure_classifications),
