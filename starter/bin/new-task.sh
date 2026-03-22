@@ -151,9 +151,22 @@ write_json(
     {
         "x-interface-version": RESULT_INTERFACE_VERSION,
         "status": "success",
-        "summary": "short summary",
-        "artifacts": [{"path": "outputs/...", "description": "what this artifact proves"}],
-        "claims": [{"claim": "short claim", "evidence": ["path or command"]}],
+        "summary": (
+            "Implemented the requested change and wrote outputs/example-report.json "
+            "with the final retrieval-quality results."
+        ),
+        "artifacts": [
+            {
+                "path": "outputs/example-report.json",
+                "description": "Final report artifact capturing the concrete result produced by this run.",
+            }
+        ],
+        "claims": [
+            {
+                "claim": "The requested retrieval-quality output was generated successfully.",
+                "evidence": ["outputs/example-report.json"],
+            }
+        ],
         "remaining_risks": ["optional remaining risks"],
     },
 )

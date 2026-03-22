@@ -130,12 +130,15 @@ python3 ../tests/fixtures/pass_eval.py
     summary = (current_run / "context" / "retrieval-summary.md").read_text(encoding="utf-8")
 
     assert str(current_run / "context" / "retrieval-manifest.json") in completed.stdout
-    assert manifest["index_version"] == "retrieval-v2"
+    assert manifest["index_version"] == "retrieval-v4"
     assert manifest["index_mode"] == "cold_build"
     assert manifest["selection_strategy"] == "hybrid_v1"
+    assert manifest["retrieval_profile_id"] == "retrieval-v4-default"
     assert manifest["candidate_run_count"] == 2
     assert manifest["eligible_run_count"] == 1
     assert manifest["selected_count"] == 1
+    assert manifest["selected_source_count"] == 1
+    assert manifest["empty_context"] is False
     assert manifest["query_token_count"] > 0
     assert manifest["ranking_latency_ms"] >= 0
     assert manifest["refreshed_run_count"] == 2
@@ -147,21 +150,22 @@ python3 ../tests/fixtures/pass_eval.py
     assert manifest["top_candidates"][0]["run_id"] == "20260320-000000-good"
     assert manifest["top_candidates"][0]["selected"] is True
     assert "20260320-000000-good" in summary
+    assert "retrieval-view.md" in summary
+    assert "outputs/text.txt" in summary
+    assert "safe text artifact" in summary
     selected_run_dir = current_run / "context" / "source-runs" / "20260320-000000-good"
-    assert (selected_run_dir / "task.md").exists()
-    assert (selected_run_dir / "result.json").exists()
-    assert (selected_run_dir / "score.json").exists()
-    assert (
-        selected_run_dir / "outputs" / "text.txt"
-    ).exists()
+    assert (selected_run_dir / "retrieval-view.md").exists()
+    assert (selected_run_dir / "outputs" / "text.txt").exists()
+    assert not (selected_run_dir / "task.md").exists()
+    assert not (selected_run_dir / "result.json").exists()
+    assert not (selected_run_dir / "score.json").exists()
     assert not (selected_run_dir / "outputs" / "big.txt").exists()
     assert not (selected_run_dir / "outputs" / "binary.bin").exists()
     copied_files = manifest["selected_sources"][0]["copied_files"]
-    assert copied_files[0]["copy_reason"] == "core_run_file"
+    assert copied_files[0]["copy_reason"] == "retrieval_view"
     assert copied_files[-1]["copy_reason"] == "claim_evidence"
-    assert (
-        current_run.parent / ".index" / "retrieval-v2" / "20260320-000000-good.json"
-    ).exists()
+    assert manifest["selected_sources"][0]["view_path"].endswith("retrieval-view.md")
+    assert (current_run.parent / ".index" / "retrieval-v4" / "20260320-000000-good.json").exists()
 
 
 def test_prepare_context_reuses_refreshes_and_evicts_index_entries(
@@ -281,8 +285,7 @@ python3 ../tests/fixtures/pass_eval.py
     assert refreshed_manifest["refreshed_run_count"] == 1
     assert refreshed_manifest["evicted_run_count"] == 0
     assert (
-        refreshed_manifest["selected_sources"][0]["summary"]
-        == "retrieval scoring success updated"
+        refreshed_manifest["selected_sources"][0]["summary"] == "retrieval scoring success updated"
     )
 
     shutil.rmtree(good_run)
@@ -376,7 +379,7 @@ python3 ../tests/fixtures/pass_eval.py
     assert payload["index_mode"] == "cold_build"
     assert payload["candidate_run_count"] == 1
     assert payload["eligible_run_count"] == 1
-    assert (starter / "runs" / ".index" / "retrieval-v2" / "20260320-000000-good.json").exists()
+    assert (starter / "runs" / ".index" / "retrieval-v4" / "20260320-000000-good.json").exists()
 
 
 def test_prepare_context_prefers_exact_phrase_claim_evidence_and_evidence_first_copy(
@@ -510,5 +513,9 @@ python3 ../tests/fixtures/pass_eval.py
     assert manifest["top_candidates"][0]["run_id"] == "20260320-000001-good"
     assert manifest["top_candidates"][0]["score_breakdown"]["phrase_bonus"] >= 6
     copied_files = manifest["selected_sources"][0]["copied_files"]
-    artifact_copy_reasons = [entry["copy_reason"] for entry in copied_files if entry["source_path"].startswith("outputs/")]
+    artifact_copy_reasons = [
+        entry["copy_reason"]
+        for entry in copied_files
+        if entry["source_path"].startswith("outputs/")
+    ]
     assert artifact_copy_reasons[0] == "claim_evidence"

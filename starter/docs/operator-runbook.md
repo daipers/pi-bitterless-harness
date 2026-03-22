@@ -66,9 +66,12 @@ literal network indicators still require `HARNESS_ALLOW_NETWORK_TASKS=1`.
 ## Evidence retention and recovery
 
 - Keep run evidence in `starter/runs/<run-id>/`
-- Derived retrieval cache lives under `starter/runs/.index/retrieval-v1/` and may be rebuilt anytime
+- Derived retrieval cache lives under `starter/runs/.index/retrieval-v4/` and may be rebuilt anytime
 - Archive evidence with `starter/bin/archive-run-evidence.sh`
 - Rebuild retrieval cache with `python3 starter/bin/rebuild_retrieval_index.py`
+- Mine harder benchmark proposals with `python3 starter/bin/mine_harder_retrieval_benchmarks.py`
+- Sweep offline retrieval profiles with `python3 starter/bin/sweep_retrieval_profiles.py`
+- Analyze benchmark snapshots with `python3 starter/bin/analyze_retrieval_benchmarks.py`
 - Restore an archived run with `starter/bin/restore-run-evidence.sh`
 - Partial reruns are automatically moved into `runs/<run-id>/recovery/<timestamp>/`
 - Recovery evidence is included in secret scanning; reruns fail if archived recovery artifacts

@@ -173,9 +173,9 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
     policy_path = os.environ.get("HARNESS_POLICY_PATH") or settings["policy_path"]
     policy = load_policy(policy_path, repo_root=context.repo_root)
 
-    manifest_path_setting = os.environ.get("HARNESS_CONTEXT_MANIFEST_PATH") or settings[
-        "context_manifest_path"
-    ]
+    manifest_path_setting = (
+        os.environ.get("HARNESS_CONTEXT_MANIFEST_PATH") or settings["context_manifest_path"]
+    )
     manifest_path = context.run_dir / manifest_path_setting
     manifest_payload = load_json(manifest_path) if manifest_path.exists() else None
     source_run_ids: list[str] = []
@@ -597,6 +597,9 @@ def _assemble_score_payload(
             "context_manifest_path": _relative_to_run_dir(
                 context, execution_metadata["context_manifest_path"]
             ),
+            "retrieval_profile_id": execution_metadata["context_manifest_payload"].get(
+                "retrieval_profile_id"
+            ),
             "index_mode": execution_metadata["context_manifest_payload"].get("index_mode"),
             "candidate_run_count": execution_metadata["context_manifest_payload"].get(
                 "candidate_run_count"
@@ -605,6 +608,10 @@ def _assemble_score_payload(
                 "eligible_run_count"
             ),
             "selected_count": execution_metadata["context_manifest_payload"].get("selected_count"),
+            "selected_source_count": execution_metadata["context_manifest_payload"].get(
+                "selected_source_count"
+            ),
+            "empty_context": execution_metadata["context_manifest_payload"].get("empty_context"),
             "ranking_latency_ms": execution_metadata["context_manifest_payload"].get(
                 "ranking_latency_ms"
             ),

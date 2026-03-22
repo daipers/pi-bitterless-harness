@@ -34,6 +34,11 @@ Describe the desired outcome in plain language.
 ## Notes
 Optional context, pointers, or hypotheses.
 
+## Retrieval Quality Rubric
+- `summary`: write 1-3 outcome-focused sentences with concrete identifiers, outputs, or checks; do not just restate the task title.
+- `claims`: keep each claim atomic and specific; include only supported outcomes and cite evidence paths or exact verification commands.
+- `artifacts[].description`: describe what the artifact proves or contains, not just the filename.
+
 ## Result JSON schema (source of truth)
 
 `new-task.sh` injects this section from `result.schema.json` when creating a run.

@@ -124,7 +124,8 @@ Each run creates:
 - `context/` (capability-profile retrieval context, only when enabled)
   - `context/retrieval-manifest.json`
   - `context/retrieval-summary.md`
-  - `context/source-runs/<run-id>/...`
+  - `context/source-runs/<run-id>/retrieval-view.md`
+  - `context/source-runs/<run-id>/outputs/...` for copied evidence files only
 
 ## Task format
 
@@ -161,7 +162,7 @@ Profile precedence at runtime:
 - Validates `run.contract.json`, `task.md`, and `result.schema.json`
 - Resolves the active execution profile and policy file
 - Materializes retrieval context for V2 capability runs under `context/`
-  - Reuses a derived retrieval index under `runs/.index/retrieval-v1/` when available
+  - Reuses a derived retrieval index under `runs/.index/retrieval-v4/` when available
 - Emits structured lifecycle events to `run-events.jsonl`
 - Captures `transcript.jsonl` and `pi.stderr.log`
 - Writes `pi.exit_code.txt`
@@ -249,7 +250,7 @@ For broad production-readiness checks, point `HARNESS_PI_AUTH_JSON` at a minimal
 - `HARNESS_PI_RETRY_COUNT=2` changes the model startup retry budget.
 - `HARNESS_EVAL_TIMEOUT_SECONDS=300` changes the timeout for each eval command.
 
-## Retrieval Index Utility
+## Retrieval Workflow
 
 Rebuild the derived retrieval index at any time without modifying run artifacts:
 
@@ -257,10 +258,29 @@ Rebuild the derived retrieval index at any time without modifying run artifacts:
 python3 starter/bin/rebuild_retrieval_index.py
 ```
 
-Benchmark the warm-reuse path separately from the general runner:
+Run the retrieval benchmark corpus with the checked-in active profile:
 
 ```bash
 python3 starter/bin/benchmark_harness.py --mode retrieval
+```
+
+Mine harder benchmark proposals from real passing runs into the review queue:
+
+```bash
+python3 starter/bin/mine_harder_retrieval_benchmarks.py
+```
+
+Sweep candidate retrieval profiles offline and optionally write the best profile:
+
+```bash
+python3 starter/bin/sweep_retrieval_profiles.py --write-best starter/retrieval/active_profile.json
+```
+
+Analyze benchmark snapshots, append history rows, and emit pruning suggestions:
+
+```bash
+python3 starter/bin/benchmark_harness.py --mode retrieval --out starter/runs/retrieval-latest.json
+python3 starter/bin/analyze_retrieval_benchmarks.py starter/runs/retrieval-latest.json --history-dir starter/runs
 ```
 
 ## Real `pi` coverage and canaries

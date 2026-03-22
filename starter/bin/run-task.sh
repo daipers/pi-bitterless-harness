@@ -580,6 +580,10 @@ Execution contract:
 - Run repo checks through bash before declaring success.
 - Write {run_dir}/result.json before finishing.
 - Keep `x-interface-version` exactly `v1`.
+- Follow this retrieval-quality rubric in result.json:
+  - `summary`: 1-3 outcome-focused sentences with concrete identifiers, outputs, or checks; do not just restate the task title.
+  - `claims`: atomic supported outcomes only, each with evidence paths or exact verification commands.
+  - `artifacts[].description`: explain what the artifact proves or contains, not just the filename.
 - Output raw JSON only for result.json and follow this exact schema:
 
 {fence}json

@@ -1,0 +1,451 @@
+[
+  {
+    "scenario_id": "anchor_precision",
+    "case_kind": "same_words_wrong_artifact",
+    "hard_negative_run_ids": ["20260322-010000-anchor-confuser"],
+    "provenance": {
+      "source": "starter/benchmarks/retrieval_corpus.json",
+      "kind": "curated_seed"
+    },
+    "query_title": "Retrieve nebula anchor evidence",
+    "query_goal": "Produce a passing score for harness retrieval with nebula-vector retrieval anchor.",
+    "query_constraints": ["anchorfocus"],
+    "query_done": ["anchorready"],
+    "expected_top_1_run_id": "20260322-010001-anchor-good",
+    "seed_runs": [
+      {
+        "run_id": "20260322-010000-anchor-confuser",
+        "title": "Fast retrieval confuser",
+        "goal": "Produce a passing score for harness retrieval quickly.",
+        "constraints": ["fogpath"],
+        "done": ["quickpass"],
+        "summary": "Produced a passing retrieval score quickly without preserving any unique anchor artifact.",
+        "claims": [],
+        "artifacts": [],
+        "artifact_contents": {}
+      },
+      {
+        "run_id": "20260322-010001-anchor-good",
+        "title": "Nebula anchor success",
+        "goal": "Produce a passing score for harness retrieval with nebula-vector retrieval anchor.",
+        "constraints": ["anchorfocus"],
+        "done": ["anchorready"],
+        "summary": "Generated a passing retrieval score and preserved the nebula-vector retrieval anchor in outputs/anchor.txt for later evidence reuse.",
+        "claims": [
+          {
+            "claim": "The nebula-vector retrieval anchor was preserved for later reuse.",
+            "evidence": ["outputs/anchor.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/anchor.txt",
+            "description": "Nebula-vector retrieval anchor evidence captured from the successful run."
+          }
+        ],
+        "artifact_contents": {
+          "outputs/anchor.txt": "nebula-vector retrieval anchor proof\n"
+        }
+      },
+      {
+        "run_id": "20260322-010002-anchor-unrelated",
+        "title": "Billing simulator seed",
+        "goal": "Refresh billing simulator receipts for amber-ledger accounting.",
+        "constraints": ["ledgerpath"],
+        "done": ["billingready"],
+        "summary": "Updated billing simulator receipts for amber-ledger accounting.",
+        "claims": [],
+        "artifacts": [],
+        "artifact_contents": {}
+      }
+    ]
+  },
+  {
+    "scenario_id": "claim_evidence_quality",
+    "case_kind": "same_claim_weaker_evidence",
+    "hard_negative_run_ids": ["20260322-020000-claim-confuser"],
+    "provenance": {
+      "source": "starter/benchmarks/retrieval_corpus.json",
+      "kind": "curated_seed"
+    },
+    "query_title": "Recover comet lattice claim evidence",
+    "query_goal": "Recover claim-rich retrieval context for comet-lattice scoring.",
+    "query_constraints": ["claimfocus"],
+    "query_done": ["claimready"],
+    "expected_top_1_run_id": "20260322-020001-claim-good",
+    "seed_runs": [
+      {
+        "run_id": "20260322-020000-claim-confuser",
+        "title": "Claim overlap confuser",
+        "goal": "Recover claim-rich retrieval context for scoring.",
+        "constraints": ["claimfog"],
+        "done": ["claimdraft"],
+        "summary": "Recovered general scoring notes with claim overlap but no durable evidence artifact.",
+        "claims": [
+          {
+            "claim": "comet-lattice scoring succeeded",
+            "evidence": []
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/scoring.txt",
+            "description": "generic scoring note"
+          }
+        ],
+        "artifact_contents": {
+          "outputs/scoring.txt": "general scoring note\n"
+        }
+      },
+      {
+        "run_id": "20260322-020001-claim-good",
+        "title": "Comet lattice proof",
+        "goal": "Recover claim-rich retrieval context for comet-lattice scoring.",
+        "constraints": ["claimfocus"],
+        "done": ["claimready"],
+        "summary": "Recovered comet-lattice scoring context and wrote evidence-backed claims tied to outputs/comet.txt.",
+        "claims": [
+          {
+            "claim": "Comet-lattice scoring succeeded with preserved claim evidence.",
+            "evidence": ["outputs/comet.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/comet.txt",
+            "description": "Comet-lattice scoring evidence proving the preserved claim outcome."
+          }
+        ],
+        "artifact_contents": {
+          "outputs/comet.txt": "comet-lattice scoring evidence\n"
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "artifact_description_precision",
+    "case_kind": "same_words_wrong_artifact",
+    "hard_negative_run_ids": ["20260322-030000-artifact-confuser"],
+    "provenance": {
+      "source": "starter/benchmarks/retrieval_corpus.json",
+      "kind": "curated_seed"
+    },
+    "query_title": "Retrieve aurora proof bundle artifacts",
+    "query_goal": "Select artifact-backed retrieval notes for aurora proof bundle.",
+    "query_constraints": ["artifactfocus"],
+    "query_done": ["artifactready"],
+    "expected_top_1_run_id": "20260322-030001-artifact-good",
+    "seed_runs": [
+      {
+        "run_id": "20260322-030000-artifact-confuser",
+        "title": "Artifact overlap confuser",
+        "goal": "Select retrieval notes for proof bundle.",
+        "constraints": ["artifactfog"],
+        "done": ["artifactdraft"],
+        "summary": "Saved a proof bundle artifact with a vague description and no specific aurora anchor.",
+        "claims": [],
+        "artifacts": [
+          {
+            "path": "outputs/bundle.txt",
+            "description": "proof bundle artifact"
+          }
+        ],
+        "artifact_contents": {
+          "outputs/bundle.txt": "generic proof bundle\n"
+        }
+      },
+      {
+        "run_id": "20260322-030001-artifact-good",
+        "title": "Aurora proof bundle success",
+        "goal": "Select artifact-backed retrieval notes for aurora proof bundle.",
+        "constraints": ["artifactfocus"],
+        "done": ["artifactready"],
+        "summary": "Captured the aurora proof bundle and described the retained artifact so retrieval can match it precisely.",
+        "claims": [
+          {
+            "claim": "The aurora proof bundle was captured for later retrieval reuse.",
+            "evidence": ["outputs/aurora.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/aurora.txt",
+            "description": "Aurora proof bundle artifact containing the retained evidence for later selection."
+          }
+        ],
+        "artifact_contents": {
+          "outputs/aurora.txt": "aurora proof bundle evidence\n"
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "unique_anchor_false_positive",
+    "case_kind": "same_words_wrong_artifact",
+    "hard_negative_run_ids": ["20260322-040000-sunmesh-confuser"],
+    "provenance": {
+      "source": "starter/benchmarks/retrieval_corpus.json",
+      "kind": "curated_seed"
+    },
+    "query_title": "Preserve sunmesh relay checksum",
+    "query_goal": "Preserve sunmesh relay checksum in retrieval proof bundle.",
+    "query_constraints": ["sunmeshfocus"],
+    "query_done": ["sunmeshready"],
+    "expected_top_1_run_id": "20260322-040001-sunmesh-good",
+    "seed_runs": [
+      {
+        "run_id": "20260322-040000-sunmesh-confuser",
+        "title": "Moonmesh confuser",
+        "goal": "Preserve moonmesh relay checksum in retrieval proof bundle.",
+        "constraints": ["sunmeshfocus"],
+        "done": ["sunmeshready"],
+        "summary": "Preserved the moonmesh relay checksum in a proof bundle.",
+        "claims": [
+          {
+            "claim": "The moonmesh relay checksum was preserved.",
+            "evidence": ["outputs/moonmesh.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/moonmesh.txt",
+            "description": "Moonmesh relay checksum evidence for the proof bundle."
+          }
+        ],
+        "artifact_contents": {
+          "outputs/moonmesh.txt": "moonmesh relay checksum\n"
+        }
+      },
+      {
+        "run_id": "20260322-040001-sunmesh-good",
+        "title": "Sunmesh success",
+        "goal": "Preserve sunmesh relay checksum in retrieval proof bundle.",
+        "constraints": ["sunmeshfocus"],
+        "done": ["sunmeshready"],
+        "summary": "Preserved the sunmesh relay checksum and wrote outputs/sunmesh.txt with the retrieval-ready proof.",
+        "claims": [
+          {
+            "claim": "The sunmesh relay checksum was preserved for later proof-bundle retrieval.",
+            "evidence": ["outputs/sunmesh.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/sunmesh.txt",
+            "description": "Sunmesh relay checksum proof retained for the retrieval proof bundle."
+          }
+        ],
+        "artifact_contents": {
+          "outputs/sunmesh.txt": "sunmesh relay checksum\n"
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "claim_overlap_weak_evidence",
+    "case_kind": "same_claim_weaker_evidence",
+    "hard_negative_run_ids": ["20260322-050000-delta-confuser"],
+    "provenance": {
+      "source": "starter/benchmarks/retrieval_corpus.json",
+      "kind": "curated_seed"
+    },
+    "query_title": "Recover delta forge claim evidence",
+    "query_goal": "Recover delta-forge claim evidence for shard ledger scoring.",
+    "query_constraints": ["deltafocus"],
+    "query_done": ["deltaready"],
+    "expected_top_1_run_id": "20260322-050001-delta-good",
+    "seed_runs": [
+      {
+        "run_id": "20260322-050000-delta-confuser",
+        "title": "Delta overlap confuser",
+        "goal": "Recover delta-forge context for shard ledger scoring.",
+        "constraints": ["deltafocus"],
+        "done": ["deltaready"],
+        "summary": "Recovered delta-forge notes for shard ledger scoring, but only with a generic artifact and no linked proof.",
+        "claims": [
+          {
+            "claim": "Delta-forge scoring completed.",
+            "evidence": []
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/delta.txt",
+            "description": "generic shard ledger note"
+          }
+        ],
+        "artifact_contents": {
+          "outputs/delta.txt": "generic shard ledger note\n"
+        }
+      },
+      {
+        "run_id": "20260322-050001-delta-good",
+        "title": "Delta forge proof",
+        "goal": "Recover delta-forge claim evidence for shard ledger scoring.",
+        "constraints": ["deltafocus"],
+        "done": ["deltaready"],
+        "summary": "Recovered delta-forge claim evidence and linked it to outputs/delta-proof.txt for shard ledger scoring reuse.",
+        "claims": [
+          {
+            "claim": "Delta-forge claim evidence was preserved for shard ledger scoring.",
+            "evidence": ["outputs/delta-proof.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/delta-proof.txt",
+            "description": "Delta-forge proof artifact demonstrating the preserved shard-ledger claim evidence."
+          }
+        ],
+        "artifact_contents": {
+          "outputs/delta-proof.txt": "delta-forge preserved claim evidence\n"
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "artifact_vague_vs_precise",
+    "case_kind": "same_words_wrong_artifact",
+    "hard_negative_run_ids": ["20260322-060000-prism-confuser"],
+    "provenance": {
+      "source": "starter/benchmarks/retrieval_corpus.json",
+      "kind": "curated_seed"
+    },
+    "query_title": "Retrieve prism garden rollout dossier",
+    "query_goal": "Select artifact descriptions for prism-garden rollout dossier.",
+    "query_constraints": ["prismfocus"],
+    "query_done": ["prismready"],
+    "expected_top_1_run_id": "20260322-060001-prism-good",
+    "seed_runs": [
+      {
+        "run_id": "20260322-060000-prism-confuser",
+        "title": "Prism dossier confuser",
+        "goal": "Select artifact descriptions for rollout dossier.",
+        "constraints": ["prismfog"],
+        "done": ["prismdraft"],
+        "summary": "Saved a rollout dossier artifact with vague descriptions and no prism-garden detail.",
+        "claims": [],
+        "artifacts": [
+          {
+            "path": "outputs/dossier.txt",
+            "description": "rollout dossier artifact"
+          }
+        ],
+        "artifact_contents": {
+          "outputs/dossier.txt": "generic rollout dossier\n"
+        }
+      },
+      {
+        "run_id": "20260322-060001-prism-good",
+        "title": "Prism garden dossier success",
+        "goal": "Select artifact descriptions for prism-garden rollout dossier.",
+        "constraints": ["prismfocus"],
+        "done": ["prismready"],
+        "summary": "Captured the prism-garden rollout dossier and described the retained artifact so later retrieval can select it cleanly.",
+        "claims": [
+          {
+            "claim": "The prism-garden rollout dossier was captured with a retrieval-friendly artifact description.",
+            "evidence": ["outputs/prism.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/prism.txt",
+            "description": "Prism-garden rollout dossier artifact containing the retained description and selected-source details."
+          }
+        ],
+        "artifact_contents": {
+          "outputs/prism.txt": "prism-garden rollout dossier\n"
+        }
+      }
+    ]
+  },
+  {
+    "scenario_id": "abstention_nonsense_a",
+    "query_title": "Opalfjord ivyquill benchmark",
+    "query_goal": "opalfjord ivyquill embermesh",
+    "query_constraints": ["cobaltorchard"],
+    "query_done": ["amberquartz"],
+    "expected_empty_context": true,
+    "seed_runs": [
+      {
+        "run_id": "20260322-070000-abstain-a",
+        "title": "Tarfold prismwick seed",
+        "goal": "tarfold prismwick gullstone",
+        "constraints": ["basaltknot"],
+        "done": ["silverthrush"],
+        "summary": "tarfold prismwick gullstone archive",
+        "claims": [
+          {
+            "claim": "tarfold prismwick archived",
+            "evidence": ["outputs/tarfold.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/tarfold.txt",
+            "description": "tarfold prismwick archive"
+          }
+        ],
+        "artifact_contents": {
+          "outputs/tarfold.txt": "tarfold prismwick archive\n"
+        }
+      },
+      {
+        "run_id": "20260322-070001-abstain-b",
+        "title": "Rookfen mylar seed",
+        "goal": "rookfen mylar duskgrain",
+        "constraints": ["velvettrench"],
+        "done": ["harborflint"],
+        "summary": "rookfen mylar duskgrain snapshot",
+        "claims": [],
+        "artifacts": [],
+        "artifact_contents": {}
+      }
+    ]
+  },
+  {
+    "scenario_id": "abstention_nonsense_b",
+    "query_title": "Zephyrskein copperlatch benchmark",
+    "query_goal": "zephyrskein copperlatch fernhollow",
+    "query_constraints": ["glassharbor"],
+    "query_done": ["morrowpine"],
+    "expected_empty_context": true,
+    "seed_runs": [
+      {
+        "run_id": "20260322-080000-abstain-c",
+        "title": "Halcyonbarter seed",
+        "goal": "halcyonbarter nettlecord starforge",
+        "constraints": ["timberveil"],
+        "done": ["quartzglen"],
+        "summary": "halcyonbarter nettlecord archive",
+        "claims": [],
+        "artifacts": [],
+        "artifact_contents": {}
+      },
+      {
+        "run_id": "20260322-080001-abstain-d",
+        "title": "Verdantcoil seed",
+        "goal": "verdantcoil ashledger rainspoke",
+        "constraints": ["inkharbor"],
+        "done": ["brasspearl"],
+        "summary": "verdantcoil ashledger record",
+        "claims": [
+          {
+            "claim": "verdantcoil ashledger captured",
+            "evidence": ["outputs/verdant.txt"]
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "outputs/verdant.txt",
+            "description": "verdantcoil ashledger capture"
+          }
+        ],
+        "artifact_contents": {
+          "outputs/verdant.txt": "verdantcoil ashledger capture\n"
+        }
+      }
+    ]
+  }
+]

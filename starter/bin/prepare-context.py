@@ -9,7 +9,6 @@ import time
 from typing import Any
 
 from harnesslib import (
-    evaluate_required_artifact_path,
     load_policy,
     load_run_contract,
     parse_task_file,
@@ -21,21 +20,12 @@ from harnesslib import (
 from retrieval_index import (
     build_query,
     build_query_text,
-    lexical_score,
+    load_retrieval_profile,
+    rank_index_entries,
     runs_root,
-    score_index_entry,
+    safe_text_artifact_excerpt,
     sync_retrieval_index,
 )
-
-SKIPPED_TOP_LEVEL = {"home", "session", "recovery"}
-SKIPPED_FILES = {
-    "transcript.jsonl",
-    "pi.stderr.log",
-    "patch.diff",
-    "git.status.txt",
-    "pi.exit_code.txt",
-    "run-events.jsonl",
-}
 
 
 def usage() -> int:
@@ -43,41 +33,7 @@ def usage() -> int:
     return 2
 
 
-def is_utf8_text(path: pathlib.Path) -> bool:
-    try:
-        path.read_text(encoding="utf-8")
-    except Exception:
-        return False
-    return True
-
-
-def eligible_artifact_source_path(
-    source_run_dir: pathlib.Path,
-    rel_path: str,
-    *,
-    max_bytes: int,
-) -> pathlib.Path | None:
-    validated = evaluate_required_artifact_path(source_run_dir, rel_path)
-    if not validated["valid"]:
-        return None
-    source_path = (source_run_dir / rel_path).resolve()
-    if not source_path.exists() or not source_path.is_file():
-        return None
-    if source_path.name in SKIPPED_FILES:
-        return None
-    if any(part in SKIPPED_TOP_LEVEL for part in pathlib.Path(rel_path).parts):
-        return None
-    try:
-        if source_path.stat().st_size > max_bytes:
-            return None
-    except OSError:
-        return None
-    if not is_utf8_text(source_path):
-        return None
-    return source_path
-
-
-def _copy_file(
+def _copy_existing_file(
     *,
     source_path: pathlib.Path,
     source_rel_path: str,
@@ -96,60 +52,62 @@ def _copy_file(
     }
 
 
-def artifact_relevance_score(query: dict[str, Any], artifact: dict[str, Any]) -> int:
-    description_score = lexical_score(
-        query["candidate_tokens"],
-        dict(artifact.get("description_tokens", {})),
-    )
-    excerpt_score = lexical_score(
-        query["candidate_tokens"],
-        dict(artifact.get("excerpt_tokens", {})),
-    )
-    return description_score + excerpt_score
+def _write_derived_file(
+    *,
+    destination_path: pathlib.Path,
+    source_path_label: str,
+    contents: str,
+    copy_reason: str,
+) -> dict[str, Any]:
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.write_text(contents, encoding="utf-8")
+    return {
+        "source_path": source_path_label,
+        "destination_path": str(destination_path),
+        "sha256": sha256_file(destination_path),
+        "copy_reason": copy_reason,
+        "bytes_copied": destination_path.stat().st_size,
+    }
 
 
 def copy_context_artifacts(
     *,
-    query: dict[str, Any],
     source_run_dir: pathlib.Path,
     destination_root: pathlib.Path,
     artifact_records: list[dict[str, Any]],
     max_artifacts: int,
     max_bytes: int,
+    excerpt_char_limit: int,
 ) -> list[dict[str, Any]]:
     copied: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
 
-    evidence_candidates: list[tuple[int, str, dict[str, Any]]] = []
-    fallback_candidates: list[tuple[int, str, dict[str, Any]]] = []
     for artifact in artifact_records:
         rel_path = str(artifact.get("path", ""))
         if not rel_path or rel_path in seen_paths:
             continue
-        source_path = eligible_artifact_source_path(source_run_dir, rel_path, max_bytes=max_bytes)
-        if source_path is None:
+        if not artifact.get("evidence_linked") or not artifact.get("eligible_for_copy"):
             continue
-        relevance = artifact_relevance_score(query, artifact)
-        target = evidence_candidates if artifact.get("evidence_linked") else fallback_candidates
-        target.append((relevance, rel_path, artifact | {"source_path_obj": source_path}))
-
-    evidence_candidates.sort(key=lambda item: (-item[0], item[1]))
-    fallback_candidates.sort(key=lambda item: (-item[0], item[1]))
-
-    for _, rel_path, artifact in evidence_candidates + fallback_candidates:
-        if len(copied) >= max_artifacts:
-            break
-        if rel_path in seen_paths:
+        excerpt_payload = safe_text_artifact_excerpt(
+            source_run_dir,
+            rel_path,
+            max_bytes=max_bytes,
+            char_limit=excerpt_char_limit,
+        )
+        if excerpt_payload is None:
             continue
-        seen_paths.add(rel_path)
+        source_path = (source_run_dir / rel_path).resolve()
         copied.append(
-            _copy_file(
-                source_path=artifact["source_path_obj"],
+            _copy_existing_file(
+                source_path=source_path,
                 source_rel_path=rel_path,
                 destination_root=destination_root,
-                copy_reason="claim_evidence" if artifact.get("evidence_linked") else "artifact_relevance",
+                copy_reason="claim_evidence",
             )
         )
+        seen_paths.add(rel_path)
+        if len(copied) >= max_artifacts:
+            break
     return copied
 
 
@@ -170,11 +128,27 @@ def build_summary(selected_sources: list[dict[str, Any]]) -> str:
                 f"## {item['run_id']}",
                 f"- Retrieval score: {item['total_score']}",
                 f"- Summary: {item['summary'] or 'No summary recorded.'}",
+                f"- View: {item['view_path']}",
             ]
         )
-        claims = item.get("claims", [])
-        if claims:
-            lines.append("- Claims: " + "; ".join(claims[:3]))
+        claim_records = item.get("claim_records", [])
+        if claim_records:
+            lines.append("- Claims:")
+            for claim in claim_records[:3]:
+                evidence = ", ".join(claim.get("evidence", [])) or "none recorded"
+                lines.append(f"  - {claim.get('claim', '')} (evidence: {evidence})")
+        artifact_records = [
+            artifact
+            for artifact in item.get("artifact_records", [])
+            if artifact.get("evidence_linked") or artifact.get("excerpt")
+        ]
+        if artifact_records:
+            lines.append("- Evidence artifacts:")
+            for artifact in artifact_records[:3]:
+                description = (
+                    str(artifact.get("description", "")).strip() or "No description recorded."
+                )
+                lines.append(f"  - {artifact.get('path', '')}: {description}")
         copied_files = item.get("copied_files", [])
         if copied_files:
             lines.append(
@@ -198,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("; ".join(parsed_task["errors"]))
 
     retrieval = settings["retrieval"]
+    retrieval_profile = load_retrieval_profile(repo_root=run_dir.parent.parent)
     context_dir = run_dir / settings["context_dir"]
     if context_dir.exists():
         shutil.rmtree(context_dir)
@@ -205,42 +180,22 @@ def main(argv: list[str] | None = None) -> int:
 
     query_text = build_query_text(parsed_task)
     query = build_query(parsed_task)
-    selected_sources: list[dict[str, Any]] = []
     index_state = sync_retrieval_index(
         runs_root(run_dir),
         exclude_run_id=run_dir.name,
         eval_policy=policy,
+        retrieval_profile=retrieval_profile,
     )
     indexed_entries = index_state["entries"]
     skipped_sources = sum(1 for entry in indexed_entries if not entry.get("eligible"))
     eligible_run_count = sum(1 for entry in indexed_entries if entry.get("eligible"))
 
     ranking_started = time.perf_counter()
-    stage1_candidates: list[dict[str, Any]] = []
-    for entry in indexed_entries:
-        if not entry.get("eligible"):
-            continue
-        scored = score_index_entry(query, entry)
-        if scored["stage1_score"] <= 0:
-            continue
-        stage1_candidates.append(
-            {
-                **scored,
-                "summary": str(entry.get("summary", "")),
-                "claims": list(entry.get("claims", [])),
-                "artifact_records": list(entry.get("artifact_records", [])),
-                "source_run_dir": pathlib.Path(str(entry["source_run_path"])),
-            }
-        )
-
-    stage1_candidates.sort(key=lambda item: (-item["stage1_score"], item["run_id"]))
-    rerank_pool = stage1_candidates[: int(retrieval["max_candidates"])]
-    rerank_pool.sort(
-        key=lambda item: (
-            -item["total_score"],
-            -item["stage1_score"],
-            item["run_id"],
-        )
+    rerank_pool = rank_index_entries(
+        query,
+        indexed_entries,
+        retrieval_profile=retrieval_profile,
+        max_candidates=int(retrieval["max_candidates"]),
     )
     ranking_latency_ms = round((time.perf_counter() - ranking_started) * 1000.0, 2)
     selected_sources = rerank_pool[: int(retrieval["max_source_runs"])]
@@ -262,27 +217,28 @@ def main(argv: list[str] | None = None) -> int:
         source_run_dir = item["source_run_dir"]
         destination_root = context_dir / "source-runs" / item["run_id"]
         destination_root.mkdir(parents=True, exist_ok=True)
-        copied_core_files: list[dict[str, Any]] = []
-        for rel_path in ["task.md", "result.json", "score.json"]:
-            source_path = source_run_dir / rel_path
-            copied_core_files.append(
-                _copy_file(
-                    source_path=source_path,
-                    source_rel_path=rel_path,
-                    destination_root=destination_root,
-                    copy_reason="core_run_file",
-                )
+        view_path = destination_root / "retrieval-view.md"
+        copied_files: list[dict[str, Any]] = [
+            _write_derived_file(
+                destination_path=view_path,
+                source_path_label="retrieval_view",
+                contents=str(item.get("retrieval_view", {}).get("text", "")),
+                copy_reason="retrieval_view",
             )
+        ]
 
         copied_artifacts = copy_context_artifacts(
-            query=query,
             source_run_dir=source_run_dir,
             destination_root=destination_root,
             artifact_records=item.get("artifact_records", []),
             max_artifacts=int(retrieval["max_artifacts_per_run"]),
-            max_bytes=int(retrieval["max_artifact_bytes"]),
+            max_bytes=int(retrieval_profile["view_excerpt_max_bytes"]),
+            excerpt_char_limit=int(retrieval_profile["view_excerpt_char_limit"]),
         )
         copied_artifact_bytes += sum(entry["bytes_copied"] for entry in copied_artifacts)
+        copied_files.extend(copied_artifacts)
+
+        relative_view_path = str(view_path.relative_to(run_dir))
         selected_manifest_entries.append(
             {
                 "run_id": item["run_id"],
@@ -290,10 +246,12 @@ def main(argv: list[str] | None = None) -> int:
                 "total_score": item["total_score"],
                 "score_breakdown": dict(item["score_breakdown"]),
                 "summary": item["summary"],
-                "copied_files": copied_core_files + copied_artifacts,
+                "view_path": relative_view_path,
+                "copied_files": copied_files,
             }
         )
-        item["copied_files"] = copied_core_files + copied_artifacts
+        item["view_path"] = relative_view_path
+        item["copied_files"] = copied_files
 
     manifest_path = run_dir / settings["context_manifest_path"]
     summary_path = run_dir / settings["context_summary_path"]
@@ -303,9 +261,12 @@ def main(argv: list[str] | None = None) -> int:
         "index_version": index_state["index_version"],
         "index_mode": index_state["index_mode"],
         "selection_strategy": selection_strategy,
+        "retrieval_profile_id": retrieval_profile["profile_id"],
         "candidate_run_count": index_state["candidate_run_count"],
         "eligible_run_count": eligible_run_count,
         "selected_count": len(selected_sources),
+        "selected_source_count": len(selected_sources),
+        "empty_context": len(selected_sources) == 0,
         "query_text_hash": sha256_text(query_text),
         "query_token_count": query["token_count"],
         "ranking_latency_ms": ranking_latency_ms,

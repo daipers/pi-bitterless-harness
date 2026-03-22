@@ -389,6 +389,55 @@ def test_score_run_happy_path(isolated_repo: pathlib.Path) -> None:
     assert payload["retrieval"]["enabled"] is False
 
 
+def test_score_run_includes_selected_source_count_and_empty_context(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = make_run_dir(isolated_repo, execution_profile="capability")
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "context").mkdir(exist_ok=True)
+    (run_dir / "context" / "retrieval-manifest.json").write_text(
+        json.dumps(
+            {
+                "retrieval_profile_id": "retrieval-v4-default",
+                "selected_count": 1,
+                "selected_source_count": 1,
+                "empty_context": False,
+                "candidate_run_count": 3,
+                "eligible_run_count": 2,
+                "ranking_latency_ms": 4.5,
+                "artifact_bytes_copied": 42,
+                "selected_source_run_ids": ["prior-run-1"],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["retrieval"]["enabled"] is True
+    assert payload["retrieval"]["retrieval_profile_id"] == "retrieval-v4-default"
+    assert payload["retrieval"]["selected_count"] == 1
+    assert payload["retrieval"]["selected_source_count"] == 1
+    assert payload["retrieval"]["empty_context"] is False
+
+
 def test_score_run_reports_invalid_result(isolated_repo: pathlib.Path) -> None:
     run_dir = make_run_dir(isolated_repo)
     (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
@@ -548,8 +597,7 @@ def test_score_run_recovery_secret_findings_fail_score(isolated_repo: pathlib.Pa
     assert payload["overall_pass"] is False
     assert "eval_failed" in payload["failure_classifications"]
     assert any(
-        "recovery/secret.txt" in finding["path"]
-        for finding in payload["secret_scan"]["findings"]
+        "recovery/secret.txt" in finding["path"] for finding in payload["secret_scan"]["findings"]
     )
 
 

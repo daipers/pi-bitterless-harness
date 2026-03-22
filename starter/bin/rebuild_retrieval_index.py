@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         "index_root": str(state["index_root"]),
         "index_version": state["index_version"],
         "index_mode": state["index_mode"],
+        "retrieval_profile_id": state.get("retrieval_profile_id"),
         "candidate_run_count": state["candidate_run_count"],
         "refreshed_run_count": state["refreshed_run_count"],
         "evicted_run_count": state["evicted_run_count"],

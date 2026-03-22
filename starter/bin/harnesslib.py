@@ -27,7 +27,7 @@ TASK_REQUIRED_SECTIONS = [
     "Required Artifacts",
     "Result JSON schema (source of truth)",
 ]
-TASK_OPTIONAL_SECTIONS = {"Notes"}
+TASK_OPTIONAL_SECTIONS = {"Notes", "Retrieval Quality Rubric"}
 
 DEFAULT_RETRIEVAL_CONFIG = {
     "enabled": False,
@@ -177,17 +177,20 @@ def make_result_template() -> dict[str, Any]:
     return {
         "x-interface-version": RESULT_INTERFACE_VERSION,
         "status": "success",
-        "summary": "short summary of what was done",
+        "summary": (
+            "Updated retrieval scoring for the requested task and wrote "
+            "outputs/retrieval-metrics.json with benchmark-ready metrics."
+        ),
         "artifacts": [
             {
-                "path": "outputs/example-output.txt",
-                "description": "proof artifact",
+                "path": "outputs/retrieval-metrics.json",
+                "description": "Metrics snapshot showing the retrieval quality outputs produced by this run.",
             }
         ],
         "claims": [
             {
-                "claim": "brief claim",
-                "evidence": ["path or command"],
+                "claim": "Retrieval metrics were generated and written to outputs/retrieval-metrics.json.",
+                "evidence": ["outputs/retrieval-metrics.json"],
             }
         ],
         "remaining_risks": ["optional remaining risks"],
@@ -329,12 +332,21 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
     if not isinstance(retrieval, dict):
         errors.append("retrieval must be an object")
     else:
-        for key in ["enabled", "source", "max_source_runs", "max_artifacts_per_run", "max_artifact_bytes"]:
+        for key in [
+            "enabled",
+            "source",
+            "max_source_runs",
+            "max_artifacts_per_run",
+            "max_artifact_bytes",
+        ]:
             if key not in retrieval:
                 errors.append(f"missing retrieval field: {key}")
         if retrieval.get("source") != DEFAULT_RETRIEVAL_CONFIG["source"]:
             errors.append("retrieval.source must be 'prior_runs'")
-        if "strategy" in retrieval and retrieval["strategy"] != DEFAULT_RETRIEVAL_CONFIG["strategy"]:
+        if (
+            "strategy" in retrieval
+            and retrieval["strategy"] != DEFAULT_RETRIEVAL_CONFIG["strategy"]
+        ):
             errors.append("retrieval.strategy must be 'hybrid_v1'")
         if (
             "artifact_selection" in retrieval
@@ -375,9 +387,7 @@ def resolve_execution_settings(
             "run_contract_version": version,
             "execution_profile": profile,
             "policy_path": (
-                default_policy_path(profile)
-                if profile_override
-                else run_contract["policy_path"]
+                default_policy_path(profile) if profile_override else run_contract["policy_path"]
             ),
             "context_dir": run_contract["context_dir"],
             "context_manifest_path": run_contract["context_manifest_path"],

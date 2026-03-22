@@ -1,0 +1,26 @@
+{
+  "profile_id": "retrieval-v4-default",
+  "field_weights": {
+    "task_title_overlap": 2,
+    "goal_overlap": 4,
+    "constraints_overlap": 2,
+    "done_overlap": 1,
+    "summary_overlap": 3,
+    "claim_overlap": 4,
+    "artifact_overlap": 2,
+    "evidence_path_overlap": 2
+  },
+  "phrase_bonus_per_field": 6,
+  "phrase_bonus_cap": 12,
+  "stage1_candidate_cutoff": 25,
+  "view_artifact_selection": "evidence_first",
+  "view_excerpt_artifact_limit": 2,
+  "view_excerpt_max_bytes": 65536,
+  "view_excerpt_char_limit": 512,
+  "quality_prior": {
+    "summary_token_threshold": 8,
+    "summary_bonus": 1,
+    "evidence_backed_claim_bonus": 2,
+    "descriptive_artifact_bonus": 1
+  }
+}

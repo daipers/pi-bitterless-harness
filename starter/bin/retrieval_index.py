@@ -9,22 +9,16 @@ import re
 import shutil
 from typing import Any
 
-from harnesslib import DEFAULT_RETRIEVAL_CONFIG, evaluate_required_artifact_path, parse_task_file, write_json
+from harnesslib import (
+    evaluate_required_artifact_path,
+    parse_task_file,
+    sha256_text,
+    write_json,
+)
 
-INDEX_VERSION = "retrieval-v2"
+INDEX_VERSION = "retrieval-v4"
 INDEX_ROOT_PARTS = (".index", INDEX_VERSION)
 TOKEN_RE = re.compile(r"[a-z0-9]+")
-FIELD_WEIGHTS = {
-    "goal_overlap": 4,
-    "constraints_overlap": 2,
-    "done_overlap": 1,
-    "summary_overlap": 3,
-    "claim_overlap": 4,
-    "artifact_overlap": 2,
-}
-PHRASE_BONUS_PER_FIELD = 6
-PHRASE_BONUS_CAP = 12
-ARTIFACT_EXCERPT_BYTES = 2048
 SKIPPED_TOP_LEVEL = {"home", "session", "recovery"}
 SKIPPED_FILES = {
     "transcript.jsonl",
@@ -34,6 +28,141 @@ SKIPPED_FILES = {
     "pi.exit_code.txt",
     "run-events.jsonl",
 }
+DEFAULT_RETRIEVAL_PROFILE = {
+    "profile_id": "retrieval-v4-default",
+    "field_weights": {
+        "task_title_overlap": 2,
+        "goal_overlap": 4,
+        "constraints_overlap": 2,
+        "done_overlap": 1,
+        "summary_overlap": 3,
+        "claim_overlap": 4,
+        "artifact_overlap": 2,
+        "evidence_path_overlap": 2,
+    },
+    "phrase_bonus_per_field": 6,
+    "phrase_bonus_cap": 12,
+    "stage1_candidate_cutoff": 25,
+    "view_artifact_selection": "evidence_first",
+    "view_excerpt_artifact_limit": 2,
+    "view_excerpt_max_bytes": 65536,
+    "view_excerpt_char_limit": 512,
+    "quality_prior": {
+        "summary_token_threshold": 8,
+        "summary_bonus": 1,
+        "evidence_backed_claim_bonus": 2,
+        "descriptive_artifact_bonus": 1,
+    },
+}
+
+
+def harness_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[1]
+
+
+def default_retrieval_profile_path(repo_root: pathlib.Path | None = None) -> pathlib.Path:
+    return (repo_root or harness_root()) / "retrieval" / "active_profile.json"
+
+
+def resolve_retrieval_profile_path(
+    profile_path: str | pathlib.Path | None = None,
+    *,
+    repo_root: pathlib.Path | None = None,
+) -> pathlib.Path:
+    if profile_path is None:
+        env_path = os_environ("HARNESS_RETRIEVAL_PROFILE_PATH")
+        if env_path:
+            profile_path = env_path
+        else:
+            return default_retrieval_profile_path(repo_root)
+    candidate = pathlib.Path(profile_path)
+    if candidate.is_absolute():
+        return candidate
+    return (repo_root or harness_root()) / candidate
+
+
+def os_environ(name: str) -> str | None:
+    try:
+        import os
+    except Exception:
+        return None
+    return os.environ.get(name)
+
+
+def validate_retrieval_profile(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload.get("profile_id"), str) or not payload["profile_id"]:
+        errors.append("retrieval profile must include non-empty profile_id")
+    field_weights = payload.get("field_weights")
+    if not isinstance(field_weights, dict):
+        errors.append("retrieval profile field_weights must be an object")
+    else:
+        for key in DEFAULT_RETRIEVAL_PROFILE["field_weights"]:
+            value = field_weights.get(key)
+            if not isinstance(value, int) or value < 0:
+                errors.append(f"retrieval profile field_weights.{key} must be a non-negative integer")
+    for key in [
+        "phrase_bonus_per_field",
+        "phrase_bonus_cap",
+        "stage1_candidate_cutoff",
+        "view_excerpt_artifact_limit",
+        "view_excerpt_max_bytes",
+        "view_excerpt_char_limit",
+    ]:
+        value = payload.get(key)
+        if not isinstance(value, int) or value < 1:
+            errors.append(f"retrieval profile {key} must be a positive integer")
+    if payload.get("view_artifact_selection") not in {"evidence_first", "descriptive_first"}:
+        errors.append(
+            "retrieval profile view_artifact_selection must be evidence_first or descriptive_first"
+        )
+    quality_prior = payload.get("quality_prior")
+    if not isinstance(quality_prior, dict):
+        errors.append("retrieval profile quality_prior must be an object")
+    else:
+        for key in [
+            "summary_token_threshold",
+            "summary_bonus",
+            "evidence_backed_claim_bonus",
+            "descriptive_artifact_bonus",
+        ]:
+            value = quality_prior.get(key)
+            if not isinstance(value, int) or value < 0:
+                errors.append(f"retrieval profile quality_prior.{key} must be a non-negative integer")
+    return errors
+
+
+def load_retrieval_profile(
+    profile_path: str | pathlib.Path | None = None,
+    *,
+    repo_root: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    path = resolve_retrieval_profile_path(profile_path, repo_root=repo_root)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("retrieval profile must be a JSON object")
+    merged = json.loads(json.dumps(DEFAULT_RETRIEVAL_PROFILE))
+    merged.update({key: value for key, value in payload.items() if key != "field_weights"})
+    merged["field_weights"] = dict(DEFAULT_RETRIEVAL_PROFILE["field_weights"])
+    merged["field_weights"].update(payload.get("field_weights", {}))
+    merged["quality_prior"] = dict(DEFAULT_RETRIEVAL_PROFILE["quality_prior"])
+    merged["quality_prior"].update(payload.get("quality_prior", {}))
+    errors = validate_retrieval_profile(merged)
+    if errors:
+        raise ValueError("; ".join(errors))
+    merged["path"] = str(path)
+    merged["profile_fingerprint"] = sha256_text(
+        json.dumps(
+            {
+                key: value
+                for key, value in merged.items()
+                if key not in {"path", "profile_fingerprint"}
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    )
+    return merged
 
 
 def tokenize(text: str) -> collections.Counter[str]:
@@ -145,17 +274,11 @@ def build_query_text(parsed_task: dict[str, Any]) -> str:
 
 def build_query(parsed_task: dict[str, Any]) -> dict[str, Any]:
     sections = build_query_sections(parsed_task)
-    task_lines = [sections["task_title"]]
-    for key in ["goal", "constraints", "done"]:
-        task_lines.extend(
-            line.strip("- ").strip()
-            for line in sections[key].splitlines()
-            if line.strip()
-        )
     phrase_source_lines = [sections["task_title"]]
-    phrase_source_lines.extend(
-        line.strip("- ").strip() for line in sections["goal"].splitlines() if line.strip()
-    )
+    for key in ["goal", "constraints", "done"]:
+        phrase_source_lines.extend(
+            line.strip("- ").strip() for line in sections[key].splitlines() if line.strip()
+        )
     phrases: list[str] = []
     for line in phrase_source_lines:
         tokens = TOKEN_RE.findall(line.lower())
@@ -200,11 +323,12 @@ def _valid_artifact_source_path(source_run_dir: pathlib.Path, rel_path: str) -> 
     return source_path
 
 
-def _safe_text_artifact_excerpt(
+def safe_text_artifact_excerpt(
     source_run_dir: pathlib.Path,
     rel_path: str,
     *,
     max_bytes: int,
+    char_limit: int,
 ) -> tuple[str, int] | None:
     source_path = _valid_artifact_source_path(source_run_dir, rel_path)
     if source_path is None:
@@ -219,28 +343,36 @@ def _safe_text_artifact_excerpt(
         excerpt = source_path.read_text(encoding="utf-8")
     except Exception:
         return None
-    return excerpt[:ARTIFACT_EXCERPT_BYTES], size
+    return excerpt[:char_limit], size
 
 
-def eligible_claims(result_payload: dict[str, Any]) -> list[str]:
-    return [
-        item.get("claim", "")
-        for item in result_payload.get("claims", [])
-        if isinstance(item, dict) and item.get("claim")
-    ]
+def claim_records(result_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for item in result_payload.get("claims", []):
+        if not isinstance(item, dict):
+            continue
+        claim = item.get("claim")
+        if not isinstance(claim, str) or not claim:
+            continue
+        evidence = item.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+        records.append(
+            {
+                "claim": claim,
+                "evidence": [
+                    candidate for candidate in evidence if isinstance(candidate, str) and candidate
+                ],
+            }
+        )
+    return records
 
 
 def claim_evidence_paths(result_payload: dict[str, Any]) -> set[str]:
     paths: set[str] = set()
-    for item in result_payload.get("claims", []):
-        if not isinstance(item, dict):
-            continue
-        evidence = item.get("evidence", [])
-        if not isinstance(evidence, list):
-            continue
-        for candidate in evidence:
-            if isinstance(candidate, str) and candidate:
-                paths.add(candidate)
+    for item in claim_records(result_payload):
+        for candidate in item["evidence"]:
+            paths.add(candidate)
     return paths
 
 
@@ -261,27 +393,192 @@ def declared_artifacts(result_payload: dict[str, Any]) -> list[dict[str, str]]:
     return artifacts
 
 
+def _artifact_excerpt_sort_key(artifact: dict[str, Any], selection: str) -> tuple[Any, ...]:
+    description_token_count = sum(collections.Counter(artifact["description_tokens"]).values())
+    if selection == "descriptive_first":
+        return (-description_token_count, artifact["path"])
+    return (0 if artifact["evidence_linked"] else 1, artifact["path"])
+
+
+def _render_claim_lines(claim_payloads: list[dict[str, Any]]) -> list[str]:
+    if not claim_payloads:
+        return ["- none recorded"]
+    lines: list[str] = []
+    for item in claim_payloads:
+        evidence = ", ".join(item["evidence"]) if item["evidence"] else "none recorded"
+        lines.append(f"- {item['claim']} (evidence: {evidence})")
+    return lines
+
+
+def _render_artifact_lines(artifact_records: list[dict[str, Any]]) -> list[str]:
+    if not artifact_records:
+        return ["- none recorded"]
+    lines: list[str] = []
+    for artifact in artifact_records:
+        description = artifact["description"].strip() or "No description recorded."
+        line = f"- {artifact['path']}: {description}"
+        if artifact.get("excerpt"):
+            snippet = normalize_match_text(str(artifact["excerpt"]))[:180]
+            line += f" | excerpt: {snippet}"
+        lines.append(line)
+    return lines
+
+
+def render_retrieval_view(view: dict[str, Any]) -> str:
+    lines = [
+        f"# Retrieval View: {view['run_id']}",
+        "",
+        f"Task title: {view['task_title'] or 'Untitled task'}",
+        f"Goal: {view['goal'] or 'No goal recorded.'}",
+    ]
+    if view.get("constraints"):
+        lines.append(f"Constraints: {view['constraints']}")
+    if view.get("done"):
+        lines.append(f"Done: {view['done']}")
+    lines.extend(
+        [
+            "",
+            "## Summary",
+            view["summary"] or "No summary recorded.",
+            "",
+            "## Claims",
+            *_render_claim_lines(view["claim_records"]),
+            "",
+            "## Evidence Paths",
+        ]
+    )
+    evidence_paths = view.get("evidence_paths", [])
+    lines.extend([f"- {path}" for path in evidence_paths] or ["- none recorded"])
+    lines.extend(["", "## Artifacts", *_render_artifact_lines(view["artifact_records"]), ""])
+    return "\n".join(lines)
+
+
+def build_retrieval_view(
+    source_run_dir: pathlib.Path,
+    *,
+    query_sections: dict[str, str],
+    result_payload: dict[str, Any],
+    retrieval_profile: dict[str, Any],
+) -> dict[str, Any]:
+    claim_payloads = claim_records(result_payload)
+    claims = [item["claim"] for item in claim_payloads]
+    evidence_paths = sorted(claim_evidence_paths(result_payload))
+    summary = str(result_payload.get("summary", ""))
+    artifacts = declared_artifacts(result_payload)
+
+    artifact_records: list[dict[str, Any]] = []
+    descriptive_artifact_count = 0
+    eligible_artifact_count = 0
+    evidence_linked_artifact_count = 0
+
+    for artifact in artifacts:
+        rel_path = artifact["path"]
+        description = artifact["description"]
+        description_tokens = tokenize(description)
+        if sum(description_tokens.values()) >= 3:
+            descriptive_artifact_count += 1
+        evidence_linked = rel_path in evidence_paths
+        if evidence_linked:
+            evidence_linked_artifact_count += 1
+        safe_text = safe_text_artifact_excerpt(
+            source_run_dir,
+            rel_path,
+            max_bytes=int(retrieval_profile["view_excerpt_max_bytes"]),
+            char_limit=int(retrieval_profile["view_excerpt_char_limit"]),
+        )
+        eligible_for_copy = safe_text is not None
+        if eligible_for_copy:
+            eligible_artifact_count += 1
+        artifact_records.append(
+            {
+                "path": rel_path,
+                "description": description,
+                "description_tokens": serialize_counter(description_tokens),
+                "evidence_linked": evidence_linked,
+                "eligible_for_copy": eligible_for_copy,
+                "excerpt": "",
+                "excerpt_tokens": {},
+                "excerpt_size_bytes": safe_text[1] if safe_text is not None else None,
+                "safe_excerpt": safe_text[0] if safe_text is not None else "",
+            }
+        )
+
+    excerpt_candidates = [
+        artifact
+        for artifact in artifact_records
+        if artifact["evidence_linked"] and artifact["eligible_for_copy"] and artifact["safe_excerpt"]
+    ]
+    excerpt_candidates.sort(
+        key=lambda artifact: _artifact_excerpt_sort_key(
+            artifact,
+            str(retrieval_profile["view_artifact_selection"]),
+        )
+    )
+    for artifact in excerpt_candidates[: int(retrieval_profile["view_excerpt_artifact_limit"])]:
+        artifact["excerpt"] = str(artifact["safe_excerpt"])
+        artifact["excerpt_tokens"] = serialize_counter(tokenize(artifact["excerpt"]))
+    for artifact in artifact_records:
+        artifact.pop("safe_excerpt", None)
+
+    view = {
+        "run_id": source_run_dir.name,
+        "task_title": query_sections["task_title"],
+        "goal": query_sections["goal"],
+        "constraints": query_sections["constraints"],
+        "done": query_sections["done"],
+        "summary": summary,
+        "claims": claims,
+        "claim_records": claim_payloads,
+        "evidence_paths": evidence_paths,
+        "artifact_records": artifact_records,
+        "quality": {
+            "summary_present": bool(summary.strip()),
+            "claim_count": len(claims),
+            "summary_token_count": sum(tokenize(summary).values()),
+            "artifact_count": len(artifact_records),
+            "descriptive_artifact_count": descriptive_artifact_count,
+            "evidence_backed_claim_count": sum(1 for item in claim_payloads if item["evidence"]),
+            "evidence_linked_artifact_count": evidence_linked_artifact_count,
+            "eligible_artifact_count": eligible_artifact_count,
+        },
+    }
+    view["text"] = render_retrieval_view(view)
+    return view
+
+
 def build_index_entry(
     source_run_dir: pathlib.Path,
     *,
     eval_policy: dict[str, Any] | None = None,
+    retrieval_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    profile = retrieval_profile or load_retrieval_profile()
     fingerprints = run_input_fingerprints(source_run_dir)
     entry: dict[str, Any] = {
         "index_version": INDEX_VERSION,
+        "retrieval_profile_id": profile["profile_id"],
+        "retrieval_profile_fingerprint": profile["profile_fingerprint"],
         "run_id": source_run_dir.name,
         "source_run_path": str(source_run_dir.resolve()),
         "input_fingerprints": fingerprints,
         "eligible": False,
         "skip_reason": None,
         "overall_pass": False,
+        "query_text_hash": None,
         "summary": "",
         "claims": [],
+        "claim_records": [],
         "artifact_paths": [],
         "artifact_records": [],
+        "retrieval_view": {},
         "quality": {
             "summary_present": False,
             "claim_count": 0,
+            "summary_token_count": 0,
+            "artifact_count": 0,
+            "descriptive_artifact_count": 0,
+            "evidence_backed_claim_count": 0,
+            "evidence_linked_artifact_count": 0,
             "eligible_artifact_count": 0,
         },
         "document_tokens": {},
@@ -314,81 +611,52 @@ def build_index_entry(
         return entry
 
     query_sections = build_query_sections(parsed_task)
-    summary = str(result_payload.get("summary", ""))
-    claims = eligible_claims(result_payload)
-    evidence_paths = claim_evidence_paths(result_payload)
-    artifacts = declared_artifacts(result_payload)
-
-    artifact_description_tokens: collections.Counter[str] = collections.Counter()
-    artifact_excerpt_tokens: collections.Counter[str] = collections.Counter()
-    artifact_records: list[dict[str, Any]] = []
-    eligible_artifact_count = 0
-
-    for artifact in artifacts:
-        rel_path = artifact["path"]
-        description = artifact["description"]
-        description_tokens = tokenize(description)
-        artifact_description_tokens.update(description_tokens)
-        evidence_linked = rel_path in evidence_paths
-        excerpt = ""
-        excerpt_size = None
-        if evidence_linked:
-            excerpt_payload = _safe_text_artifact_excerpt(
-                source_run_dir,
-                rel_path,
-                max_bytes=int(DEFAULT_RETRIEVAL_CONFIG["max_artifact_bytes"]),
-            )
-            if excerpt_payload is not None:
-                excerpt, excerpt_size = excerpt_payload
-                artifact_excerpt_tokens.update(tokenize(excerpt))
-        safe_text = _safe_text_artifact_excerpt(
-            source_run_dir,
-            rel_path,
-            max_bytes=int(DEFAULT_RETRIEVAL_CONFIG["max_artifact_bytes"]),
-        )
-        eligible_for_copy = safe_text is not None
-        if eligible_for_copy:
-            eligible_artifact_count += 1
-        artifact_records.append(
-            {
-                "path": rel_path,
-                "description": description,
-                "description_tokens": serialize_counter(description_tokens),
-                "evidence_linked": evidence_linked,
-                "eligible_for_copy": eligible_for_copy,
-                "excerpt": excerpt,
-                "excerpt_tokens": serialize_counter(tokenize(excerpt)),
-                "excerpt_size_bytes": excerpt_size,
-            }
-        )
+    view = build_retrieval_view(
+        source_run_dir,
+        query_sections=query_sections,
+        result_payload=result_payload,
+        retrieval_profile=profile,
+    )
+    artifact_description_tokens = collections.Counter()
+    artifact_excerpt_tokens = collections.Counter()
+    for artifact in view["artifact_records"]:
+        artifact_description_tokens.update(collections.Counter(artifact["description_tokens"]))
+        artifact_excerpt_tokens.update(collections.Counter(artifact["excerpt_tokens"]))
 
     entry["eligible"] = True
     entry["overall_pass"] = True
-    entry["summary"] = summary
-    entry["claims"] = claims
-    entry["artifact_paths"] = [artifact["path"] for artifact in artifacts]
-    entry["artifact_records"] = artifact_records
-    entry["quality"] = {
-        "summary_present": bool(summary.strip()),
-        "claim_count": len(claims),
-        "eligible_artifact_count": eligible_artifact_count,
-    }
+    entry["query_text_hash"] = sha256_text(build_query_text(parsed_task))
+    entry["summary"] = view["summary"]
+    entry["claims"] = list(view["claims"])
+    entry["claim_records"] = list(view["claim_records"])
+    entry["artifact_paths"] = [artifact["path"] for artifact in view["artifact_records"]]
+    entry["artifact_records"] = list(view["artifact_records"])
+    entry["retrieval_view"] = view
+    entry["quality"] = dict(view["quality"])
     entry["document_tokens"] = {
-        "task_title": serialize_counter(tokenize(query_sections["task_title"])),
-        "goal": serialize_counter(tokenize(query_sections["goal"])),
-        "constraints": serialize_counter(tokenize(query_sections["constraints"])),
-        "done": serialize_counter(tokenize(query_sections["done"])),
-        "summary": serialize_counter(tokenize(summary)),
-        "claims": serialize_counter(tokenize("\n".join(claims))),
+        "task_title": serialize_counter(tokenize(view["task_title"])),
+        "goal": serialize_counter(tokenize(view["goal"])),
+        "constraints": serialize_counter(tokenize(view["constraints"])),
+        "done": serialize_counter(tokenize(view["done"])),
+        "summary": serialize_counter(tokenize(view["summary"])),
+        "claims": serialize_counter(tokenize("\n".join(view["claims"]))),
         "artifact_descriptions": serialize_counter(artifact_description_tokens),
         "artifact_excerpts": serialize_counter(artifact_excerpt_tokens),
+        "evidence_paths": serialize_counter(tokenize("\n".join(view["evidence_paths"]))),
+        "view_text": serialize_counter(tokenize(view["text"])),
     }
     return entry
 
 
-def entry_is_fresh(entry: dict[str, Any], source_run_dir: pathlib.Path) -> bool:
+def entry_is_fresh(
+    entry: dict[str, Any],
+    source_run_dir: pathlib.Path,
+    *,
+    retrieval_profile: dict[str, Any],
+) -> bool:
     return (
         entry.get("index_version") == INDEX_VERSION
+        and entry.get("retrieval_profile_fingerprint") == retrieval_profile["profile_fingerprint"]
         and entry.get("input_fingerprints") == run_input_fingerprints(source_run_dir)
     )
 
@@ -400,24 +668,18 @@ def write_index_entry(index_root: pathlib.Path, entry: dict[str, Any]) -> pathli
 
 
 def stage1_candidate_score(query: dict[str, Any], entry: dict[str, Any]) -> int:
-    document_tokens = entry.get("document_tokens", {})
-    candidate_tokens = merge_counters(
-        collections.Counter(document_tokens.get("task_title", {})),
-        collections.Counter(document_tokens.get("goal", {})),
-        collections.Counter(document_tokens.get("constraints", {})),
-        collections.Counter(document_tokens.get("done", {})),
-    )
-    return lexical_score(query["candidate_tokens"], dict(candidate_tokens))
+    field_tokens = collections.Counter(entry.get("document_tokens", {}).get("view_text", {}))
+    return lexical_score(query["candidate_tokens"], dict(field_tokens))
 
 
 def _field_overlap_score(
     query_tokens: collections.Counter[str],
     entry: dict[str, Any],
     entry_field: str,
-    weight_key: str,
+    weight: int,
 ) -> int:
     field_tokens = collections.Counter(entry.get("document_tokens", {}).get(entry_field, {}))
-    return FIELD_WEIGHTS[weight_key] * lexical_score(query_tokens, dict(field_tokens))
+    return weight * lexical_score(query_tokens, dict(field_tokens))
 
 
 def _field_phrase_hit(query: dict[str, Any], texts: list[str]) -> bool:
@@ -427,37 +689,62 @@ def _field_phrase_hit(query: dict[str, Any], texts: list[str]) -> bool:
     return any(phrase in haystack for phrase in query["phrases"] for haystack in haystacks)
 
 
-def score_index_entry(query: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+def score_index_entry(
+    query: dict[str, Any],
+    entry: dict[str, Any],
+    retrieval_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile = retrieval_profile or load_retrieval_profile()
+    weights = profile["field_weights"]
     artifact_texts = []
     for artifact in entry.get("artifact_records", []):
         artifact_texts.append(str(artifact.get("description", "")))
         artifact_texts.append(str(artifact.get("excerpt", "")))
 
     score_breakdown = {
+        "task_title_overlap": _field_overlap_score(
+            query["field_tokens"]["task_title"],
+            entry,
+            "task_title",
+            int(weights["task_title_overlap"]),
+        ),
         "goal_overlap": _field_overlap_score(
-            query["field_tokens"]["goal"], entry, "goal", "goal_overlap"
+            query["field_tokens"]["goal"], entry, "goal", int(weights["goal_overlap"])
         ),
         "constraints_overlap": _field_overlap_score(
-            query["field_tokens"]["constraints"], entry, "constraints", "constraints_overlap"
+            query["field_tokens"]["constraints"],
+            entry,
+            "constraints",
+            int(weights["constraints_overlap"]),
         ),
         "done_overlap": _field_overlap_score(
-            query["field_tokens"]["done"], entry, "done", "done_overlap"
+            query["field_tokens"]["done"], entry, "done", int(weights["done_overlap"])
         ),
         "summary_overlap": _field_overlap_score(
-            query["candidate_tokens"], entry, "summary", "summary_overlap"
+            query["candidate_tokens"], entry, "summary", int(weights["summary_overlap"])
         ),
         "claim_overlap": _field_overlap_score(
-            query["candidate_tokens"], entry, "claims", "claim_overlap"
+            query["candidate_tokens"], entry, "claims", int(weights["claim_overlap"])
         ),
-        "artifact_overlap": FIELD_WEIGHTS["artifact_overlap"]
+        "artifact_overlap": int(weights["artifact_overlap"])
         * lexical_score(
             query["candidate_tokens"],
             dict(
                 merge_counters(
-                    collections.Counter(entry.get("document_tokens", {}).get("artifact_descriptions", {})),
-                    collections.Counter(entry.get("document_tokens", {}).get("artifact_excerpts", {})),
+                    collections.Counter(
+                        entry.get("document_tokens", {}).get("artifact_descriptions", {})
+                    ),
+                    collections.Counter(
+                        entry.get("document_tokens", {}).get("artifact_excerpts", {})
+                    ),
                 )
             ),
+        ),
+        "evidence_path_overlap": _field_overlap_score(
+            query["candidate_tokens"],
+            entry,
+            "evidence_paths",
+            int(weights["evidence_path_overlap"]),
         ),
         "phrase_bonus": 0,
         "quality_prior": 0,
@@ -466,17 +753,25 @@ def score_index_entry(query: dict[str, Any], entry: dict[str, Any]) -> dict[str,
         "summary": _field_phrase_hit(query, [str(entry.get("summary", ""))]),
         "claims": _field_phrase_hit(query, list(entry.get("claims", []))),
         "artifacts": _field_phrase_hit(query, artifact_texts),
+        "evidence_paths": _field_phrase_hit(
+            query,
+            list(entry.get("retrieval_view", {}).get("evidence_paths", [])),
+        ),
     }
     score_breakdown["phrase_bonus"] = min(
-        PHRASE_BONUS_CAP,
-        PHRASE_BONUS_PER_FIELD * sum(1 for matched in phrase_hits.values() if matched),
+        int(profile["phrase_bonus_cap"]),
+        int(profile["phrase_bonus_per_field"])
+        * sum(1 for matched in phrase_hits.values() if matched),
     )
 
     quality = entry.get("quality", {})
-    if int(quality.get("claim_count", 0)) > 0:
-        score_breakdown["quality_prior"] += 2
-    if int(quality.get("eligible_artifact_count", 0)) > 0:
-        score_breakdown["quality_prior"] += 1
+    quality_prior = profile["quality_prior"]
+    if int(quality.get("summary_token_count", 0)) >= int(quality_prior["summary_token_threshold"]):
+        score_breakdown["quality_prior"] += int(quality_prior["summary_bonus"])
+    if int(quality.get("evidence_backed_claim_count", 0)) >= 1:
+        score_breakdown["quality_prior"] += int(quality_prior["evidence_backed_claim_bonus"])
+    if int(quality.get("descriptive_artifact_count", 0)) >= 1:
+        score_breakdown["quality_prior"] += int(quality_prior["descriptive_artifact_bonus"])
 
     total_score = sum(score_breakdown.values())
     return {
@@ -488,14 +783,58 @@ def score_index_entry(query: dict[str, Any], entry: dict[str, Any]) -> dict[str,
     }
 
 
+def rank_index_entries(
+    query: dict[str, Any],
+    entries: list[dict[str, Any]],
+    *,
+    retrieval_profile: dict[str, Any],
+    max_candidates: int | None = None,
+) -> list[dict[str, Any]]:
+    cutoff = int(retrieval_profile["stage1_candidate_cutoff"])
+    if max_candidates is not None:
+        cutoff = min(cutoff, int(max_candidates))
+
+    stage1_candidates: list[dict[str, Any]] = []
+    for entry in entries:
+        if not entry.get("eligible"):
+            continue
+        scored = score_index_entry(query, entry, retrieval_profile=retrieval_profile)
+        if scored["stage1_score"] <= 0:
+            continue
+        stage1_candidates.append(
+            {
+                **scored,
+                "summary": str(entry.get("summary", "")),
+                "claims": list(entry.get("claims", [])),
+                "claim_records": list(entry.get("claim_records", [])),
+                "artifact_records": list(entry.get("artifact_records", [])),
+                "retrieval_view": dict(entry.get("retrieval_view", {})),
+                "source_run_dir": pathlib.Path(str(entry["source_run_path"])),
+            }
+        )
+
+    stage1_candidates.sort(key=lambda item: (-item["stage1_score"], item["run_id"]))
+    rerank_pool = stage1_candidates[:cutoff]
+    rerank_pool.sort(
+        key=lambda item: (
+            -item["total_score"],
+            -item["stage1_score"],
+            item["run_id"],
+        )
+    )
+    return rerank_pool
+
+
 def sync_retrieval_index(
     runs_dir: pathlib.Path,
     *,
     exclude_run_id: str | None = None,
     eval_policy: dict[str, Any] | None = None,
     force_rebuild: bool = False,
+    retrieval_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     runs_dir = runs_root(runs_dir)
+    profile = retrieval_profile or load_retrieval_profile(repo_root=runs_dir.parent)
     index_root = retrieval_index_root_for_runs(runs_dir)
     had_index = index_root.exists()
 
@@ -507,9 +846,7 @@ def sync_retrieval_index(
 
     run_dirs = candidate_run_dirs(runs_dir, exclude_run_id=exclude_run_id)
     run_ids = {path.name for path in run_dirs}
-    existing_index_paths = {
-        path.stem: path for path in index_root.glob("*.json") if path.is_file()
-    }
+    existing_index_paths = {path.stem: path for path in index_root.glob("*.json") if path.is_file()}
 
     evicted_count = 0
     for run_id, path in existing_index_paths.items():
@@ -524,7 +861,15 @@ def sync_retrieval_index(
     stale_run_dirs: list[pathlib.Path] = []
     for run_dir in run_dirs:
         existing_entry = load_index_entry(index_root, run_dir.name)
-        if force_rebuild or existing_entry is None or not entry_is_fresh(existing_entry, run_dir):
+        if (
+            force_rebuild
+            or existing_entry is None
+            or not entry_is_fresh(
+                existing_entry,
+                run_dir,
+                retrieval_profile=profile,
+            )
+        ):
             stale_run_dirs.append(run_dir)
         else:
             entries.append(existing_entry)
@@ -533,7 +878,12 @@ def sync_retrieval_index(
         max_workers = min(8, len(stale_run_dirs))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_run_id = {
-                executor.submit(build_index_entry, run_dir, eval_policy=eval_policy): run_dir.name
+                executor.submit(
+                    build_index_entry,
+                    run_dir,
+                    eval_policy=eval_policy,
+                    retrieval_profile=profile,
+                ): run_dir.name
                 for run_dir in stale_run_dirs
             }
             for future in concurrent.futures.as_completed(future_to_run_id):
@@ -566,4 +916,5 @@ def sync_retrieval_index(
         "refreshed_run_count": refreshed_count,
         "evicted_run_count": evicted_count,
         "entries": entries,
+        "retrieval_profile_id": profile["profile_id"],
     }
