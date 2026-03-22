@@ -14,6 +14,7 @@ from harnesslib import (
     default_run_contract,
     env_flag,
     evaluate_required_artifact_path,
+    evaluate_policy_guardrail,
     load_policy,
     make_result_template,
     scan_paths_for_secrets,
@@ -325,7 +326,7 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
     v2_errors = validate_run_contract(broken_v2)
     assert "result_interface_version must be v1" in v2_errors
     assert "context_summary_path must be 'context/retrieval-summary.md'" in v2_errors
-    assert "execution_profile must be strict or capability" in v2_errors
+    assert "execution_profile must be one of: strict, offline, networked, heavy_tools, capability" in v2_errors
     assert "policy_path must be a non-empty string" in v2_errors
     assert "missing retrieval field: max_artifacts_per_run" in v2_errors
     assert "retrieval.source must be 'prior_runs'" in v2_errors
@@ -417,3 +418,34 @@ def test_validate_result_payload_falls_back_without_jsonschema(monkeypatch) -> N
     issues = validate_result_payload({"status": "done"}, {"type": "object"})
 
     assert issues
+
+
+def test_policy_guardrail_pre_tool_use_enforces_policy_and_environment() -> None:
+    strict = load_policy("policies/strict.json")
+    decision = evaluate_policy_guardrail(
+        strict,
+        "pre_tool_use",
+        context={
+            "requires_opt_in": True,
+            "network_access": True,
+            "allow_dangerous_eval": True,
+            "allow_network_tasks": False,
+        },
+    )
+    assert decision["allowed"] is False
+    assert decision["violations"] == ["tool_use.network_access"]
+    assert decision["effective_limits"]["allow_network_tasks_effective"] is False
+
+    offline = load_policy("policies/offline.json")
+    decision = evaluate_policy_guardrail(
+        offline,
+        "pre_tool_use",
+        context={
+            "requires_opt_in": False,
+            "network_access": True,
+            "allow_dangerous_eval": True,
+            "allow_network_tasks": True,
+        },
+    )
+    assert decision["allowed"] is False
+    assert decision["violations"] == ["tool_use.network_access"]

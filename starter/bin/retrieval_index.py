@@ -4,10 +4,12 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import json
+import os
 import pathlib
 import re
 import shutil
 from typing import Any
+from datetime import UTC, datetime
 
 from harnesslib import (
     evaluate_required_artifact_path,
@@ -18,6 +20,22 @@ from harnesslib import (
 
 INDEX_VERSION = "retrieval-v4"
 INDEX_ROOT_PARTS = (".index", INDEX_VERSION)
+INDEX_DEFAULT_TTL_SECONDS = 0
+INDEX_DEFAULT_MAX_ENTRIES = 0
+
+
+def _to_positive_int(value: str | int | None, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0:
+        return default
+    return parsed
+
+
+def _now_ms() -> int:
+    return int(datetime.now(UTC).timestamp() * 1000)
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 SKIPPED_TOP_LEVEL = {"home", "session", "recovery"}
 SKIPPED_FILES = {
@@ -551,13 +569,17 @@ def build_index_entry(
     *,
     eval_policy: dict[str, Any] | None = None,
     retrieval_profile: dict[str, Any] | None = None,
+    retrieval_mode: str | None = None,
 ) -> dict[str, Any]:
     profile = retrieval_profile or load_retrieval_profile()
     fingerprints = run_input_fingerprints(source_run_dir)
     entry: dict[str, Any] = {
+        "indexed_at": now_utc(),
+        "indexed_at_ms": _now_ms(),
         "index_version": INDEX_VERSION,
         "retrieval_profile_id": profile["profile_id"],
         "retrieval_profile_fingerprint": profile["profile_fingerprint"],
+        "retrieval_mode": retrieval_mode or "hybrid_v1",
         "run_id": source_run_dir.name,
         "source_run_path": str(source_run_dir.resolve()),
         "input_fingerprints": fingerprints,
@@ -645,6 +667,7 @@ def build_index_entry(
         "evidence_paths": serialize_counter(tokenize("\n".join(view["evidence_paths"]))),
         "view_text": serialize_counter(tokenize(view["text"])),
     }
+    entry["source_snapshot_fingerprint"] = entry_source_snapshot_fingerprint(entry)
     return entry
 
 
@@ -653,7 +676,15 @@ def entry_is_fresh(
     source_run_dir: pathlib.Path,
     *,
     retrieval_profile: dict[str, Any],
+    ttl_seconds: int,
 ) -> bool:
+    if ttl_seconds > 0 and entry.get("indexed_at_ms"):
+        try:
+            age_ms = _now_ms() - int(entry["indexed_at_ms"])
+        except (TypeError, ValueError):
+            return False
+        if age_ms > ttl_seconds * 1000:
+            return False
     return (
         entry.get("index_version") == INDEX_VERSION
         and entry.get("retrieval_profile_fingerprint") == retrieval_profile["profile_fingerprint"]
@@ -665,6 +696,78 @@ def write_index_entry(index_root: pathlib.Path, entry: dict[str, Any]) -> pathli
     path = index_path(index_root, str(entry["run_id"]))
     write_json(path, entry)
     return path
+
+
+def entry_source_snapshot_fingerprint(entry: dict[str, Any]) -> str:
+    return sha256_text(
+        json.dumps(
+            {
+                key: entry.get(key)
+                for key in ["run_id", "indexed_at_ms", "input_fingerprints", "query_text_hash"]
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    )
+
+
+def _entry_sort_key(entry: dict[str, Any]) -> tuple[int, str]:
+    return (-int(entry.get("indexed_at_ms") or 0), str(entry.get("run_id") or ""))
+
+
+def _entry_payload_bytes(entry: dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(entry, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    except TypeError:
+        return len(json.dumps({}, sort_keys=True).encode("utf-8"))
+
+
+def _normalize_run_dirs(run_dirs: list[pathlib.Path]) -> list[pathlib.Path]:
+    seen: set[str] = set()
+    normalized: list[pathlib.Path] = []
+    for run_dir in sorted(run_dirs, key=lambda path: path.name):
+        run_id = run_dir.name
+        if run_id in seen:
+            continue
+        seen.add(run_id)
+        normalized.append(run_dir)
+    return normalized
+
+
+def _build_index_provenance(
+    entries: list[dict[str, Any]],
+    *,
+    retrieval_profile: dict[str, Any],
+    retrieval_mode: str,
+    index_ttl_seconds: int,
+    max_index_entries: int,
+    max_index_bytes: int,
+    index_mode: str,
+) -> str:
+    source_fingerprints = [
+        {
+            "run_id": entry.get("run_id"),
+            "source_snapshot_fingerprint": entry.get("source_snapshot_fingerprint"),
+        }
+        for entry in sorted(entries, key=lambda item: str(item.get("run_id", "")))
+    ]
+    return sha256_text(
+        json.dumps(
+            {
+                "index_version": INDEX_VERSION,
+                "index_mode": index_mode,
+                "retrieval_profile_id": retrieval_profile["profile_id"],
+                "retrieval_profile_fingerprint": retrieval_profile["profile_fingerprint"],
+                "retrieval_mode": retrieval_mode,
+                "index_ttl_seconds": index_ttl_seconds,
+                "max_index_entries": max_index_entries,
+                "max_index_bytes": max_index_bytes,
+                "entries": source_fingerprints,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    )
 
 
 def stage1_candidate_score(query: dict[str, Any], entry: dict[str, Any]) -> int:
@@ -832,31 +935,69 @@ def sync_retrieval_index(
     eval_policy: dict[str, Any] | None = None,
     force_rebuild: bool = False,
     retrieval_profile: dict[str, Any] | None = None,
+    index_ttl_seconds: int | None = None,
+    max_index_entries: int | None = None,
+    max_index_bytes: int | None = None,
+    retrieval_mode: str | None = None,
 ) -> dict[str, Any]:
     runs_dir = runs_root(runs_dir)
     profile = retrieval_profile or load_retrieval_profile(repo_root=runs_dir.parent)
     index_root = retrieval_index_root_for_runs(runs_dir)
+    retrieval_mode = retrieval_mode or "hybrid_v1"
+    ttl_seconds = _to_positive_int(index_ttl_seconds, default=INDEX_DEFAULT_TTL_SECONDS)
+    max_entries = _to_positive_int(max_index_entries, default=INDEX_DEFAULT_MAX_ENTRIES)
+    max_bytes = _to_positive_int(max_index_bytes, default=0)
     had_index = index_root.exists()
+    index_rebuild_count = 0
 
     if force_rebuild and index_root.exists():
         shutil.rmtree(index_root)
+        index_rebuild_count += 1
         had_index = False
 
     index_root.mkdir(parents=True, exist_ok=True)
 
-    run_dirs = candidate_run_dirs(runs_dir, exclude_run_id=exclude_run_id)
+    run_dirs = _normalize_run_dirs(candidate_run_dirs(runs_dir, exclude_run_id=exclude_run_id))
     run_ids = {path.name for path in run_dirs}
     existing_index_paths = {path.stem: path for path in index_root.glob("*.json") if path.is_file()}
+    parse_failures = 0
+    corrupted_paths: list[pathlib.Path] = []
+    existing_entries: dict[str, dict[str, Any]] = {}
+
+    for run_id, path in existing_index_paths.items():
+        raw = parse_json_file(path)
+        if not isinstance(raw, dict):
+            parse_failures += 1
+            corrupted_paths.append(path)
+            continue
+        existing_entries[run_id] = raw
+
+    if parse_failures > 0:
+        index_rebuild_count += 1
+        for path in corrupted_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        existing_entries.clear()
+        existing_index_paths = {}
+        if index_root.exists():
+            shutil.rmtree(index_root)
+            index_root.mkdir(parents=True, exist_ok=True)
 
     evicted_count = 0
     for run_id, path in existing_index_paths.items():
         if run_id in run_ids:
             continue
-        path.unlink()
-        evicted_count += 1
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        else:
+            evicted_count += 1
 
+    stale_removed = 0
     refreshed_count = 0
-    entries: list[dict[str, Any]] = []
     refreshed_entries: dict[str, dict[str, Any]] = {}
     stale_run_dirs: list[pathlib.Path] = []
     for run_dir in run_dirs:
@@ -868,11 +1009,11 @@ def sync_retrieval_index(
                 existing_entry,
                 run_dir,
                 retrieval_profile=profile,
+                ttl_seconds=ttl_seconds,
             )
         ):
             stale_run_dirs.append(run_dir)
-        else:
-            entries.append(existing_entry)
+            stale_removed += 1
 
     if stale_run_dirs:
         max_workers = min(8, len(stale_run_dirs))
@@ -883,6 +1024,7 @@ def sync_retrieval_index(
                     run_dir,
                     eval_policy=eval_policy,
                     retrieval_profile=profile,
+                    retrieval_mode=retrieval_mode,
                 ): run_dir.name
                 for run_dir in stale_run_dirs
             }
@@ -892,29 +1034,106 @@ def sync_retrieval_index(
                 write_index_entry(index_root, entry)
                 refreshed_count += 1
 
-    entries = []
+    candidate_entries: dict[str, dict[str, Any]] = {}
     for run_dir in run_dirs:
-        if run_dir.name in refreshed_entries:
-            entries.append(refreshed_entries[run_dir.name])
+        run_id = run_dir.name
+        if run_id in refreshed_entries:
+            candidate_entries[run_id] = refreshed_entries[run_id]
             continue
-        existing_entry = load_index_entry(index_root, run_dir.name)
+        existing_entry = existing_entries.get(run_id)
         if existing_entry is not None:
-            entries.append(existing_entry)
+            candidate_entries[run_id] = existing_entry
 
-    if force_rebuild or (not had_index and run_dirs):
+    compacted_removed = 0
+    compacted_kept = len(candidate_entries)
+    entries = [entry for _, entry in candidate_entries.items()]
+    entries.sort(key=_entry_sort_key)
+
+    if max_entries > 0 and len(entries) > max_entries:
+        dropped_entries = entries[max_entries:]
+        compacted_removed += len(dropped_entries)
+        entries = entries[:max_entries]
+        for entry in dropped_entries:
+            path = index_path(index_root, str(entry["run_id"]))
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    if max_bytes > 0:
+        sorted_oldest_first = sorted(
+            entries, key=lambda item: (int(item.get("indexed_at_ms") or 0), str(item.get("run_id", "")))
+        )
+        total_bytes = sum(_entry_payload_bytes(entry) for entry in sorted_oldest_first)
+        while sorted_oldest_first and total_bytes > max_bytes:
+            candidate = sorted_oldest_first.pop(0)
+            sorted_oldest_first_bytes = _entry_payload_bytes(candidate)
+            path = index_path(index_root, str(candidate["run_id"]))
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            compacted_removed += 1
+            compacted_kept -= 1
+            total_bytes -= sorted_oldest_first_bytes
+        entries = sorted_oldest_first
+
+    compacted_kept = len(entries)
+    kept_ids = {str(entry.get("run_id", "")) for entry in entries}
+    for run_dir in run_dirs:
+        path = index_path(index_root, run_dir.name)
+        if run_dir.name in kept_ids:
+            if run_dir.name in refreshed_entries:
+                write_index_entry(index_root, refreshed_entries[run_dir.name])
+            elif run_dir.name in existing_entries:
+                write_index_entry(index_root, existing_entries[run_dir.name])
+            continue
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+    if force_rebuild or index_rebuild_count > 0 or not had_index:
         index_mode = "cold_build"
-    elif refreshed_count > 0 or evicted_count > 0:
+    elif refreshed_count > 0 or evicted_count > 0 or compacted_removed > 0 or stale_removed > 0:
         index_mode = "incremental_refresh"
     else:
         index_mode = "warm_reuse"
+
+    source_snapshot_fingerprints = {
+        str(entry.get("run_id")): str(entry.get("source_snapshot_fingerprint"))
+        for entry in entries
+    }
+    index_state_token = _build_index_provenance(
+        entries,
+        retrieval_profile=profile,
+        retrieval_mode=retrieval_mode,
+        index_ttl_seconds=ttl_seconds,
+        max_index_entries=max_entries,
+        max_index_bytes=max_bytes,
+        index_mode=index_mode,
+    )
 
     return {
         "index_root": index_root,
         "index_version": INDEX_VERSION,
         "index_mode": index_mode,
         "candidate_run_count": len(run_dirs),
+        "index_ttl_seconds": ttl_seconds,
+        "max_index_entries": max_entries,
+        "max_index_bytes": max_bytes,
+        "index_rebuild_count": index_rebuild_count,
+        "stale_removed": stale_removed,
+        "compacted_removed": compacted_removed,
+        "compacted_kept": compacted_kept,
+        "index_refreshes": refreshed_count,
         "refreshed_run_count": refreshed_count,
         "evicted_run_count": evicted_count,
+        "source_snapshot_fingerprints": source_snapshot_fingerprints,
+        "index_provenance_token": index_state_token,
         "entries": entries,
         "retrieval_profile_id": profile["profile_id"],
+        "retrieval_profile_fingerprint": profile["profile_fingerprint"],
+        "retrieval_mode": retrieval_mode,
     }

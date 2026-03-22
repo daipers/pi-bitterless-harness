@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shlex
+import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
@@ -17,7 +18,7 @@ RUN_CONTRACT_VERSION_V1 = "v1"
 RUN_CONTRACT_VERSION_V2 = "v2"
 RUN_CONTRACT_VERSION = RUN_CONTRACT_VERSION_V2
 RESULT_INTERFACE_VERSION = "v1"
-EXECUTION_PROFILES = {"strict", "capability"}
+EXECUTION_PROFILES = {"strict", "offline", "networked", "heavy_tools", "capability"}
 
 TASK_REQUIRED_SECTIONS = [
     "Goal",
@@ -39,6 +40,150 @@ DEFAULT_RETRIEVAL_CONFIG = {
     "max_artifact_bytes": 65536,
     "artifact_selection": "evidence_first",
 }
+
+DEFAULT_RETRIEVAL_INDEX_POLICY = {
+    "ttl_seconds": 0,
+    "max_entries": 0,
+    "max_bytes": 0,
+}
+
+DEFAULT_RETENTION_POLICY = {
+    "run": {
+        "ttl_days": 30,
+        "max_count": 0,
+        "max_bytes": 0,
+    },
+    "artifact": {
+        "ttl_days": 7,
+        "max_count": 0,
+        "max_bytes": 0,
+    },
+    "queue": {
+        "ttl_days": 7,
+        "max_count": 0,
+    },
+}
+
+DEFAULT_GUARDRAIL_HOOKS = {
+    "pre_retrieval": {"enabled": True, "allow": True},
+    "pre_context_build": {"enabled": True, "allow": True},
+    "pre_run": {"enabled": True, "allow": True},
+    "pre_score_dispatch": {"enabled": True, "allow": True},
+    "pre_tool_use": {
+        "enabled": True,
+        "allow": True,
+        "allow_network_tools": True,
+        "allow_dangerous_commands": True,
+    },
+}
+
+DEFAULT_GUARDRAIL_POLICY = {
+    "hooks": copy.deepcopy(DEFAULT_GUARDRAIL_HOOKS),
+}
+
+DEFAULT_POLICY_BASE = {
+    "retrieval_index": DEFAULT_RETRIEVAL_INDEX_POLICY,
+    "retention": DEFAULT_RETENTION_POLICY,
+    "guardrails": DEFAULT_GUARDRAIL_POLICY,
+}
+
+_RUN_CONTRACT_BASE_FIELDS: dict[str, Any] = {
+    "required_run_files": [
+        "task.md",
+        "RUN.md",
+        "result.schema.json",
+        "result.template.json",
+        "run.contract.json",
+    ],
+    "required_directories": ["outputs", "home", "session", "score"],
+    "required_task_sections": TASK_REQUIRED_SECTIONS,
+    "result_schema_path": "result.schema.json",
+    "result_template_path": "result.template.json",
+    "manifest_path": "outputs/run_manifest.json",
+    "event_log_path": "run-events.jsonl",
+}
+
+_RUN_CONTRACT_REQUIRED_KEYS_V1 = [
+    "required_run_files",
+    "required_directories",
+    "required_task_sections",
+    "result_schema_path",
+    "result_template_path",
+    "manifest_path",
+    "event_log_path",
+    "eval_policy",
+]
+
+_RUN_CONTRACT_REQUIRED_KEYS_V2 = [
+    "required_run_files",
+    "required_directories",
+    "required_task_sections",
+    "result_schema_path",
+    "result_template_path",
+    "manifest_path",
+    "event_log_path",
+    "execution_profile",
+    "policy_path",
+    "context_dir",
+    "context_manifest_path",
+    "context_summary_path",
+    "retrieval",
+]
+
+_RUN_CONTRACT_REQUIRED_RETRIEVAL_KEYS = [
+    "enabled",
+    "source",
+    "max_source_runs",
+    "max_artifacts_per_run",
+    "max_artifact_bytes",
+]
+
+
+def _build_run_contract_template() -> dict[str, Any]:
+    return dict(_RUN_CONTRACT_BASE_FIELDS)
+
+
+def _collect_missing_fields(payload: dict[str, Any], keys: list[str], *, prefix: str) -> list[str]:
+    return [f"missing {prefix} field: {key}" for key in keys if key not in payload]
+
+
+def _to_positive_policy_int(value: str | int | None, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0:
+        return default
+    return parsed
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _validate_int_field(payload: dict[str, Any], path: str) -> list[str]:
+    value = payload.get(path)
+    if value is None:
+        return []
+    try:
+        int(value)
+    except (TypeError, ValueError):
+        return [f"policy.{path} must be an integer"]
+    return []
+
+
+def _collect_fixed_field_errors(payload: dict[str, Any], expected: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for key, value in expected.items():
+        if key in payload and payload[key] != value:
+            errors.append(f"{key} must be {value!r}")
+    return errors
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 NETWORK_TOKEN_RE = re.compile(r"\b(?:curl|nc|ping|scp|ssh|telnet|wget)\b")
 
@@ -128,6 +273,61 @@ def validate_policy(payload: dict[str, Any]) -> list[str]:
     for key in ["allowed_programs", "blocked_programs", "network_programs"]:
         if key in payload and not isinstance(payload[key], list):
             errors.append(f"{key} must be an array")
+
+    retrieval_index = payload.get("retrieval_index", {})
+    if retrieval_index is not None and not isinstance(retrieval_index, dict):
+        errors.append("retrieval_index must be an object")
+    elif retrieval_index:
+        for key in ["ttl_seconds", "max_entries", "max_bytes"]:
+            if key not in retrieval_index:
+                continue
+            errors.extend(_validate_int_field(retrieval_index, key))
+
+    retention = payload.get("retention", {})
+    if retention is not None and not isinstance(retention, dict):
+        errors.append("retention must be an object")
+    elif retention:
+        for scope in ["run", "artifact", "queue"]:
+            settings = retention.get(scope, {})
+            if settings is None:
+                continue
+            if not isinstance(settings, dict):
+                errors.append(f"retention.{scope} must be an object")
+                continue
+            for key in ["ttl_days", "max_count", "max_bytes"]:
+                if key in settings:
+                    errors.extend(_validate_int_field(settings, key))
+
+    guardrails = payload.get("guardrails", {})
+    if guardrails is not None and not isinstance(guardrails, dict):
+        errors.append("guardrails must be an object")
+    elif guardrails:
+        hooks = guardrails.get("hooks", {})
+        if hooks is not None and not isinstance(hooks, dict):
+            errors.append("guardrails.hooks must be an object")
+        elif hooks:
+            for hook_name, hook_payload in hooks.items():
+                if not isinstance(hook_payload, dict):
+                    errors.append(f"guardrails.hooks.{hook_name} must be an object")
+                    continue
+                if "enabled" in hook_payload and not isinstance(hook_payload["enabled"], bool):
+                    errors.append(f"guardrails.hooks.{hook_name}.enabled must be a boolean")
+                if "allow" in hook_payload and not isinstance(hook_payload["allow"], bool):
+                    errors.append(f"guardrails.hooks.{hook_name}.allow must be a boolean")
+                if "allow_network_tools" in hook_payload and not isinstance(
+                    hook_payload["allow_network_tools"],
+                    bool,
+                ):
+                    errors.append(
+                        f"guardrails.hooks.{hook_name}.allow_network_tools must be a boolean"
+                    )
+                if "allow_dangerous_commands" in hook_payload and not isinstance(
+                    hook_payload["allow_dangerous_commands"],
+                    bool,
+                ):
+                    errors.append(
+                        f"guardrails.hooks.{hook_name}.allow_dangerous_commands must be a boolean"
+                    )
     return errors
 
 
@@ -141,10 +341,261 @@ def load_policy(
     errors = validate_policy(payload)
     if errors:
         raise ValueError("; ".join(errors))
-    payload = dict(payload)
+    payload = _deep_merge(copy.deepcopy(DEFAULT_POLICY_BASE), payload)
     payload["path"] = str(path)
     payload["relative_path"] = str(path.relative_to(repo_root or script_root()))
+    payload["policy_fingerprint"] = sha256_text(
+        json.dumps(
+            {
+                key: payload[key]
+                for key in sorted(payload)
+                if key not in {"path", "relative_path", "policy_fingerprint"}
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    )
     return payload
+
+
+def policy_source_of_truth(policy: dict[str, Any]) -> str:
+    return str(
+        policy.get("relative_path")
+        or policy.get("path")
+        or policy.get("policy_path", "")
+        or policy.get("policy_source", "")
+        or "policy"
+    )
+
+
+def resolve_retrieval_index_policy(
+    payload: dict[str, Any] | None = None,
+    *,
+    profile_defaults: dict[str, Any] | None = None,
+    policy_env_prefix: str = "HARNESS_RETRIEVAL_INDEX",
+) -> dict[str, Any]:
+    base = copy.deepcopy(DEFAULT_RETRIEVAL_INDEX_POLICY)
+    if profile_defaults:
+        base.update(profile_defaults)
+    if payload is not None:
+        for key, value in payload.items():
+            if key in base:
+                base[key] = value
+
+    env_map = {
+        "ttl_seconds": f"{policy_env_prefix}_TTL_SECONDS",
+        "max_entries": f"{policy_env_prefix}_MAX_ENTRIES",
+        "max_bytes": f"{policy_env_prefix}_MAX_BYTES",
+    }
+    for key, env_name in env_map.items():
+        if env_name in os.environ:
+            base[key] = _to_positive_policy_int(os.environ.get(env_name), default=base[key])
+
+    return {
+        "ttl_seconds": max(0, int(base["ttl_seconds"])),
+        "max_entries": max(0, int(base["max_entries"])),
+        "max_bytes": max(0, int(base["max_bytes"])),
+    }
+
+
+def resolve_retention_policy(
+    payload: dict[str, Any] | None = None,
+    *,
+    policy_env_prefix: str = "HARNESS_RETENTION",
+) -> dict[str, Any]:
+    base = copy.deepcopy(DEFAULT_RETENTION_POLICY)
+    if payload is not None:
+        base = _deep_merge(base, payload)
+
+    env_map = {
+        "run.ttl_days": f"{policy_env_prefix}_RUN_TTL_DAYS",
+        "run.max_count": f"{policy_env_prefix}_RUN_MAX_COUNT",
+        "run.max_bytes": f"{policy_env_prefix}_RUN_MAX_BYTES",
+        "artifact.ttl_days": f"{policy_env_prefix}_ARTIFACT_TTL_DAYS",
+        "artifact.max_count": f"{policy_env_prefix}_ARTIFACT_MAX_COUNT",
+        "artifact.max_bytes": f"{policy_env_prefix}_ARTIFACT_MAX_BYTES",
+        "queue.ttl_days": f"{policy_env_prefix}_QUEUE_TTL_DAYS",
+        "queue.max_count": f"{policy_env_prefix}_QUEUE_MAX_COUNT",
+        "queue.max_bytes": f"{policy_env_prefix}_QUEUE_MAX_BYTES",
+    }
+    for dotted_key, env_name in env_map.items():
+        section, field = dotted_key.split(".")
+        if env_name in os.environ:
+            base[section][field] = _to_positive_policy_int(
+                os.environ.get(env_name),
+                default=base[section][field],
+            )
+
+    normalized: dict[str, Any] = {}
+    for scope, settings in base.items():
+        if not isinstance(settings, dict):
+            continue
+        normalized[scope] = {
+            "ttl_days": max(0, int(settings.get("ttl_days", 0))),
+            "max_count": max(0, int(settings.get("max_count", 0))),
+            "max_bytes": max(0, int(settings.get("max_bytes", 0))),
+        }
+        if scope == "queue":
+            normalized[scope] = {
+                "ttl_days": max(0, int(settings.get("ttl_days", 0))),
+                "max_count": max(0, int(settings.get("max_count", 0))),
+                "max_bytes": max(0, int(settings.get("max_bytes", 0))),
+            }
+    return normalized
+
+
+def evaluate_policy_guardrail(
+    policy: dict[str, Any],
+    hook: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = context or {}
+    source_of_truth = policy_source_of_truth(policy)
+    if hook not in {
+        "pre_retrieval",
+        "pre_context_build",
+        "pre_run",
+        "pre_score_dispatch",
+        "pre_tool_use",
+    }:
+        return {
+            "hook": hook,
+            "allowed": False,
+            "violations": [f"unknown hook: {hook}"],
+            "effective_limits": {},
+            "source_of_truth": source_of_truth,
+            "policy_fingerprint": policy.get("policy_fingerprint", ""),
+        }
+
+    hooks = policy.get("guardrails", {})
+    hook_cfg = {}
+    if isinstance(hooks, dict):
+        hook_cfg = hooks.get("hooks", {}) if isinstance(hooks.get("hooks", {}), dict) else {}
+    hook_settings = {}
+    if isinstance(hook_cfg, dict):
+        hook_settings = hook_cfg.get(hook, {}) if isinstance(hook_cfg.get(hook), dict) else {}
+
+    allowed = bool(hook_settings.get("enabled", True) and hook_settings.get("allow", True))
+    violations: list[str] = []
+    effective_limits: dict[str, Any] = {}
+
+    if hook_settings:
+        for key in ("allow",):
+            if key in hook_settings:
+                effective_limits[key] = bool(hook_settings[key])
+
+    if hook == "pre_tool_use":
+        policy_allow_dangerous_eval = bool(hook_settings.get("allow_dangerous_commands", True))
+        policy_allow_network_tasks = bool(hook_settings.get("allow_network_tools", True))
+        context_allow_dangerous_eval = bool(context.get("allow_dangerous_eval", False))
+        context_allow_network_tasks = bool(context.get("allow_network_tasks", False))
+
+        effective_limits["policy_allows_dangerous_commands"] = policy_allow_dangerous_eval
+        effective_limits["policy_allows_network_tools"] = policy_allow_network_tasks
+        effective_limits["allow_dangerous_eval"] = context_allow_dangerous_eval
+        effective_limits["allow_network_tasks"] = context_allow_network_tasks
+
+        effective_limits["allow_dangerous_eval_effective"] = (
+            context_allow_dangerous_eval and policy_allow_dangerous_eval
+        )
+        effective_limits["allow_network_tasks_effective"] = (
+            context_allow_network_tasks and policy_allow_network_tasks
+        )
+
+        if context.get("requires_opt_in") and not effective_limits["allow_dangerous_eval_effective"]:
+            allowed = False
+            violations.append("tool_use.requires_opt_in")
+        if context.get("network_access") and not effective_limits["allow_network_tasks_effective"]:
+            allowed = False
+            violations.append("tool_use.network_access")
+        blocked_reasons = context.get("blocked_reasons") or []
+        if blocked_reasons:
+            allowed = False
+            violations.extend(str(reason) for reason in blocked_reasons)
+    elif hook == "pre_run":
+        if context.get("skip_run", False):
+            allowed = False
+            violations.append("pre_run.skip_requested")
+        effective_limits.update(
+            {
+                "strict_profile": bool(context.get("strict_profile", False)),
+                "execution_profile": context.get("execution_profile"),
+                "policy_path": context.get("policy_path"),
+            }
+        )
+    elif hook == "pre_score_dispatch":
+        if context.get("skip_score", False):
+            allowed = False
+            violations.append("pre_score_dispatch.skip_requested")
+        effective_limits.update(
+            {
+                "force_score": bool(context.get("force_score", True)),
+                "policy_path": context.get("policy_path"),
+            }
+        )
+    elif hook == "pre_retrieval":
+        if not context.get("retrieval_enabled", True):
+            allowed = False
+            violations.append("pre_retrieval.disabled")
+        effective_limits.update(
+            {
+                "retrieval_mode": context.get("retrieval_mode"),
+                "retrieval_index_policy": context.get("retrieval_index_policy", {}),
+                "policy_path": context.get("policy_path"),
+            }
+        )
+    elif hook == "pre_context_build":
+        if context.get("blocked", False):
+            allowed = False
+            violations.append("pre_context_build.blocked")
+        if context.get("max_candidates", 0) <= 0:
+            effective_limits["max_candidates"] = 0
+            allowed = False
+            violations.append("pre_context_build.invalid_limits")
+        else:
+            effective_limits["max_candidates"] = context.get("max_candidates")
+        effective_limits["retrieval_profile_id"] = context.get("retrieval_profile_id")
+
+    decision = {
+        "hook": hook,
+        "allowed": bool(allowed),
+        "violations": violations,
+        "effective_limits": effective_limits,
+        "source_of_truth": source_of_truth,
+        "policy_fingerprint": policy.get("policy_fingerprint", ""),
+    }
+    if not decision["allowed"] and not decision["violations"]:
+        decision["violations"].append(f"hook_disabled:{hook}")
+    decision["effective_limits"] = dict(decision["effective_limits"])
+    decision["source_of_truth"] = source_of_truth
+    decision["policy_version_source"] = source_of_truth
+    return decision
+
+
+def evaluate_policy_guardrail_hook(
+    policy: dict[str, Any],
+    hook: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return evaluate_policy_guardrail(policy, hook, context=context)
+
+
+def guardrail_policy_snapshot(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "policy_path": str(
+            policy.get("relative_path")
+            or policy.get("path")
+            or policy.get("policy_path", "")
+            or "policy"
+        ),
+        "policy_fingerprint": policy.get("policy_fingerprint", ""),
+        "hooks": policy.get("guardrails", {}).get("hooks", {})
+        if isinstance(policy.get("guardrails", {}).get("hooks", {}), dict)
+        else {},
+        "source_of_truth": policy_source_of_truth(policy),
+    }
 
 
 def evaluate_required_artifact_path(run_dir: pathlib.Path, raw_path: str) -> dict[str, Any]:
@@ -202,24 +653,13 @@ def default_run_contract(
     version: str = RUN_CONTRACT_VERSION,
     execution_profile: str = "strict",
 ) -> dict[str, Any]:
+    contract = _build_run_contract_template()
     if version == RUN_CONTRACT_VERSION_V1:
         strict_policy = load_policy(default_policy_path("strict"))
         return {
+            **contract,
             "run_contract_version": RUN_CONTRACT_VERSION_V1,
             "result_interface_version": RESULT_INTERFACE_VERSION,
-            "required_run_files": [
-                "task.md",
-                "RUN.md",
-                "result.schema.json",
-                "result.template.json",
-                "run.contract.json",
-            ],
-            "required_directories": ["outputs", "home", "session", "score"],
-            "required_task_sections": TASK_REQUIRED_SECTIONS,
-            "result_schema_path": "result.schema.json",
-            "result_template_path": "result.template.json",
-            "manifest_path": "outputs/run_manifest.json",
-            "event_log_path": "run-events.jsonl",
             "eval_policy": {
                 "opt_in_env": strict_policy["opt_in_env"],
                 "allow_network_env": strict_policy["allow_network_env"],
@@ -232,21 +672,9 @@ def default_run_contract(
         raise ValueError(f"unsupported execution profile: {execution_profile}")
 
     return {
+        **contract,
         "run_contract_version": RUN_CONTRACT_VERSION_V2,
         "result_interface_version": RESULT_INTERFACE_VERSION,
-        "required_run_files": [
-            "task.md",
-            "RUN.md",
-            "result.schema.json",
-            "result.template.json",
-            "run.contract.json",
-        ],
-        "required_directories": ["outputs", "home", "session", "score"],
-        "required_task_sections": TASK_REQUIRED_SECTIONS,
-        "result_schema_path": "result.schema.json",
-        "result_template_path": "result.template.json",
-        "manifest_path": "outputs/run_manifest.json",
-        "event_log_path": "run-events.jsonl",
         "execution_profile": execution_profile,
         "policy_path": default_policy_path(execution_profile),
         "context_dir": "context",
@@ -254,7 +682,7 @@ def default_run_contract(
         "context_summary_path": "context/retrieval-summary.md",
         "retrieval": {
             **DEFAULT_RETRIEVAL_CONFIG,
-            "enabled": execution_profile == "capability",
+            "enabled": execution_profile in {"capability", "heavy_tools"},
         },
     }
 
@@ -266,32 +694,24 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
         expected = default_run_contract(version=RUN_CONTRACT_VERSION_V1)
         if payload.get("result_interface_version") != RESULT_INTERFACE_VERSION:
             errors.append("result_interface_version must be v1")
-        for key in [
-            "required_run_files",
-            "required_directories",
-            "required_task_sections",
-            "result_schema_path",
-            "result_template_path",
-            "manifest_path",
-            "event_log_path",
-            "eval_policy",
-        ]:
-            if key not in payload:
-                errors.append(f"missing run contract field: {key}")
+        errors.extend(_collect_missing_fields(payload, _RUN_CONTRACT_REQUIRED_KEYS_V1, prefix="run contract"))
         if isinstance(payload.get("eval_policy"), dict):
             for key in ["opt_in_env", "allow_network_env", "allowed_programs", "blocked_programs"]:
                 if key not in payload["eval_policy"]:
                     errors.append(f"missing eval_policy field: {key}")
         else:
             errors.append("eval_policy must be an object")
-        for key in [
-            "result_schema_path",
-            "result_template_path",
-            "manifest_path",
-            "event_log_path",
-        ]:
-            if key in payload and payload[key] != expected[key]:
-                errors.append(f"{key} must be {expected[key]!r}")
+        errors.extend(
+            _collect_fixed_field_errors(
+                payload,
+                {
+                    "result_schema_path": expected["result_schema_path"],
+                    "result_template_path": expected["result_template_path"],
+                    "manifest_path": expected["manifest_path"],
+                    "event_log_path": expected["event_log_path"],
+                },
+            )
+        )
         return errors
 
     if version != RUN_CONTRACT_VERSION_V2:
@@ -301,44 +721,32 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
     expected = default_run_contract(version=RUN_CONTRACT_VERSION_V2)
     if payload.get("result_interface_version") != RESULT_INTERFACE_VERSION:
         errors.append("result_interface_version must be v1")
-    for key in [
-        "required_run_files",
-        "required_directories",
-        "required_task_sections",
-        "result_schema_path",
-        "result_template_path",
-        "manifest_path",
-        "event_log_path",
-        "execution_profile",
-        "policy_path",
-        "context_dir",
-        "context_manifest_path",
-        "context_summary_path",
-        "retrieval",
-    ]:
-        if key not in payload:
-            errors.append(f"missing run contract field: {key}")
-    for key in ["result_schema_path", "result_template_path", "manifest_path", "event_log_path"]:
-        if key in payload and payload[key] != expected[key]:
-            errors.append(f"{key} must be {expected[key]!r}")
-    for key in ["context_dir", "context_manifest_path", "context_summary_path"]:
-        if key in payload and payload[key] != expected[key]:
-            errors.append(f"{key} must be {expected[key]!r}")
+    errors.extend(_collect_missing_fields(payload, _RUN_CONTRACT_REQUIRED_KEYS_V2, prefix="run contract"))
+    errors.extend(
+        _collect_fixed_field_errors(
+            payload,
+            {
+                "result_schema_path": expected["result_schema_path"],
+                "result_template_path": expected["result_template_path"],
+                "manifest_path": expected["manifest_path"],
+                "event_log_path": expected["event_log_path"],
+                "context_dir": expected["context_dir"],
+                "context_manifest_path": expected["context_manifest_path"],
+                "context_summary_path": expected["context_summary_path"],
+            },
+        )
+    )
     if payload.get("execution_profile") not in EXECUTION_PROFILES:
-        errors.append("execution_profile must be strict or capability")
+        errors.append(
+            "execution_profile must be one of: strict, offline, networked, heavy_tools, capability"
+        )
     if not isinstance(payload.get("policy_path"), str) or not payload["policy_path"]:
         errors.append("policy_path must be a non-empty string")
     retrieval = payload.get("retrieval")
     if not isinstance(retrieval, dict):
         errors.append("retrieval must be an object")
     else:
-        for key in [
-            "enabled",
-            "source",
-            "max_source_runs",
-            "max_artifacts_per_run",
-            "max_artifact_bytes",
-        ]:
+        for key in _RUN_CONTRACT_REQUIRED_RETRIEVAL_KEYS:
             if key not in retrieval:
                 errors.append(f"missing retrieval field: {key}")
         if retrieval.get("source") != DEFAULT_RETRIEVAL_CONFIG["source"]:
@@ -393,8 +801,8 @@ def resolve_execution_settings(
             "context_manifest_path": run_contract["context_manifest_path"],
             "context_summary_path": run_contract["context_summary_path"],
             "retrieval": retrieval,
-            "retrieval_enabled": profile == "capability"
-            and bool(retrieval.get("enabled") or profile_override == "capability"),
+            "retrieval_enabled": profile in {"capability", "heavy_tools"}
+            and bool(retrieval.get("enabled") or profile in {"capability", "heavy_tools"}),
         }
 
     profile = profile_override or "strict"

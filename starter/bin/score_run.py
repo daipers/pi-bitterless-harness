@@ -14,10 +14,12 @@ from typing import Any
 from harnesslib import (
     canonicalize_json_file,
     env_flag,
+    evaluate_policy_guardrail,
     evaluate_required_artifact_path,
     load_policy,
     load_run_contract,
     now_utc,
+    guardrail_policy_snapshot,
     parse_task_file,
     resolve_execution_settings,
     scan_paths_for_secrets,
@@ -25,6 +27,28 @@ from harnesslib import (
     validate_result_payload,
     write_json,
 )
+
+DEFAULT_RESULT_FILE = "result.json"
+DEFAULT_RESULT_SCHEMA_FILE = "result.schema.json"
+DEFAULT_RUN_EVENTS_FILE = "run-events.jsonl"
+
+DEFAULT_EVAL_TIMEOUT_SECONDS = "300"
+DEFAULT_MAX_EVAL_COMMANDS = "0"
+
+SECRET_SCAN_DIRS = ("outputs", "score", "recovery")
+SECRET_SCAN_CONTEXT_FILES = ("context/retrieval-manifest.json", "context/retrieval-summary.md")
+SECRET_SCAN_SKIP_DIRS = ("home", "session", "context/source-runs")
+ENV_FALSE_VALUES = {"", "0", "false", "False"}
+
+
+def _to_positive_int(value: str, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 1:
+        return default
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -43,6 +67,7 @@ class ScoreContext:
 class EvaluationBatchResult:
     evaluations: tuple[dict[str, Any], ...]
     failure_classifications: frozenset[str]
+    tool_guardrail_decisions: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True)
@@ -95,16 +120,18 @@ def resolve_repo_root(run_dir: pathlib.Path) -> pathlib.Path:
 
 def build_context(argv: list[str]) -> ScoreContext:
     run_dir = pathlib.Path(argv[1]).resolve()
+    schema_default = run_dir / DEFAULT_RESULT_SCHEMA_FILE
+    event_default = run_dir / DEFAULT_RUN_EVENTS_FILE
     return ScoreContext(
         task_path=pathlib.Path(argv[0]).resolve(),
         run_dir=run_dir,
         exit_code_path=pathlib.Path(argv[2]).resolve(),
         out_path=pathlib.Path(argv[3]).resolve(),
         schema_path=pathlib.Path(
-            argv[4] if len(argv) >= 5 else (run_dir / "result.schema.json")
+            argv[4] if len(argv) >= 5 else schema_default
         ).resolve(),
         event_log_path=pathlib.Path(
-            argv[5] if len(argv) == 6 else (run_dir / "run-events.jsonl")
+            argv[5] if len(argv) == 6 else event_default
         ).resolve(),
         repo_root=resolve_repo_root(run_dir),
         contract_path=(run_dir / "run.contract.json").resolve(),
@@ -152,6 +179,42 @@ def load_json(path: pathlib.Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_previous_guardrails(path: pathlib.Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    previous = payload.get("decisions", [])
+    if isinstance(previous, list):
+        return [dict(item) for item in previous if isinstance(item, dict)]
+    return []
+
+
+def _merge_guardrail_decisions(
+    baseline: list[dict[str, Any]],
+    additions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    signatures: set[str] = set()
+    for source in (baseline, additions):
+        for item in source:
+            hook = str(item.get("hook", ""))
+            violations = tuple(item.get("violations", []))
+            allowed = bool(item.get("allowed", False))
+            policy_source = str(item.get("policy_version_source", ""))
+            key = json.dumps(
+                {"hook": hook, "allowed": allowed, "violations": violations, "policy_version_source": policy_source},
+                sort_keys=True,
+            )
+            if key in signatures:
+                continue
+            signatures.add(key)
+            merged.append(item)
+    return merged
+
+
 def _relative_to_run_dir(context: ScoreContext, path: pathlib.Path | None) -> str | None:
     if path is None:
         return None
@@ -159,6 +222,30 @@ def _relative_to_run_dir(context: ScoreContext, path: pathlib.Path | None) -> st
         return str(path.resolve().relative_to(context.run_dir.resolve()))
     except Exception:
         return str(path)
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item for item in value.split(",") if item]
+
+
+def _env_is_true(value: str | None) -> bool:
+    return value is not None and value not in ENV_FALSE_VALUES
+
+
+def _append_validation_issue(
+    issues: list[dict[str, Any]],
+    *,
+    field: str,
+    expected: str,
+    observed: Any,
+) -> None:
+    issues.append(
+        {
+            "field": field,
+            "expected": expected,
+            "observed": observed,
+        }
+    )
 
 
 def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
@@ -180,9 +267,7 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
     manifest_payload = load_json(manifest_path) if manifest_path.exists() else None
     source_run_ids: list[str] = []
     if os.environ.get("HARNESS_CONTEXT_SOURCE_RUN_IDS"):
-        source_run_ids = [
-            item for item in os.environ["HARNESS_CONTEXT_SOURCE_RUN_IDS"].split(",") if item
-        ]
+        source_run_ids = _split_csv(os.environ["HARNESS_CONTEXT_SOURCE_RUN_IDS"])
     elif isinstance(manifest_payload, dict):
         source_run_ids = list(manifest_payload.get("selected_source_run_ids", []))
 
@@ -190,7 +275,7 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
     if context_enabled_env is None:
         context_enabled = bool(settings["retrieval_enabled"])
     else:
-        context_enabled = context_enabled_env not in {"", "0", "false", "False"}
+        context_enabled = _env_is_true(context_enabled_env)
 
     return {
         "run_contract_version": settings["run_contract_version"],
@@ -208,6 +293,13 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
         ),
         "context_source_run_ids": source_run_ids,
         "context_manifest_payload": manifest_payload if isinstance(manifest_payload, dict) else {},
+        "guardrails_artifact_path": (
+            context.run_dir / os.environ.get("HARNESS_GUARDRAILS_PATH", "outputs/guardrails.json")
+        ),
+        "guardrail_snapshot": guardrail_policy_snapshot(policy),
+        "previous_guardrail_decisions": _read_previous_guardrails(
+            context.run_dir / os.environ.get("HARNESS_GUARDRAILS_PATH", "outputs/guardrails.json")
+        ),
     }
 
 
@@ -238,22 +330,15 @@ def _discover_secret_scan_selection(
         skipped_reason_counts[reason] = skipped_reason_counts.get(reason, 0) + count
 
     candidates.extend(_root_secret_scan_files(context.run_dir))
-    for rel_dir in ["outputs", "score", "recovery"]:
+    for rel_dir in SECRET_SCAN_DIRS:
         candidates.extend(_walk_secret_scan_dir(context.run_dir / rel_dir))
 
-    for rel_file in [
-        "context/retrieval-manifest.json",
-        "context/retrieval-summary.md",
-    ]:
+    for rel_file in SECRET_SCAN_CONTEXT_FILES:
         candidate = context.run_dir / rel_file
         if candidate.is_file():
             candidates.append(candidate)
 
-    for skipped_root in [
-        context.run_dir / "home",
-        context.run_dir / "session",
-        context.run_dir / "context" / "source-runs",
-    ]:
+    for skipped_root in [context.run_dir / rel_path for rel_path in SECRET_SCAN_SKIP_DIRS]:
         if skipped_root.exists():
             add_skipped(
                 str(skipped_root.relative_to(context.run_dir)),
@@ -327,6 +412,28 @@ def _blocked_evaluation_result(
         passed=False,
         blocked=True,
         failure_classification=failure_classification,
+    )
+
+
+def _tool_guardrail_decision(
+    context: ScoreContext,
+    execution_metadata: dict[str, Any],
+    detail: dict[str, Any],
+    *,
+    allow_dangerous_eval: bool,
+    allow_network_tasks: bool,
+) -> dict[str, Any]:
+    return evaluate_policy_guardrail(
+        execution_metadata["policy"],
+        "pre_tool_use",
+        context={
+            "requires_opt_in": bool(detail.get("requires_opt_in")),
+            "network_access": bool(detail.get("network_access")),
+            "blocked_reasons": detail.get("blocked_reasons", []),
+            "allow_dangerous_eval": allow_dangerous_eval,
+            "allow_network_tasks": allow_network_tasks,
+            "policy_path": execution_metadata["policy_path"],
+        },
     )
 
 
@@ -409,18 +516,67 @@ def _read_pi_exit_code(exit_code_path: pathlib.Path) -> int:
 def _collect_evaluations(
     context: ScoreContext,
     parsed_task: dict[str, Any],
+    execution_metadata: dict[str, Any],
     *,
+    max_eval_commands: int,
     eval_timeout_seconds: int,
     allow_dangerous_eval: bool,
     allow_network_tasks: bool,
 ) -> EvaluationBatchResult:
     evaluations: list[dict[str, Any]] = []
     failure_classifications: set[str] = set()
+    tool_guardrail_decisions: list[dict[str, Any]] = []
     if not parsed_task["ok"]:
         failure_classifications.add("contract_invalid")
 
     score_dir = context.run_dir / "score"
     for index, detail in enumerate(parsed_task["eval_command_details"], start=1):
+        if max_eval_commands > 0 and index > max_eval_commands:
+            stdout_path, stderr_path = _result_log_paths(score_dir, index)
+            evaluations.append(
+                _evaluation_result(
+                    context,
+                    detail,
+                    stdout_path,
+                    stderr_path,
+                    stdout="",
+                    stderr=f"max eval command limit exceeded ({max_eval_commands})\n",
+                    exit_code=None,
+                    duration=0.0,
+                    passed=False,
+                    blocked=True,
+                    failure_classification="eval_command_limit_exceeded",
+                )
+            )
+            failure_classifications.add("eval_command_limit_exceeded")
+            break
+        tool_decision = _tool_guardrail_decision(
+            context,
+            execution_metadata,
+            detail,
+            allow_dangerous_eval=allow_dangerous_eval,
+            allow_network_tasks=allow_network_tasks,
+        )
+        tool_guardrail_decisions.append(tool_decision)
+        if not tool_decision["allowed"]:
+            stdout_path, stderr_path = _result_log_paths(score_dir, index)
+            evaluations.append(
+                _evaluation_result(
+                    context,
+                    detail,
+                    stdout_path,
+                    stderr_path,
+                    stdout="",
+                    stderr="; ".join(tool_decision["violations"]) + "\n",
+                    exit_code=None,
+                    duration=0.0,
+                    passed=False,
+                    blocked=True,
+                    failure_classification="guardrail_policy_violation",
+                )
+            )
+            failure_classifications.add("guardrail_policy_violation")
+            continue
         evaluation = run_evaluation(
             context,
             detail,
@@ -437,6 +593,7 @@ def _collect_evaluations(
     return EvaluationBatchResult(
         evaluations=tuple(evaluations),
         failure_classifications=frozenset(failure_classifications),
+        tool_guardrail_decisions=tuple(tool_guardrail_decisions),
     )
 
 
@@ -476,7 +633,7 @@ def _check_required_artifacts(
 
 
 def _validate_result_json(context: ScoreContext) -> ResultValidationResult:
-    result_json_path = context.run_dir / "result.json"
+    result_json_path = context.run_dir / DEFAULT_RESULT_FILE
     result_json_present = result_json_path.exists()
     result_json_validations: list[dict[str, Any]] = []
     result_payload = None
@@ -486,33 +643,30 @@ def _validate_result_json(context: ScoreContext) -> ResultValidationResult:
         try:
             result_payload = canonicalize_json_file(result_json_path)
         except Exception as exc:
-            result_json_validations.append(
-                {
-                    "field": "result_json",
-                    "expected": "valid JSON object",
-                    "observed": f"json parse error: {exc}",
-                }
+            _append_validation_issue(
+                result_json_validations,
+                field="result_json",
+                expected="valid JSON object",
+                observed=f"json parse error: {exc}",
             )
         else:
             if not isinstance(result_payload, dict):
-                result_json_validations.append(
-                    {
-                        "field": "result_json",
-                        "expected": "JSON object",
-                        "observed": str(type(result_payload).__name__),
-                    }
+                _append_validation_issue(
+                    result_json_validations,
+                    field="result_json",
+                    expected="JSON object",
+                    observed=str(type(result_payload).__name__),
                 )
             else:
                 result_json_validations.extend(
                     validate_result_payload(result_payload, schema_payload)
                 )
     else:
-        result_json_validations.append(
-            {
-                "field": "result_json",
-                "expected": "result.json must exist",
-                "observed": "missing file",
-            }
+        _append_validation_issue(
+            result_json_validations,
+            field="result_json",
+            expected=f"{DEFAULT_RESULT_FILE} must exist",
+            observed="missing file",
         )
 
     return ResultValidationResult(
@@ -539,6 +693,29 @@ def _scan_for_secrets(context: ScoreContext) -> SecretScanResult:
     )
 
 
+def _build_retrieval_metadata(
+    context: ScoreContext,
+    execution_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    manifest_payload = execution_metadata["context_manifest_payload"]
+    return {
+        "enabled": execution_metadata["context_enabled"],
+        "source_run_ids": list(execution_metadata["context_source_run_ids"]),
+        "context_manifest_path": _relative_to_run_dir(
+            context, execution_metadata["context_manifest_path"]
+        ),
+        "retrieval_profile_id": manifest_payload.get("retrieval_profile_id"),
+        "index_mode": manifest_payload.get("index_mode"),
+        "candidate_run_count": manifest_payload.get("candidate_run_count"),
+        "eligible_run_count": manifest_payload.get("eligible_run_count"),
+        "selected_count": manifest_payload.get("selected_count"),
+        "selected_source_count": manifest_payload.get("selected_source_count"),
+        "empty_context": manifest_payload.get("empty_context"),
+        "ranking_latency_ms": manifest_payload.get("ranking_latency_ms"),
+        "artifact_bytes_copied": manifest_payload.get("artifact_bytes_copied"),
+    }
+
+
 def _collect_failure_classifications(inputs: ScoreAssemblyInput) -> set[str]:
     failure_classifications = set(inputs.evaluations.failure_classifications)
     failure_classifications.update(inputs.artifacts.failure_classifications)
@@ -554,11 +731,42 @@ def _collect_failure_classifications(inputs: ScoreAssemblyInput) -> set[str]:
     return failure_classifications
 
 
+def _persist_guardrail_artifact(
+    context: ScoreContext,
+    execution_metadata: dict[str, Any],
+    score_payload: dict[str, Any],
+) -> None:
+    existing_payload = _read_previous_guardrails(
+        execution_metadata["guardrails_artifact_path"]
+    )
+    merged_decisions = _merge_guardrail_decisions(
+        existing_payload,
+        list(score_payload.get("guardrails", {}).get("decisions", [])),
+    )
+    artifact_payload = {
+        "selected_profile_id": execution_metadata["execution_profile"],
+        "policy_path": execution_metadata["policy_path"],
+        "policy_fingerprint": execution_metadata["policy"].get("policy_fingerprint", ""),
+        "policy_version_source": execution_metadata["guardrail_snapshot"].get(
+            "source_of_truth",
+            "",
+        ),
+        "policy_snapshot": execution_metadata["guardrail_snapshot"],
+        "decisions": merged_decisions,
+        "effective_policy": execution_metadata["policy"],
+        "score_payload_path": str(context.run_dir / "score.json"),
+        "score_overall_pass": score_payload.get("overall_pass", False),
+        "score_overall_error_code": score_payload.get("overall_error_code"),
+    }
+    write_json(execution_metadata["guardrails_artifact_path"], artifact_payload)
+
+
 def _assemble_score_payload(
     context: ScoreContext,
     inputs: ScoreAssemblyInput,
     *,
     execution_metadata: dict[str, Any],
+    max_eval_commands: int,
 ) -> dict[str, Any]:
     failure_classifications = _collect_failure_classifications(inputs)
     overall_pass = len(failure_classifications) == 0
@@ -577,6 +785,7 @@ def _assemble_score_payload(
         },
         "evaluations": list(inputs.evaluations.evaluations),
         "required_artifacts": list(inputs.artifacts.required_artifacts),
+        "max_eval_commands": max_eval_commands,
         "task_parse": {
             "ok": inputs.parsed_task["ok"],
             "errors": inputs.parsed_task["errors"],
@@ -591,34 +800,17 @@ def _assemble_score_payload(
         },
         "execution_profile": execution_metadata["execution_profile"],
         "policy_path": execution_metadata["policy_path"],
-        "retrieval": {
-            "enabled": execution_metadata["context_enabled"],
-            "source_run_ids": list(execution_metadata["context_source_run_ids"]),
-            "context_manifest_path": _relative_to_run_dir(
-                context, execution_metadata["context_manifest_path"]
+        "guardrails": {
+            "policy_snapshot": execution_metadata["guardrail_snapshot"],
+            "policy_version_source": execution_metadata["guardrail_snapshot"].get(
+                "source_of_truth", ""
             ),
-            "retrieval_profile_id": execution_metadata["context_manifest_payload"].get(
-                "retrieval_profile_id"
-            ),
-            "index_mode": execution_metadata["context_manifest_payload"].get("index_mode"),
-            "candidate_run_count": execution_metadata["context_manifest_payload"].get(
-                "candidate_run_count"
-            ),
-            "eligible_run_count": execution_metadata["context_manifest_payload"].get(
-                "eligible_run_count"
-            ),
-            "selected_count": execution_metadata["context_manifest_payload"].get("selected_count"),
-            "selected_source_count": execution_metadata["context_manifest_payload"].get(
-                "selected_source_count"
-            ),
-            "empty_context": execution_metadata["context_manifest_payload"].get("empty_context"),
-            "ranking_latency_ms": execution_metadata["context_manifest_payload"].get(
-                "ranking_latency_ms"
-            ),
-            "artifact_bytes_copied": execution_metadata["context_manifest_payload"].get(
-                "artifact_bytes_copied"
+            "decisions": _merge_guardrail_decisions(
+                list(execution_metadata["previous_guardrail_decisions"]),
+                list(inputs.evaluations.tool_guardrail_decisions),
             ),
         },
+        "retrieval": _build_retrieval_metadata(context, execution_metadata),
         "failure_classifications": sorted(failure_classifications),
         "overall_error_code": overall_error_code,
         "overall_pass": overall_pass,
@@ -634,7 +826,11 @@ def build_score_payload(context: ScoreContext, *, cancelled: bool = False) -> di
     parsed_task = parse_task_file(context.task_path, eval_policy=execution_metadata["policy"])
     allow_dangerous_eval = env_flag(execution_metadata["policy"]["opt_in_env"], default=False)
     allow_network_tasks = env_flag(execution_metadata["policy"]["allow_network_env"], default=False)
-    eval_timeout_seconds = int(os.environ.get("HARNESS_EVAL_TIMEOUT_SECONDS", "300"))
+    eval_timeout_seconds = int(os.environ.get("HARNESS_EVAL_TIMEOUT_SECONDS", DEFAULT_EVAL_TIMEOUT_SECONDS))
+    max_eval_commands = _to_positive_int(
+        os.environ.get("HARNESS_MAX_EVAL_COMMANDS", DEFAULT_MAX_EVAL_COMMANDS),
+        default=0,
+    )
 
     append_event(
         context,
@@ -650,6 +846,8 @@ def build_score_payload(context: ScoreContext, *, cancelled: bool = False) -> di
     evaluations = _collect_evaluations(
         context,
         parsed_task,
+        execution_metadata,
+        max_eval_commands=max_eval_commands,
         eval_timeout_seconds=eval_timeout_seconds,
         allow_dangerous_eval=allow_dangerous_eval,
         allow_network_tasks=allow_network_tasks,
@@ -669,7 +867,9 @@ def build_score_payload(context: ScoreContext, *, cancelled: bool = False) -> di
             cancelled=cancelled,
         ),
         execution_metadata=execution_metadata,
+        max_eval_commands=max_eval_commands,
     )
+    _persist_guardrail_artifact(context, execution_metadata, payload)
     append_event(
         context,
         "score",
@@ -693,6 +893,7 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException as exc:  # noqa: BLE001
         append_event(context, "score", "score generation interrupted", error_code="eval_failed")
         partial_payload = build_score_payload(context, cancelled=True)
+        _persist_guardrail_artifact(context, _load_execution_metadata(context), partial_payload)
         partial_payload["interruption"] = str(exc)
         write_json(context.out_path, partial_payload)
         print(context.out_path)

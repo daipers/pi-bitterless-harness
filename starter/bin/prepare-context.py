@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
+import os
 import sys
 import time
 from typing import Any
@@ -11,7 +12,10 @@ from typing import Any
 from harnesslib import (
     load_policy,
     load_run_contract,
+    evaluate_policy_guardrail,
+    guardrail_policy_snapshot,
     parse_task_file,
+    resolve_retrieval_index_policy,
     resolve_execution_settings,
     sha256_file,
     sha256_text,
@@ -164,15 +168,53 @@ def main(argv: list[str] | None = None) -> int:
         return usage()
 
     run_dir = pathlib.Path(args[0]).resolve()
-    policy = load_policy(args[1]) if len(args) == 2 else None
     run_contract = load_run_contract(run_dir / "run.contract.json")
     settings = resolve_execution_settings(run_contract)
+    if len(args) == 2:
+        policy = load_policy(args[1], repo_root=run_dir.parent.parent)
+    else:
+        policy = load_policy(settings["policy_path"], repo_root=run_dir.parent.parent)
     parsed_task = parse_task_file(run_dir / "task.md", eval_policy=policy)
     if not parsed_task["ok"]:
         raise SystemExit("; ".join(parsed_task["errors"]))
 
     retrieval = settings["retrieval"]
     retrieval_profile = load_retrieval_profile(repo_root=run_dir.parent.parent)
+    selection_strategy = str(retrieval.get("strategy", "hybrid_v1"))
+    retrieval_enabled = bool(retrieval.get("enabled", False))
+    retrieval_index_policy = resolve_retrieval_index_policy(
+        policy.get("retrieval_index"),
+        profile_defaults=None,
+    )
+
+    pre_retrieval_decision = evaluate_policy_guardrail(
+        policy,
+        "pre_retrieval",
+        context={
+            "retrieval_enabled": retrieval_enabled,
+            "retrieval_mode": selection_strategy,
+            "retrieval_index_policy": retrieval_index_policy,
+            "policy_path": policy.get("policy_path", settings["policy_path"]),
+        },
+    )
+    if not pre_retrieval_decision["allowed"]:
+        raise SystemExit("; ".join(pre_retrieval_decision["violations"]) or "pre_retrieval denied")
+
+    pre_context_decision = evaluate_policy_guardrail(
+        policy,
+        "pre_context_build",
+        context={
+            "max_candidates": int(retrieval["max_candidates"]),
+            "retrieval_profile_id": retrieval_profile["profile_id"],
+            "retrieval_mode": selection_strategy,
+            "retrieval_profile": retrieval_profile.get("profile_id"),
+        },
+    )
+    if not pre_context_decision["allowed"]:
+        raise SystemExit("; ".join(pre_context_decision["violations"]) or "pre_context_build denied")
+
+    guardrail_decisions = [pre_retrieval_decision, pre_context_decision]
+
     context_dir = run_dir / settings["context_dir"]
     if context_dir.exists():
         shutil.rmtree(context_dir)
@@ -185,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         exclude_run_id=run_dir.name,
         eval_policy=policy,
         retrieval_profile=retrieval_profile,
+        retrieval_mode=selection_strategy,
+        **retrieval_index_policy,
     )
     indexed_entries = index_state["entries"]
     skipped_sources = sum(1 for entry in indexed_entries if not entry.get("eligible"))
@@ -261,11 +305,24 @@ def main(argv: list[str] | None = None) -> int:
         "index_version": index_state["index_version"],
         "index_mode": index_state["index_mode"],
         "selection_strategy": selection_strategy,
+        "policy_path": policy.get("policy_path", settings["policy_path"]),
+        "retrieval_index_policy": retrieval_index_policy,
         "retrieval_profile_id": retrieval_profile["profile_id"],
+        "retrieval_profile_fingerprint": retrieval_profile.get("profile_fingerprint"),
+        "retrieval_mode": selection_strategy,
+        "index_provenance_token": index_state["index_provenance_token"],
+        "source_snapshot_fingerprints": index_state["source_snapshot_fingerprints"],
+        "index_refreshes": index_state["index_refreshes"],
+        "stale_removed": index_state["stale_removed"],
+        "compacted_removed": index_state["compacted_removed"],
+        "compacted_kept": index_state["compacted_kept"],
+        "index_rebuild_count": index_state["index_rebuild_count"],
         "candidate_run_count": index_state["candidate_run_count"],
         "eligible_run_count": eligible_run_count,
         "selected_count": len(selected_sources),
         "selected_source_count": len(selected_sources),
+        "max_index_entries": index_state["max_index_entries"],
+        "max_index_bytes": index_state["max_index_bytes"],
         "empty_context": len(selected_sources) == 0,
         "query_text_hash": sha256_text(query_text),
         "query_token_count": query["token_count"],
@@ -277,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         "selected_sources": selected_manifest_entries,
         "top_candidates": top_candidates,
         "skipped_sources_count": skipped_sources,
+        "guardrail_decisions": guardrail_decisions,
+        "guardrail_policy": guardrail_policy_snapshot(policy),
     }
     write_json(manifest_path, manifest_payload)
     summary_path.write_text(build_summary(selected_sources), encoding="utf-8")

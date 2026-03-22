@@ -67,7 +67,7 @@
       "pre_tool_use": {
         "enabled": true,
         "allow": true,
-        "allow_network_tools": true,
+        "allow_network_tools": false,
         "allow_dangerous_commands": true
       },
       "pre_run": {

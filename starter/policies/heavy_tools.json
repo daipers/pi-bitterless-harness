@@ -6,6 +6,8 @@
     "bash",
     "cat",
     "cmp",
+    "curl",
+    "dd",
     "cut",
     "diff",
     "echo",
@@ -16,6 +18,11 @@
     "head",
     "jq",
     "ls",
+    "make",
+    "nc",
+    "node",
+    "npm",
+    "ping",
     "printf",
     "pwd",
     "py.test",
@@ -30,16 +37,17 @@
     "tail",
     "test",
     "uniq",
+    "wget",
     "wc",
-    "xargs"
+    "xargs",
+    "yarn",
+    "zip",
+    "zsh"
   ],
   "blocked_programs": [
-    "curl",
-    "dd",
     "docker",
     "kill",
     "killall",
-    "kubectl",
     "mkfs",
     "osascript",
     "reboot",
@@ -50,8 +58,7 @@
     "ssh",
     "sudo",
     "telnet",
-    "truncate",
-    "wget"
+    "truncate"
   ],
   "network_programs": [
     "curl",

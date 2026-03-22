@@ -68,6 +68,9 @@
       "type": "string",
       "enum": [
         "strict",
+        "offline",
+        "networked",
+        "heavy_tools",
         "capability"
       ]
     },

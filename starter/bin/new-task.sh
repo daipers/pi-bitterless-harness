@@ -7,7 +7,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile)
       if [[ $# -lt 2 ]]; then
-        echo "usage: $0 [--profile strict|capability] \"short task title\"" >&2
+        echo "usage: $0 [--profile strict|offline|networked|heavy_tools|capability] \"short task title\"" >&2
         exit 2
       fi
       profile="$2"
@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --*)
       echo "unknown option: $1" >&2
-      echo "usage: $0 [--profile strict|capability] \"short task title\"" >&2
+      echo "usage: $0 [--profile strict|offline|networked|heavy_tools|capability] \"short task title\"" >&2
       exit 2
       ;;
     *)
@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 [--profile strict|capability] \"short task title\"" >&2
+  echo "usage: $0 [--profile strict|offline|networked|heavy_tools|capability] \"short task title\"" >&2
   exit 2
 fi
 
@@ -227,7 +227,7 @@ PY
 
 echo "runs/${run_id}"
 case "$profile" in
-  strict|capability)
+  strict|offline|networked|heavy_tools|capability)
     ;;
   *)
     echo "unsupported profile: $profile" >&2
