@@ -79,7 +79,9 @@ def candidate_sort_key(result: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sweep retrieval profiles against the benchmark corpus")
+    parser = argparse.ArgumentParser(
+        description="Sweep retrieval profiles against the benchmark corpus"
+    )
     parser.add_argument(
         "--harness-root",
         default=str(pathlib.Path(__file__).resolve().parents[1]),

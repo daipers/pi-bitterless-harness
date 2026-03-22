@@ -116,7 +116,9 @@ def propose_same_words_wrong_artifact(
     gold: dict[str, Any],
     confuser: dict[str, Any],
 ) -> dict[str, Any] | None:
-    gold_artifacts = [artifact for artifact in gold.get("artifact_records", []) if artifact.get("excerpt")]
+    gold_artifacts = [
+        artifact for artifact in gold.get("artifact_records", []) if artifact.get("excerpt")
+    ]
     confuser_artifacts = [
         artifact for artifact in confuser.get("artifact_records", []) if artifact.get("excerpt")
     ]
@@ -130,8 +132,12 @@ def propose_same_words_wrong_artifact(
         "case_kind": "same_words_wrong_artifact",
         "query_title": gold["retrieval_view"].get("task_title", gold["run_id"]),
         "query_goal": gold["retrieval_view"].get("goal", ""),
-        "query_constraints": [gold["retrieval_view"].get("constraints", "")] if gold["retrieval_view"].get("constraints") else [],
-        "query_done": [gold["retrieval_view"].get("done", "")] if gold["retrieval_view"].get("done") else [],
+        "query_constraints": [gold["retrieval_view"].get("constraints", "")]
+        if gold["retrieval_view"].get("constraints")
+        else [],
+        "query_done": [gold["retrieval_view"].get("done", "")]
+        if gold["retrieval_view"].get("done")
+        else [],
         "expected_top_1_run_id": gold["run_id"],
         "hard_negative_run_ids": [confuser["run_id"]],
         "seed_runs": [entry_to_seed_run(confuser), entry_to_seed_run(gold)],
@@ -156,15 +162,21 @@ def propose_same_claim_weaker_evidence(
         "case_kind": "same_claim_weaker_evidence",
         "query_title": gold["retrieval_view"].get("task_title", gold["run_id"]),
         "query_goal": gold["retrieval_view"].get("goal", ""),
-        "query_constraints": [gold["retrieval_view"].get("constraints", "")] if gold["retrieval_view"].get("constraints") else [],
-        "query_done": [gold["retrieval_view"].get("done", "")] if gold["retrieval_view"].get("done") else [],
+        "query_constraints": [gold["retrieval_view"].get("constraints", "")]
+        if gold["retrieval_view"].get("constraints")
+        else [],
+        "query_done": [gold["retrieval_view"].get("done", "")]
+        if gold["retrieval_view"].get("done")
+        else [],
         "expected_top_1_run_id": gold["run_id"],
         "hard_negative_run_ids": [confuser["run_id"]],
         "seed_runs": [entry_to_seed_run(confuser), entry_to_seed_run(gold)],
     }
 
 
-def attach_provenance(base: dict[str, Any], gold: dict[str, Any], confuser: dict[str, Any]) -> dict[str, Any]:
+def attach_provenance(
+    base: dict[str, Any], gold: dict[str, Any], confuser: dict[str, Any]
+) -> dict[str, Any]:
     scenario_id = (
         f"mined-{base['case_kind']}-{str(gold.get('query_text_hash', 'unknown'))[:8]}-"
         f"{gold['run_id']}-{confuser['run_id']}"

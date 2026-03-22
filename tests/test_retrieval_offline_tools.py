@@ -119,10 +119,13 @@ python3 ../tests/fixtures/pass_eval.py
             }
         ],
         artifacts=[
-            {
-                "path": "outputs/delta-proof.txt",
-                "description": "Delta-forge proof artifact demonstrating preserved shard-ledger evidence.",
-            }
+        {
+            "path": "outputs/delta-proof.txt",
+            "description": (
+                "Delta-forge proof artifact demonstrating preserved "
+                "shard-ledger evidence."
+            ),
+        }
         ],
         artifact_contents={"outputs/delta-proof.txt": "delta-forge preserved claim evidence\n"},
     )

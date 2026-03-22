@@ -40,7 +40,9 @@ def test_resolve_initial_state_treats_stale_lock_as_partial(tmp_path: pathlib.Pa
     assert runner._resolve_initial_state() == "partial"
 
 
-def test_resolve_initial_state_reports_complete_and_partial_profiles(tmp_path: pathlib.Path) -> None:
+def test_resolve_initial_state_reports_complete_and_partial_profiles(
+    tmp_path: pathlib.Path,
+) -> None:
     run_dir = make_run_dir(tmp_path)
     payload_path = run_dir / "outputs" / "run_manifest.json"
     payload_path.write_text(json.dumps({"state": "complete"}) + "\n", encoding="utf-8")
@@ -61,7 +63,9 @@ def test_resolve_initial_state_treats_partial_manifest_as_partial(tmp_path: path
     assert runner._resolve_initial_state() == "partial"
 
 
-def test_pi_retry_boundary_retries_startup_failure_when_transcript_is_empty(tmp_path: pathlib.Path) -> None:
+def test_pi_retry_boundary_retries_startup_failure_when_transcript_is_empty(
+    tmp_path: pathlib.Path,
+) -> None:
     run_dir = make_run_dir(tmp_path)
     (run_dir / "task.md").write_text("task", encoding="utf-8")
     (run_dir / "RUN.md").write_text("run", encoding="utf-8")

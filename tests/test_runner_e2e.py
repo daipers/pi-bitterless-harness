@@ -121,12 +121,9 @@ python3 ../tests/fixtures/pass_eval.py
                 "x-interface-version": "v1",
                 "status": "success",
                 "summary": (
-                    "prior successful harness scoring fix "
-                    "with nebula-vector retrieval anchor"
+                    "prior successful harness scoring fix with nebula-vector retrieval anchor"
                 ),
-                "artifacts": [
-                    {"path": "outputs/claim.txt", "description": "prior proof artifact"}
-                ],
+                "artifacts": [{"path": "outputs/claim.txt", "description": "prior proof artifact"}],
                 "claims": [
                     {
                         "claim": f"fixed scoring flow for {unique_phrase}",

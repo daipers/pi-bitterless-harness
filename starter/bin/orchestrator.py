@@ -163,7 +163,9 @@ def _run_manifest_state(run_dir: pathlib.Path) -> str:
     if not manifest_path.exists():
         return ""
     try:
-        return _normalize_state(json.loads(manifest_path.read_text(encoding="utf-8")).get("state", ""))
+        return _normalize_state(
+            json.loads(manifest_path.read_text(encoding="utf-8")).get("state", "")
+        )
     except Exception:
         return ""
 
@@ -383,13 +385,17 @@ class Orchestrator:
         if config is None:
             script_dir = pathlib.Path(__file__).resolve().parent
             repo_root = script_dir.parent
-            runs_root = pathlib.Path(os.environ.get("HARNESS_RUN_ROOT", repo_root / "runs")).resolve()
+            runs_root = pathlib.Path(
+                os.environ.get("HARNESS_RUN_ROOT", repo_root / "runs")
+            ).resolve()
             orchestrator_root = runs_root / ".orchestrator"
             config = OrchestratorConfig(
                 script_dir=script_dir,
                 runs_root=runs_root,
                 run_queue_path=pathlib.Path(
-                    os.environ.get("HARNESS_RUN_QUEUE_PATH", str(orchestrator_root / "run_queue.jsonl"))
+                    os.environ.get(
+                        "HARNESS_RUN_QUEUE_PATH", str(orchestrator_root / "run_queue.jsonl")
+                    )
                 ).resolve(),
                 score_queue_path=pathlib.Path(
                     os.environ.get(
@@ -448,9 +454,7 @@ class Orchestrator:
         if not self.runs_root.exists():
             return []
         return sorted(
-            p
-            for p in self.runs_root.iterdir()
-            if p.is_dir() and not p.name.startswith(".")
+            p for p in self.runs_root.iterdir() if p.is_dir() and not p.name.startswith(".")
         )
 
     def _resolve_profile_and_caps(self, run_dir: pathlib.Path) -> tuple[str, dict[str, int]]:
@@ -476,10 +480,14 @@ class Orchestrator:
         caps = dict(PROFILE_LIMITS.get(profile, PROFILE_LIMITS["strict"]))
         caps_env = {
             "max_eval_commands": os.environ.get("HARNESS_ORCHESTRATOR_MAX_EVAL_COMMANDS"),
-            "eval_command_timeout_seconds": os.environ.get("HARNESS_ORCHESTRATOR_EVAL_COMMAND_TIMEOUT_SECONDS"),
+            "eval_command_timeout_seconds": os.environ.get(
+                "HARNESS_ORCHESTRATOR_EVAL_COMMAND_TIMEOUT_SECONDS"
+            ),
             "model_timeout_seconds": os.environ.get("HARNESS_ORCHESTRATOR_MODEL_TIMEOUT_SECONDS"),
             "score_timeout_seconds": os.environ.get("HARNESS_ORCHESTRATOR_SCORE_TIMEOUT_SECONDS"),
-            "max_run_wall_clock_seconds": os.environ.get("HARNESS_ORCHESTRATOR_MAX_RUN_WALL_CLOCK_SECONDS"),
+            "max_run_wall_clock_seconds": os.environ.get(
+                "HARNESS_ORCHESTRATOR_MAX_RUN_WALL_CLOCK_SECONDS"
+            ),
             "max_model_workers": os.environ.get("HARNESS_ORCHESTRATOR_MAX_MODEL_WORKERS"),
             "max_score_workers": os.environ.get("HARNESS_ORCHESTRATOR_MAX_SCORE_WORKERS"),
             "max_transcript_bytes": os.environ.get("HARNESS_ORCHESTRATOR_MAX_TRANSCRIPT_BYTES"),
@@ -524,12 +532,16 @@ class Orchestrator:
                 policy = load_policy(policy_path, repo_root=self.runs_root.parent)
             except Exception:
                 try:
-                    policy = load_policy(default_policy_path("strict"), repo_root=self.runs_root.parent)
+                    policy = load_policy(
+                        default_policy_path("strict"), repo_root=self.runs_root.parent
+                    )
                 except Exception:
                     policy = {"retention": {}}
             self._policy_cache[policy_path] = policy
 
-        retention = resolve_retention_policy(policy.get("retention"), policy_env_prefix="HARNESS_RETENTION")
+        retention = resolve_retention_policy(
+            policy.get("retention"), policy_env_prefix="HARNESS_RETENTION"
+        )
         self._run_retention_cache[run_dir.name] = retention
         return retention
 
@@ -538,7 +550,9 @@ class Orchestrator:
             return self._global_retention_cache
         try:
             policy = load_policy(default_policy_path("strict"), repo_root=self.runs_root.parent)
-            retention = resolve_retention_policy(policy.get("retention"), policy_env_prefix="HARNESS_RETENTION")
+            retention = resolve_retention_policy(
+                policy.get("retention"), policy_env_prefix="HARNESS_RETENTION"
+            )
         except Exception:
             retention = resolve_retention_policy({}, policy_env_prefix="HARNESS_RETENTION")
         self._global_retention_cache = retention
@@ -623,7 +637,9 @@ class Orchestrator:
             return False
         return now_ms() - queued_at >= self.config.queue_timeout_seconds * 1000
 
-    def _mark_queue_retry(self, run_dir: pathlib.Path, *, score: bool, attempt: int, worker_id: str, failure: str) -> None:
+    def _mark_queue_retry(
+        self, run_dir: pathlib.Path, *, score: bool, attempt: int, worker_id: str, failure: str
+    ) -> None:
         kind = "score" if score else "run"
         self._mark_queue_state(
             run_dir,
@@ -638,11 +654,21 @@ class Orchestrator:
         can_retry = self._can_retry_score(run_dir) if score else self._can_retry_model(run_dir)
         if can_retry:
             if score:
-                self._score_attempts[run_dir.name] = max(self._score_attempts.get(run_dir.name, 0), 1) + 1
+                self._score_attempts[run_dir.name] = (
+                    max(self._score_attempts.get(run_dir.name, 0), 1) + 1
+                )
             else:
-                self._model_attempts[run_dir.name] = max(self._model_attempts.get(run_dir.name, 0), 1) + 1
-            attempt = self._score_attempts.get(run_dir.name, 1) if score else self._model_attempts.get(run_dir.name, 1)
-            retry_map = self._score_retry_wait_until_ms if score else self._model_retry_wait_until_ms
+                self._model_attempts[run_dir.name] = (
+                    max(self._model_attempts.get(run_dir.name, 0), 1) + 1
+                )
+            attempt = (
+                self._score_attempts.get(run_dir.name, 1)
+                if score
+                else self._model_attempts.get(run_dir.name, 1)
+            )
+            retry_map = (
+                self._score_retry_wait_until_ms if score else self._model_retry_wait_until_ms
+            )
             wait_ms = self.config.score_backoff_ms if score else self.config.model_backoff_ms
             retry_map[run_dir.name] = now_ms() + wait_ms
             self._mark_queue_retry(
@@ -685,7 +711,9 @@ class Orchestrator:
             return True
 
         if score:
-            attempt = _to_int((self._load_queue_state(run_dir.name, kind="score") or {}).get("attempt"), default=1)
+            attempt = _to_int(
+                (self._load_queue_state(run_dir.name, kind="score") or {}).get("attempt"), default=1
+            )
             self._mark_queue_state(
                 run_dir,
                 kind="score",
@@ -709,7 +737,9 @@ class Orchestrator:
                 error_code="orchestrator_queue_timeout",
             )
         else:
-            attempt = _to_int((self._load_queue_state(run_dir.name, kind="run") or {}).get("attempt"), default=1)
+            attempt = _to_int(
+                (self._load_queue_state(run_dir.name, kind="run") or {}).get("attempt"), default=1
+            )
             self._mark_queue_state(
                 run_dir,
                 kind="run",
@@ -769,7 +799,9 @@ class Orchestrator:
         event.update(payload)
         _append_jsonl(self.config.run_queue_path, event)
 
-    def _purge_queue_file(self, kind: str, keep_payloads: dict[str, dict[str, Any]]) -> tuple[int, int]:
+    def _purge_queue_file(
+        self, kind: str, keep_payloads: dict[str, dict[str, Any]]
+    ) -> tuple[int, int]:
         path = self.config.run_queue_path if kind == "run" else self.config.score_queue_path
         if not path.exists():
             return 0, 0
@@ -788,8 +820,12 @@ class Orchestrator:
             latest_by_run[entry_run_id] = entry
 
         kept_payloads: list[dict[str, Any]] = list(service_entries)
-        kept_payloads.extend(keep_payloads[run_id] for run_id in sorted(keep_ids) if run_id in keep_payloads)
-        removed_payloads = [payload for run_id, payload in latest_by_run.items() if run_id not in keep_ids]
+        kept_payloads.extend(
+            keep_payloads[run_id] for run_id in sorted(keep_ids) if run_id in keep_payloads
+        )
+        removed_payloads = [
+            payload for run_id, payload in latest_by_run.items() if run_id not in keep_ids
+        ]
         removed_bytes = sum(_entry_payload_bytes(payload) for payload in removed_payloads)
         try:
             path.write_text("")
@@ -860,7 +896,9 @@ class Orchestrator:
             "purged_runs": purged_runs,
         }
 
-    def _apply_queue_retention(self, *, now_epoch_ms: int, policy: dict[str, Any]) -> dict[str, int]:
+    def _apply_queue_retention(
+        self, *, now_epoch_ms: int, policy: dict[str, Any]
+    ) -> dict[str, int]:
         queue_scope = policy.get("queue", {})
         ttl_days = _to_int(queue_scope.get("ttl_days"), default=0)
         ttl_ms = ttl_days * 24 * 60 * 60 * 1000
@@ -891,7 +929,9 @@ class Orchestrator:
                         keep_payloads[run_id] = entry
                         continue
 
-                ts_ms = _to_int(entry.get("queued_at_ms"), default=_to_int(entry.get("ts_ms"), default=0))
+                ts_ms = _to_int(
+                    entry.get("queued_at_ms"), default=_to_int(entry.get("ts_ms"), default=0)
+                )
                 payload_size = _entry_payload_bytes(entry)
                 if terminal and ttl_ms > 0 and now_epoch_ms - ts_ms > ttl_ms:
                     continue
@@ -922,7 +962,9 @@ class Orchestrator:
             "purged_queue_bytes": purged_queue_bytes,
         }
 
-    def _apply_artifact_retention(self, *, now_epoch_ms: int, policy: dict[str, Any]) -> dict[str, int]:
+    def _apply_artifact_retention(
+        self, *, now_epoch_ms: int, policy: dict[str, Any]
+    ) -> dict[str, int]:
         artifact_scope = policy.get("artifact", {})
         ttl_days = _to_int(artifact_scope.get("ttl_days"), default=0)
         ttl_ms = ttl_days * 24 * 60 * 60 * 1000
@@ -949,7 +991,9 @@ class Orchestrator:
                     continue
                 candidate_files.append((score_file, ts_ms, _path_bytes(score_file)))
 
-        candidate_files = [(path, ts, size) for (path, ts, size) in candidate_files if path.exists()]
+        candidate_files = [
+            (path, ts, size) for (path, ts, size) in candidate_files if path.exists()
+        ]
         candidate_files.sort(key=lambda item: item[1], reverse=True)
         retained_artifacts = len(candidate_files)
         purged_artifacts = 0
@@ -1037,6 +1081,7 @@ class Orchestrator:
                 }
             )
         return metrics
+
     def _queue_run(self, run_dir: pathlib.Path, *, attempt: int, worker_id: str) -> None:
         self._mark_queue_state(
             run_dir,
@@ -1175,7 +1220,9 @@ class Orchestrator:
                     run_dir,
                     kind="run",
                     state=STATE_QUEUED,
-                    attempt=self._model_attempts.get(run_dir.name, _to_int(entry.get("attempt"), default=1)),
+                    attempt=self._model_attempts.get(
+                        run_dir.name, _to_int(entry.get("attempt"), default=1)
+                    ),
                     worker_id="orchestrator-recover",
                 )
                 queued_run_ids.add(run_id)
@@ -1260,7 +1307,9 @@ class Orchestrator:
                     run_dir,
                     kind="score",
                     state=STATE_QUEUED,
-                    attempt=self._score_attempts.get(run_dir.name, _to_int(entry.get("attempt"), default=1)),
+                    attempt=self._score_attempts.get(
+                        run_dir.name, _to_int(entry.get("attempt"), default=1)
+                    ),
                     worker_id="orchestrator-recover",
                 )
                 run_dir_entry = self._run_state_file_or_manifest(run_dir)
@@ -1303,7 +1352,9 @@ class Orchestrator:
             dedup[run_dir.name] = run_dir
         return list(dedup.values())
 
-    def _score_run_error(self, run_dir: pathlib.Path, exit_code: int, payload: dict[str, Any]) -> str:
+    def _score_run_error(
+        self, run_dir: pathlib.Path, exit_code: int, payload: dict[str, Any]
+    ) -> str:
         if payload.get("overall_error_code"):
             return str(payload.get("overall_error_code"))
         if exit_code == 124:
@@ -1343,14 +1394,16 @@ class Orchestrator:
             run_dir,
             phase,
             "dispatch blocked by resource limits",
-            state_before=_effective_state(run_dir),
-            state_after=_effective_state(run_dir),
+            state_before=self._effective_state(run_dir),
+            state_after=self._effective_state(run_dir),
             worker_id=worker,
             failure_classification=failure_classification,
             heartbeat_reason="resource_cap_exceeded",
         )
 
-    def _launch_model_worker(self, run_dir: pathlib.Path, *, attempt: int, queue_wait_ms: int) -> None:
+    def _launch_model_worker(
+        self, run_dir: pathlib.Path, *, attempt: int, queue_wait_ms: int
+    ) -> None:
         profile, caps = self._resolve_profile_and_caps(run_dir)
         worker_id = f"run-worker-{attempt}"
         command = [sys.executable, str(self.config.script_dir / "run_task.py"), str(run_dir)]
@@ -1413,7 +1466,9 @@ class Orchestrator:
             state=STATE_MODEL_RUNNING,
         )
 
-    def _launch_score_worker(self, run_dir: pathlib.Path, *, attempt: int, queue_wait_ms: int) -> None:
+    def _launch_score_worker(
+        self, run_dir: pathlib.Path, *, attempt: int, queue_wait_ms: int
+    ) -> None:
         profile, caps = self._resolve_profile_and_caps(run_dir)
         worker_id = f"score-worker-{attempt}"
         command = [
@@ -1487,7 +1542,9 @@ class Orchestrator:
 
             del self._running_model[run_id]
             manifest = _read_json(worker.run_dir / "outputs" / "run_manifest.json")
-            state = _normalize_state(manifest.get("state") or _run_state_file_or_manifest(worker.run_dir))
+            state = _normalize_state(
+                manifest.get("state") or _run_state_file_or_manifest(worker.run_dir)
+            )
             if _is_cancel_requested(worker.run_dir):
                 self._mark_run_state(worker.run_dir, STATE_CANCELLED)
                 self._mark_queue_state(
@@ -1521,7 +1578,9 @@ class Orchestrator:
                     worker_id=worker.worker_id,
                 )
                 attempt = self._score_attempts.get(worker.run_dir.name, 1)
-                self._queue_score(worker.run_dir, attempt=attempt, worker_id=f"score-queue-{attempt}")
+                self._queue_score(
+                    worker.run_dir, attempt=attempt, worker_id=f"score-queue-{attempt}"
+                )
                 continue
 
             if code == 0 and state == STATE_COMPLETE:
@@ -1916,7 +1975,9 @@ class Orchestrator:
                     failure="orchestrator_worker_unavailable",
                 )
                 self._mark_run_state(run_dir, STATE_QUEUED)
-                self._model_retry_wait_until_ms[run_dir.name] = now_ms() + self.config.model_backoff_ms
+                self._model_retry_wait_until_ms[run_dir.name] = (
+                    now_ms() + self.config.model_backoff_ms
+                )
                 _append_run_event(
                     run_dir,
                     "model_dispatch",
@@ -2048,7 +2109,9 @@ class Orchestrator:
                     failure="orchestrator_worker_unavailable",
                 )
                 self._mark_run_state(run_dir, STATE_SCORE_PENDING)
-                self._score_retry_wait_until_ms[run_dir.name] = now_ms() + self.config.score_backoff_ms
+                self._score_retry_wait_until_ms[run_dir.name] = (
+                    now_ms() + self.config.score_backoff_ms
+                )
                 _append_run_event(
                     run_dir,
                     "score_dispatch",
@@ -2086,12 +2149,7 @@ class Orchestrator:
                 )
 
     def _discover_backlog_exists(self) -> bool:
-        return any(
-            
-                bool(self._discover_model_queue())
-                or bool(self._discover_score_candidates())
-            
-        )
+        return any(bool(self._discover_model_queue()) or bool(self._discover_score_candidates()))
 
     def run(self) -> int:
         if not self.runs_root.exists():
@@ -2174,10 +2232,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--runs-root", default=None, help="base directory containing run folders")
     parser.add_argument("--run-queue-path", default=None, help="append-only JSONL model queue path")
-    parser.add_argument("--score-queue-path", default=None, help="append-only JSONL score queue path")
-    parser.add_argument("--max-model-workers", type=int, default=None, help="max concurrent model workers")
-    parser.add_argument("--max-score-workers", type=int, default=None, help="max concurrent score workers")
-    parser.add_argument("--duration-seconds", type=int, default=0, help="orchestrator wall-clock cap")
+    parser.add_argument(
+        "--score-queue-path", default=None, help="append-only JSONL score queue path"
+    )
+    parser.add_argument(
+        "--max-model-workers", type=int, default=None, help="max concurrent model workers"
+    )
+    parser.add_argument(
+        "--max-score-workers", type=int, default=None, help="max concurrent score workers"
+    )
+    parser.add_argument(
+        "--duration-seconds", type=int, default=0, help="orchestrator wall-clock cap"
+    )
     return parser
 
 

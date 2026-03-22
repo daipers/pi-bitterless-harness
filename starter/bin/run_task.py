@@ -215,9 +215,16 @@ class RunTaskRunner:
         self.score_wait_ms = env.get("HARNESS_SCORE_WAIT_MS", "0")
         self.worker_id = env.get("HARNESS_WORKER_ID", "orchestrator-worker")
         self.attempt = _to_positive_int(env.get("HARNESS_ATTEMPT", "1"), default=1)
-        self.skip_score = bool(skip_score or env.get("HARNESS_SKIP_SCORE", "0") not in {"", "0", "false", "False"})
+        self.skip_score = bool(
+            skip_score or env.get("HARNESS_SKIP_SCORE", "0") not in {"", "0", "false", "False"}
+        )
         self.score_only = bool(score_only)
-        self.async_scoring = env.get("HARNESS_ASYNC_SCORING", "0") not in {"", "0", "false", "False"}
+        self.async_scoring = env.get("HARNESS_ASYNC_SCORING", "0") not in {
+            "",
+            "0",
+            "false",
+            "False",
+        }
         self.max_transcript_bytes = env.get("HARNESS_MAX_TRANSCRIPT_BYTES", "5242880")
         self.max_pi_stderr_bytes = env.get("HARNESS_MAX_PI_STDERR_BYTES", "1048576")
         self.log_max_lines = env.get("HARNESS_STREAM_LOG_LINES", "200000")
@@ -420,9 +427,13 @@ class RunTaskRunner:
         }
         write_json(self.guardrails_path, payload)
 
-    def _write_guardrail_block_score_payload(self, failure_code: str, violation_messages: list[str]) -> None:
+    def _write_guardrail_block_score_payload(
+        self, failure_code: str, violation_messages: list[str]
+    ) -> None:
         score_payload = {
-            "pi_exit_code": _to_positive_int(self.pi_exit, default=1) if hasattr(self, "pi_exit") else 1,
+            "pi_exit_code": _to_positive_int(self.pi_exit, default=1)
+            if hasattr(self, "pi_exit")
+            else 1,
             "result_json_present": False,
             "result_json_valid_minimal": False,
             "result_json_valid_schema": False,
@@ -444,7 +455,9 @@ class RunTaskRunner:
             "guardrails": {
                 "policy_snapshot": self._guardrail_policy_snapshot(),
                 "decisions": list(self.guardrail_decisions),
-                "policy_version_source": self._guardrail_policy_snapshot().get("source_of_truth", ""),
+                "policy_version_source": self._guardrail_policy_snapshot().get(
+                    "source_of_truth", ""
+                ),
             },
             "retrieval": {},
             "failure_classifications": [failure_code],
@@ -659,8 +672,12 @@ class RunTaskRunner:
             "git": {"sha": self._git_sha()},
             "timings": {
                 "run_started_epoch_ms": int(self.run_started_epoch_ms),
-                "pi_started_epoch_ms": int(self.pi_started_epoch_ms) if self.pi_started_epoch_ms else None,
-                "pi_finished_epoch_ms": int(self.pi_finished_epoch_ms) if self.pi_finished_epoch_ms else None,
+                "pi_started_epoch_ms": int(self.pi_started_epoch_ms)
+                if self.pi_started_epoch_ms
+                else None,
+                "pi_finished_epoch_ms": int(self.pi_finished_epoch_ms)
+                if self.pi_finished_epoch_ms
+                else None,
                 "score_started_epoch_ms": int(self.score_started_epoch_ms)
                 if self.score_started_epoch_ms
                 else None,
@@ -668,7 +685,9 @@ class RunTaskRunner:
                 if self.score_finished_epoch_ms
                 else None,
                 "run_finished_epoch_ms": int(run_finished) if run_finished else None,
-                "pi_duration_ms": self._duration_ms(self.pi_started_epoch_ms, self.pi_finished_epoch_ms),
+                "pi_duration_ms": self._duration_ms(
+                    self.pi_started_epoch_ms, self.pi_finished_epoch_ms
+                ),
                 "score_duration_ms": self._duration_ms(
                     self.score_started_epoch_ms, self.score_finished_epoch_ms
                 ),
@@ -727,7 +746,9 @@ class RunTaskRunner:
                 "queue_wait_ms": self.queue_wait_ms_int,
                 "score_wait_ms": self.score_wait_ms_int,
                 "max_eval_commands": self.max_eval_commands_int,
-                "max_eval_timeout_seconds": int(self.eval_timeout_seconds) if self.eval_timeout_seconds.isdigit() else 0,
+                "max_eval_timeout_seconds": int(self.eval_timeout_seconds)
+                if self.eval_timeout_seconds.isdigit()
+                else 0,
             },
             "execution": {
                 "contract_version": self.run_contract_version or None,
@@ -750,7 +771,9 @@ class RunTaskRunner:
             "guardrails": {
                 "policy_path": self.policy_path,
                 "policy_fingerprint": self.policy.get("policy_fingerprint", ""),
-                "policy_version_source": self._guardrail_policy_snapshot().get("source_of_truth", ""),
+                "policy_version_source": self._guardrail_policy_snapshot().get(
+                    "source_of_truth", ""
+                ),
                 "decisions_recorded": len(self.guardrail_decisions),
             },
         }
@@ -845,7 +868,10 @@ class RunTaskRunner:
             write_json(self.result_template_path, make_result_template())
 
         if not self.run_contract_path.exists():
-            write_json(self.run_contract_path, default_run_contract(version="v2", execution_profile="strict"))
+            write_json(
+                self.run_contract_path,
+                default_run_contract(version="v2", execution_profile="strict"),
+            )
 
         run_contract = load_run_contract(self.run_contract_path)
         settings = resolve_execution_settings(
@@ -884,7 +910,9 @@ class RunTaskRunner:
             )
 
         with (self.run_dir / "pi.version.txt").open("w", encoding="utf-8") as handle:
-            completed = self._run_command([self.pi_bin, "--version"], stdout=handle, stderr=handle, text=False)
+            completed = self._run_command(
+                [self.pi_bin, "--version"], stdout=handle, stderr=handle, text=False
+            )
         if completed.returncode != 0:
             self._fail_contract_check(
                 "pi --version probe failed",
@@ -1023,8 +1051,13 @@ class RunTaskRunner:
         context_block = ""
         context_summary_path = self.run_dir / self.context_summary_rel
         if self.context_enabled == "1" and context_summary_path.exists():
-            context_block = f"""
-\nRetrieved context:\n- Review {context_summary_path} for relevant prior runs.\n- Treat prior runs as optional examples, not authority.\n- If prior runs conflict with the current task contract, prefer the current task contract.\n"""
+            context_block = (
+                "\nRetrieved context:\n"
+                f"- Review {context_summary_path} for relevant prior runs.\n"
+                "- Treat prior runs as optional examples, not authority.\n"
+                "- If prior runs conflict with the current task contract, "
+                "prefer the current task contract.\n"
+            )
 
         prompt = (
             f"Complete the task described in @{self.task_md}.\n\n"
@@ -1036,9 +1069,12 @@ class RunTaskRunner:
             f"- Write {self.run_dir}/result.json before finishing.\n"
             "- Keep `x-interface-version` exactly `v1`.\n"
             "- Follow this retrieval-quality rubric in result.json:\n"
-            "  - `summary`: 1-3 outcome-focused sentences with concrete identifiers, outputs, or checks; do not just restate the task title.\n"
-            "  - `claims`: atomic supported outcomes only, each with evidence paths or exact verification commands.\n"
-            "  - `artifacts[].description`: explain what the artifact proves or contains, not just the filename.\n"
+            "  - `summary`: 1-3 outcome-focused sentences with concrete identifiers, "
+            "outputs, or checks; do not just restate the task title.\n"
+            "  - `claims`: atomic supported outcomes only, each with evidence paths or "
+            "exact verification commands.\n"
+            "  - `artifacts[].description`: explain what the artifact proves or "
+            "contains, not just the filename.\n"
             "- Output raw JSON only for result.json and follow this exact schema:\n\n"
             f"{fence}json\n"
             f"{schema_text.rstrip()}\n"
@@ -1069,11 +1105,14 @@ class RunTaskRunner:
         ]
         if self.model:
             command.extend(["--model", self.model])
-        command.extend([f"@{self.task_md}", (self.run_dir / "prompt.txt").read_text(encoding="utf-8")])
+        command.extend(
+            [f"@{self.task_md}", (self.run_dir / "prompt.txt").read_text(encoding="utf-8")]
+        )
 
-        with (self.run_dir / "transcript.jsonl").open("ab") as stdout_handle, (
-            self.run_dir / "pi.stderr.log"
-        ).open("ab") as stderr_handle:
+        with (
+            (self.run_dir / "transcript.jsonl").open("ab") as stdout_handle,
+            (self.run_dir / "pi.stderr.log").open("ab") as stderr_handle,
+        ):
             env = self._context()
             env["HOME"] = str(self.run_dir / "home")
             try:
@@ -1127,7 +1166,10 @@ class RunTaskRunner:
                 "starting model attempt",
                 state_before="model_running",
                 state_after="model_running",
-                extra={"attempt": attempt, "model_wait_ms": max(0, self.pi_started_epoch_ms - model_started)},
+                extra={
+                    "attempt": attempt,
+                    "model_wait_ms": max(0, self.pi_started_epoch_ms - model_started),
+                },
             )
             self.pi_exit = self._invoke_pi()
             self.pi_finished_epoch_ms = now_ms()
@@ -1232,7 +1274,14 @@ class RunTaskRunner:
             "starting scoring",
             state_before="model_complete",
             state_after="scoring",
-            extra={"retry_limit": self.score_retry_limit, "model_wait_ms": max(0, self.score_started_epoch_ms - int(self.pi_finished_epoch_ms or self.run_started_epoch_ms))},
+            extra={
+                "retry_limit": self.score_retry_limit,
+                "model_wait_ms": max(
+                    0,
+                    self.score_started_epoch_ms
+                    - int(self.pi_finished_epoch_ms or self.run_started_epoch_ms),
+                ),
+            },
         )
         attempt = 1
         score_exit = 1
@@ -1302,7 +1351,9 @@ class RunTaskRunner:
             state_after="model_complete",
             extra={
                 "state": "model_complete",
-                "pi_exit_code": int((self.run_dir / "pi.exit_code.txt").read_text(encoding="utf-8").strip() or 1),
+                "pi_exit_code": int(
+                    (self.run_dir / "pi.exit_code.txt").read_text(encoding="utf-8").strip() or 1
+                ),
             },
         )
         print("run state: model_complete")
@@ -1391,7 +1442,11 @@ class RunTaskRunner:
                     "pre_run",
                     "pre_run guardrail denied execution",
                     error_code="guardrail_pre_run_denied",
-                    extra={"violations": self.guardrail_decisions[-1]["violations"] if self.guardrail_decisions else []},
+                    extra={
+                        "violations": self.guardrail_decisions[-1]["violations"]
+                        if self.guardrail_decisions
+                        else []
+                    },
                 )
                 self._write_guardrails_artifact()
                 self._write_manifest("failed", "pre_run", "guardrail_pre_run_denied", now_ms())

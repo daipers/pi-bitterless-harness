@@ -134,9 +134,12 @@ def write_task(
                 "- outputs/run_manifest.json",
                 "",
                 "## Retrieval Quality Rubric",
-                "- `summary`: write 1-3 outcome-focused sentences with concrete identifiers or outputs.",
-                "- `claims`: keep each claim atomic and cite evidence paths or exact verification commands.",
-                "- `artifacts[].description`: explain what the artifact proves or contains, not just the filename.",
+                "- `summary`: write 1-3 outcome-focused sentences with concrete identifiers, "
+                "outputs, or checks.",
+                "- `claims`: keep each claim atomic and cite evidence paths or exact "
+                "verification commands.",
+                "- `artifacts[].description`: explain what the artifact proves or contains, "
+                "not just the filename.",
                 "",
                 "## Result JSON schema (source of truth)",
                 "```json",
@@ -395,7 +398,12 @@ def benchmark_retrieval(
             cold_manifest = manifest
             warm_started = time.perf_counter()
             subprocess.run(
-                [sys.executable, str(prepare_context), str(current_run), "policies/capability.json"],
+                [
+                    sys.executable,
+                    str(prepare_context),
+                    str(current_run),
+                    "policies/capability.json",
+                ],
                 cwd=str(harness_root),
                 check=True,
                 capture_output=True,

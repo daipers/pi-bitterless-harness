@@ -11,8 +11,7 @@ RUN_REAL_PI = os.environ.get("HARNESS_RUN_REAL_PI_TESTS") == "1"
 pytestmark = pytest.mark.skipif(
     not RUN_REAL_PI,
     reason=(
-        "set HARNESS_RUN_REAL_PI_TESTS=1 and HARNESS_PI_AUTH_JSON "
-        "to run against the real pi CLI"
+        "set HARNESS_RUN_REAL_PI_TESTS=1 and HARNESS_PI_AUTH_JSON to run against the real pi CLI"
     ),
 )
 

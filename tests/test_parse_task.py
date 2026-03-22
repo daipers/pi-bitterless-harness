@@ -84,7 +84,7 @@ def test_parse_task_main_returns_zero_for_valid_task(tmp_path: pathlib.Path, cap
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "\"ok\": true" in captured.out
+    assert '"ok": true' in captured.out
 
 
 def test_parse_task_main_usage_error(capsys) -> None:
@@ -114,7 +114,7 @@ def test_parse_task_script_main_entrypoint(
 
     captured = capsys.readouterr()
     assert excinfo.value.code == 0
-    assert "\"ok\": true" in captured.out
+    assert '"ok": true' in captured.out
 
 
 def test_parse_task_reports_duplicate_and_unknown_sections() -> None:
@@ -130,10 +130,10 @@ def test_parse_task_reports_duplicate_and_unknown_sections() -> None:
 def test_parse_task_reports_schema_block_errors() -> None:
     missing_fence = VALID_TASK.replace(
         (
-            "```json\n{\n  \"$schema\": "
-            "\"https://json-schema.org/draft/2020-12/schema\",\n"
-            "  \"x-interface-version\": \"v1\",\n"
-            "  \"type\": \"object\"\n}\n```"
+            '```json\n{\n  "$schema": '
+            '"https://json-schema.org/draft/2020-12/schema",\n'
+            '  "x-interface-version": "v1",\n'
+            '  "type": "object"\n}\n```'
         ),
         "not json",
     )

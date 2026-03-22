@@ -58,8 +58,37 @@ class FakeProcess:
 def _make_run_run_dir(runs_root: pathlib.Path, run_id: str) -> pathlib.Path:
     run_dir = runs_root / run_id
     (run_dir / "outputs").mkdir(parents=True)
+    schema = {
+        "type": "object",
+        "required": [
+            "x-interface-version",
+            "status",
+            "summary",
+            "artifacts",
+            "claims",
+            "remaining_risks",
+        ],
+        "properties": {
+            "x-interface-version": {"const": "v1"},
+            "status": {"type": "string"},
+            "summary": {"type": "string"},
+            "artifacts": {"type": "array"},
+            "claims": {"type": "array"},
+            "remaining_risks": {"type": "array"},
+        },
+        "additionalProperties": False,
+    }
+    task_text = (
+        "# Task\n\n## Goal\nRun burst retention test\n\n"
+        "## Constraints\n- Stay local.\n\n## Done\n- Done.\n\n"
+        "## Eval\n```bash\necho ok\n```\n\n## Required Artifacts\n"
+        "- result.json\n\n## Result JSON schema (source of truth)\n"
+        "```json\n"
+        + json.dumps(schema)
+        + "\n```\n"
+    )
     (run_dir / "task.md").write_text(
-        "# Task\n\n## Goal\nRun burst retention test\n\n## Constraints\n- Stay local.\n\n## Done\n- Done.\n\n## Eval\n```bash\necho ok\n```\n\n## Required Artifacts\n- result.json\n\n## Result JSON schema (source of truth)\n```json\n{\"type\":\"object\",\"required\":[\"x-interface-version\",\"status\",\"summary\",\"artifacts\",\"claims\",\"remaining_risks\"],\"properties\":{\"x-interface-version\":{\"const\":\"v1\"},\"status\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},\"artifacts\":{\"type\":\"array\"},\"claims\":{\"type\":\"array\"},\"remaining_risks\":{\"type\":\"array\"}},\"additionalProperties\":false}\n```\n",
+        task_text,
         encoding="utf-8",
     )
     (run_dir / "RUN.md").write_text("# Run\n", encoding="utf-8")
@@ -70,7 +99,9 @@ def _make_run_run_dir(runs_root: pathlib.Path, run_id: str) -> pathlib.Path:
     return run_dir
 
 
-def _orchestrator_config(runs_root: pathlib.Path, *, max_model_workers: int = 1, max_score_workers: int = 1) -> orchestrator.OrchestratorConfig:
+def _orchestrator_config(
+    runs_root: pathlib.Path, *, max_model_workers: int = 1, max_score_workers: int = 1
+) -> orchestrator.OrchestratorConfig:
     return orchestrator.OrchestratorConfig(
         script_dir=pathlib.Path(__file__).resolve().parents[1] / "starter" / "bin",
         runs_root=runs_root,
@@ -141,13 +172,16 @@ def test_orchestrator_async_burst_dispatch_bounded_by_queue_rotation_and_no_drop
         terminal_runs = sum(
             1
             for payload in run_queue.values()
-            if orchestrator._is_queue_state_terminal(orchestrator._extract_queue_state(payload.get("state")))
+            if orchestrator._is_queue_state_terminal(
+                orchestrator._extract_queue_state(payload.get("state"))
+            )
         )
         inflight_runs = len(run_queue) - terminal_runs
         observed_terminal_counts.append(terminal_runs)
         observed_inflight_counts.append(inflight_runs)
         if len(orch._running_model) == 0 and len(orch._running_score) == 0:
-            # all workers drained; if all queue entries are terminal we should stay bounded by policy.
+            # all workers drained.
+            # If all queue entries are terminal we should stay bounded by policy.
             if terminal_runs == len(run_queue):
                 break
 
@@ -159,13 +193,17 @@ def test_orchestrator_async_burst_dispatch_bounded_by_queue_rotation_and_no_drop
     final_terminal = [
         run_id
         for run_id, payload in final_run_queue.items()
-        if orchestrator._is_queue_state_terminal(orchestrator._extract_queue_state(payload.get("state")))
+        if orchestrator._is_queue_state_terminal(
+            orchestrator._extract_queue_state(payload.get("state"))
+        )
     ]
     final_non_terminal = [
         run_id
         for run_id in run_ids
         if run_id in final_run_queue
-        and not orchestrator._is_queue_state_terminal(orchestrator._extract_queue_state(final_run_queue[run_id].get("state")))
+        and not orchestrator._is_queue_state_terminal(
+            orchestrator._extract_queue_state(final_run_queue[run_id].get("state"))
+        )
     ]
 
     assert len(final_run_queue) == len(final_terminal) + len(final_non_terminal)
@@ -190,7 +228,9 @@ def test_score_artifacts_rotate_and_remain_readable_after_multiple_retention_cyc
     ]:
         (run_dir / "score").mkdir()
         (run_dir / "score" / score_name).write_text(marker, encoding="utf-8")
-        (run_dir / "score" / score_name.replace("stdout", "stderr")).write_text("", encoding="utf-8")
+        (run_dir / "score" / score_name.replace("stdout", "stderr")).write_text(
+            "", encoding="utf-8"
+        )
 
     os_old = 1_000_000
     os_new = 2_000_000

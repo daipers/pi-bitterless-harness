@@ -209,7 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
     if not pre_context_decision["allowed"]:
-        raise SystemExit("; ".join(pre_context_decision["violations"]) or "pre_context_build denied")
+        raise SystemExit(
+            "; ".join(pre_context_decision["violations"]) or "pre_context_build denied"
+        )
 
     guardrail_decisions = [pre_retrieval_decision, pre_context_decision]
 

@@ -12,6 +12,7 @@ from typing import Any
 
 from harnesslib import (
     evaluate_required_artifact_path,
+    now_utc,
     parse_task_file,
     sha256_text,
     write_json,
@@ -35,6 +36,8 @@ def _to_positive_int(value: str | int | None, *, default: int) -> int:
 
 def _now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
+
+
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 SKIPPED_TOP_LEVEL = {"home", "session", "recovery"}
 SKIPPED_FILES = {
@@ -117,7 +120,9 @@ def validate_retrieval_profile(payload: dict[str, Any]) -> list[str]:
         for key in DEFAULT_RETRIEVAL_PROFILE["field_weights"]:
             value = field_weights.get(key)
             if not isinstance(value, int) or value < 0:
-                errors.append(f"retrieval profile field_weights.{key} must be a non-negative integer")
+                errors.append(
+                    f"retrieval profile field_weights.{key} must be a non-negative integer"
+                )
     for key in [
         "phrase_bonus_per_field",
         "phrase_bonus_cap",
@@ -145,7 +150,9 @@ def validate_retrieval_profile(payload: dict[str, Any]) -> list[str]:
         ]:
             value = quality_prior.get(key)
             if not isinstance(value, int) or value < 0:
-                errors.append(f"retrieval profile quality_prior.{key} must be a non-negative integer")
+                errors.append(
+                    f"retrieval profile quality_prior.{key} must be a non-negative integer"
+                )
     return errors
 
 
@@ -523,7 +530,9 @@ def build_retrieval_view(
     excerpt_candidates = [
         artifact
         for artifact in artifact_records
-        if artifact["evidence_linked"] and artifact["eligible_for_copy"] and artifact["safe_excerpt"]
+        if artifact["evidence_linked"]
+        and artifact["eligible_for_copy"]
+        and artifact["safe_excerpt"]
     ]
     excerpt_candidates.sort(
         key=lambda artifact: _artifact_excerpt_sort_key(
@@ -1061,7 +1070,8 @@ def sync_retrieval_index(
 
     if max_bytes > 0:
         sorted_oldest_first = sorted(
-            entries, key=lambda item: (int(item.get("indexed_at_ms") or 0), str(item.get("run_id", "")))
+            entries,
+            key=lambda item: (int(item.get("indexed_at_ms") or 0), str(item.get("run_id", ""))),
         )
         total_bytes = sum(_entry_payload_bytes(entry) for entry in sorted_oldest_first)
         while sorted_oldest_first and total_bytes > max_bytes:
@@ -1101,8 +1111,7 @@ def sync_retrieval_index(
         index_mode = "warm_reuse"
 
     source_snapshot_fingerprints = {
-        str(entry.get("run_id")): str(entry.get("source_snapshot_fingerprint"))
-        for entry in entries
+        str(entry.get("run_id")): str(entry.get("source_snapshot_fingerprint")) for entry in entries
     }
     index_state_token = _build_index_provenance(
         entries,

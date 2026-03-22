@@ -108,7 +108,8 @@ def _duration_ms(run: dict[str, Any]) -> int:
     try:
         return max(
             0,
-            int(timings.get("run_finished_epoch_ms", 0)) - int(timings.get("run_started_epoch_ms", 0)),
+            int(timings.get("run_finished_epoch_ms", 0))
+            - int(timings.get("run_started_epoch_ms", 0)),
         )
     except Exception:
         return 0
@@ -255,7 +256,9 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
                 saturation_events += 1
                 event_ts = _parse_ts_ms(event.get("ts"))
                 if event_ts and now - event_ts <= trend_window:
-                    bucket = datetime.fromtimestamp(event_ts / 1000, tz=UTC).strftime("%Y-%m-%dT%H:00Z")
+                    bucket = datetime.fromtimestamp(event_ts / 1000, tz=UTC).strftime(
+                        "%Y-%m-%dT%H:00Z"
+                    )
                     saturation_last_24h[bucket] += 1
 
         event_codes = [
@@ -269,7 +272,11 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
         error_label = (
             "; ".join(_split_codes(manifest.get("error_code")))
             if manifest.get("error_code")
-            else ("none" if state == "complete" else "; ".join(_split_codes(score_payload.get("overall_error_code"))))
+            else (
+                "none"
+                if state == "complete"
+                else "; ".join(_split_codes(score_payload.get("overall_error_code")))
+            )
         )
         if state in {"failed", "cancelled"} or error_label not in {"", "none"}:
             offending.append(
@@ -278,8 +285,15 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
                     "state": state,
                     "duration_ms": duration_ms,
                     "error_code": error_label or "none",
-                    "evaluation_failed": bool(score_error_codes or score_payload.get("failure_classifications")),
-                    "failures": sorted(set(_split_codes(manifest.get("error_code")) + _split_codes(score_payload.get("overall_error_code")))),
+                    "evaluation_failed": bool(
+                        score_error_codes or score_payload.get("failure_classifications")
+                    ),
+                    "failures": sorted(
+                        set(
+                            _split_codes(manifest.get("error_code"))
+                            + _split_codes(score_payload.get("overall_error_code"))
+                        )
+                    ),
                 }
             )
 
@@ -299,8 +313,7 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
     offending.sort(key=lambda item: (item["duration_ms"], item["run_id"]), reverse=True)
     longest_runs.sort(key=lambda item: item["duration_ms"], reverse=True)
     saturation_hours = [
-        {"hour_utc": hour, "events": count}
-        for hour, count in sorted(saturation_last_24h.items())
+        {"hour_utc": hour, "events": count} for hour, count in sorted(saturation_last_24h.items())
     ]
     saturation_hours = saturation_hours[-24:] if saturation_hours else []
 

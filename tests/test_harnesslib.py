@@ -202,7 +202,7 @@ def test_task_parse_helpers_cover_eval_artifacts_and_schema_paths(
 
     schema_errors = []
     schema_text, schema_payload = harnesslib._parse_schema_section(
-        "```json\n{\"type\": }\n```",
+        '```json\n{"type": }\n```',
         schema_errors,
     )
     assert schema_text is not None
@@ -211,7 +211,7 @@ def test_task_parse_helpers_cover_eval_artifacts_and_schema_paths(
 
     schema_errors = []
     schema_text, schema_payload = harnesslib._parse_schema_section(
-        "```json\n{\"x-interface-version\":\"v2\"}\n```",
+        '```json\n{"x-interface-version":"v2"}\n```',
         schema_errors,
     )
     assert schema_text is not None
@@ -222,7 +222,7 @@ def test_task_parse_helpers_cover_eval_artifacts_and_schema_paths(
     task_path.write_text(
         "# Task\n\n## Goal\nGoal\n\n## Constraints\n- None\n\n## Done\n- Done\n\n"
         "## Eval\n```bash\npython3 script.py\n```\n\n## Required Artifacts\n- outputs/x\n\n"
-        "## Result JSON schema (source of truth)\n```json\n{\"type\":\"object\"}\n```\n",
+        '## Result JSON schema (source of truth)\n```json\n{"type":"object"}\n```\n',
         encoding="utf-8",
     )
     payload = harnesslib.parse_task_file(task_path)
@@ -326,7 +326,10 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
     v2_errors = validate_run_contract(broken_v2)
     assert "result_interface_version must be v1" in v2_errors
     assert "context_summary_path must be 'context/retrieval-summary.md'" in v2_errors
-    assert "execution_profile must be one of: strict, offline, networked, heavy_tools, capability" in v2_errors
+    assert (
+        "execution_profile must be one of: strict, offline, networked, heavy_tools, capability"
+        in v2_errors
+    )
     assert "policy_path must be a non-empty string" in v2_errors
     assert "missing retrieval field: max_artifacts_per_run" in v2_errors
     assert "retrieval.source must be 'prior_runs'" in v2_errors

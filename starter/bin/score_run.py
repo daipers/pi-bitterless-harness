@@ -127,12 +127,8 @@ def build_context(argv: list[str]) -> ScoreContext:
         run_dir=run_dir,
         exit_code_path=pathlib.Path(argv[2]).resolve(),
         out_path=pathlib.Path(argv[3]).resolve(),
-        schema_path=pathlib.Path(
-            argv[4] if len(argv) >= 5 else schema_default
-        ).resolve(),
-        event_log_path=pathlib.Path(
-            argv[5] if len(argv) == 6 else event_default
-        ).resolve(),
+        schema_path=pathlib.Path(argv[4] if len(argv) >= 5 else schema_default).resolve(),
+        event_log_path=pathlib.Path(argv[5] if len(argv) == 6 else event_default).resolve(),
         repo_root=resolve_repo_root(run_dir),
         contract_path=(run_dir / "run.contract.json").resolve(),
     )
@@ -205,7 +201,12 @@ def _merge_guardrail_decisions(
             allowed = bool(item.get("allowed", False))
             policy_source = str(item.get("policy_version_source", ""))
             key = json.dumps(
-                {"hook": hook, "allowed": allowed, "violations": violations, "policy_version_source": policy_source},
+                {
+                    "hook": hook,
+                    "allowed": allowed,
+                    "violations": violations,
+                    "policy_version_source": policy_source,
+                },
                 sort_keys=True,
             )
             if key in signatures:
@@ -736,9 +737,7 @@ def _persist_guardrail_artifact(
     execution_metadata: dict[str, Any],
     score_payload: dict[str, Any],
 ) -> None:
-    existing_payload = _read_previous_guardrails(
-        execution_metadata["guardrails_artifact_path"]
-    )
+    existing_payload = _read_previous_guardrails(execution_metadata["guardrails_artifact_path"])
     merged_decisions = _merge_guardrail_decisions(
         existing_payload,
         list(score_payload.get("guardrails", {}).get("decisions", [])),
@@ -826,7 +825,9 @@ def build_score_payload(context: ScoreContext, *, cancelled: bool = False) -> di
     parsed_task = parse_task_file(context.task_path, eval_policy=execution_metadata["policy"])
     allow_dangerous_eval = env_flag(execution_metadata["policy"]["opt_in_env"], default=False)
     allow_network_tasks = env_flag(execution_metadata["policy"]["allow_network_env"], default=False)
-    eval_timeout_seconds = int(os.environ.get("HARNESS_EVAL_TIMEOUT_SECONDS", DEFAULT_EVAL_TIMEOUT_SECONDS))
+    eval_timeout_seconds = int(
+        os.environ.get("HARNESS_EVAL_TIMEOUT_SECONDS", DEFAULT_EVAL_TIMEOUT_SECONDS)
+    )
     max_eval_commands = _to_positive_int(
         os.environ.get("HARNESS_MAX_EVAL_COMMANDS", DEFAULT_MAX_EVAL_COMMANDS),
         default=0,

@@ -122,10 +122,13 @@ python3 ../tests/fixtures/pass_eval.py
             }
         ],
         artifacts=[
-            {
-                "path": "outputs/comet-proof.txt",
-                "description": "Comet-lattice proof artifact containing the preserved scoring evidence.",
-            }
+        {
+            "path": "outputs/comet-proof.txt",
+            "description": (
+                "Comet-lattice proof artifact containing the preserved "
+                "scoring evidence."
+            ),
+        }
         ],
         artifact_contents={"outputs/comet-proof.txt": "comet-lattice proof\n"},
     )
@@ -141,5 +144,8 @@ python3 ../tests/fixtures/pass_eval.py
     assert concrete_score["score_breakdown"]["quality_prior"] == 4
     assert concrete_score["total_score"] > generic_score["total_score"]
     assert concrete_entry["retrieval_profile_id"] == "retrieval-v4-default"
-    assert concrete_entry["retrieval_view"]["artifact_records"][0]["excerpt"] == "comet-lattice proof\n"
+    assert (
+        concrete_entry["retrieval_view"]["artifact_records"][0]["excerpt"]
+        == "comet-lattice proof\n"
+    )
     assert "outputs/comet-proof.txt" in concrete_entry["retrieval_view"]["text"]

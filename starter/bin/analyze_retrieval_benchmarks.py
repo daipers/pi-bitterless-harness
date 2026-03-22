@@ -25,10 +25,13 @@ def load_payload(path: pathlib.Path) -> dict[str, Any]:
     return payload
 
 
-def history_row_from_payload(payload: dict[str, Any], *, source_path: pathlib.Path) -> dict[str, Any]:
+def history_row_from_payload(
+    payload: dict[str, Any], *, source_path: pathlib.Path
+) -> dict[str, Any]:
     retrieval = payload["retrieval"]
     row = {
-        "generated_at": payload.get("generated_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "generated_at": payload.get("generated_at")
+        or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source_path": str(source_path),
         "retrieval_profile_id": retrieval.get("retrieval_profile_id"),
         "scenario_count": retrieval.get("scenario_count"),
@@ -89,17 +92,22 @@ def analyze_latest_scenarios(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def record_history(history_dir: pathlib.Path, payloads: list[dict[str, Any]], paths: list[pathlib.Path]) -> tuple[pathlib.Path, list[pathlib.Path]]:
+def record_history(
+    history_dir: pathlib.Path, payloads: list[dict[str, Any]], paths: list[pathlib.Path]
+) -> tuple[pathlib.Path, list[pathlib.Path]]:
     history_dir.mkdir(parents=True, exist_ok=True)
     history_path = history_dir / "retrieval-benchmark.history.jsonl"
     snapshot_paths: list[pathlib.Path] = []
 
-    rows = [history_row_from_payload(payload, source_path=path) for payload, path in zip(payloads, paths)]
+    rows = [
+        history_row_from_payload(payload, source_path=path)
+        for payload, path in zip(payloads, paths)
+    ]
     with history_path.open("a", encoding="utf-8") as handle:
         for row, payload in zip(rows, payloads):
             handle.write(json.dumps(row, sort_keys=True) + "\n")
             snapshot_stem = f"retrieval-benchmark-{time.strftime('%Y%m%d-%H%M%S')}"
-            snapshot_path = history_dir / f"{snapshot_stem}-{len(snapshot_paths)+1}.summary.json"
+            snapshot_path = history_dir / f"{snapshot_stem}-{len(snapshot_paths) + 1}.summary.json"
             snapshot_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             snapshot_paths.append(snapshot_path)
     return history_path, snapshot_paths
@@ -107,7 +115,9 @@ def record_history(history_dir: pathlib.Path, payloads: list[dict[str, Any]], pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze retrieval benchmark snapshots")
-    parser.add_argument("inputs", nargs="+", help="benchmark JSON files produced by benchmark_harness.py")
+    parser.add_argument(
+        "inputs", nargs="+", help="benchmark JSON files produced by benchmark_harness.py"
+    )
     parser.add_argument(
         "--history-dir",
         help="optional directory to append history rows and snapshot copies",

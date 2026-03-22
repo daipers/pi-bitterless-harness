@@ -184,6 +184,8 @@ def _collect_fixed_field_errors(payload: dict[str, Any], expected: dict[str, Any
         if key in payload and payload[key] != value:
             errors.append(f"{key} must be {value!r}")
     return errors
+
+
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 NETWORK_TOKEN_RE = re.compile(r"\b(?:curl|nc|ping|scp|ssh|telnet|wget)\b")
 
@@ -503,7 +505,10 @@ def evaluate_policy_guardrail(
             context_allow_network_tasks and policy_allow_network_tasks
         )
 
-        if context.get("requires_opt_in") and not effective_limits["allow_dangerous_eval_effective"]:
+        if (
+            context.get("requires_opt_in")
+            and not effective_limits["allow_dangerous_eval_effective"]
+        ):
             allowed = False
             violations.append("tool_use.requires_opt_in")
         if context.get("network_access") and not effective_limits["allow_network_tasks_effective"]:
@@ -635,12 +640,18 @@ def make_result_template() -> dict[str, Any]:
         "artifacts": [
             {
                 "path": "outputs/retrieval-metrics.json",
-                "description": "Metrics snapshot showing the retrieval quality outputs produced by this run.",
+                "description": (
+                    "Metrics snapshot showing the retrieval quality outputs produced by "
+                    "this run."
+                ),
             }
         ],
         "claims": [
             {
-                "claim": "Retrieval metrics were generated and written to outputs/retrieval-metrics.json.",
+                "claim": (
+                    "Retrieval metrics were generated and written to "
+                    "outputs/retrieval-metrics.json."
+                ),
                 "evidence": ["outputs/retrieval-metrics.json"],
             }
         ],
@@ -694,7 +705,9 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
         expected = default_run_contract(version=RUN_CONTRACT_VERSION_V1)
         if payload.get("result_interface_version") != RESULT_INTERFACE_VERSION:
             errors.append("result_interface_version must be v1")
-        errors.extend(_collect_missing_fields(payload, _RUN_CONTRACT_REQUIRED_KEYS_V1, prefix="run contract"))
+        errors.extend(
+            _collect_missing_fields(payload, _RUN_CONTRACT_REQUIRED_KEYS_V1, prefix="run contract")
+        )
         if isinstance(payload.get("eval_policy"), dict):
             for key in ["opt_in_env", "allow_network_env", "allowed_programs", "blocked_programs"]:
                 if key not in payload["eval_policy"]:
@@ -721,7 +734,9 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
     expected = default_run_contract(version=RUN_CONTRACT_VERSION_V2)
     if payload.get("result_interface_version") != RESULT_INTERFACE_VERSION:
         errors.append("result_interface_version must be v1")
-    errors.extend(_collect_missing_fields(payload, _RUN_CONTRACT_REQUIRED_KEYS_V2, prefix="run contract"))
+    errors.extend(
+        _collect_missing_fields(payload, _RUN_CONTRACT_REQUIRED_KEYS_V2, prefix="run contract")
+    )
     errors.extend(
         _collect_fixed_field_errors(
             payload,
