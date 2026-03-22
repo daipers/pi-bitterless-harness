@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import pathlib
@@ -11,21 +12,20 @@ import subprocess  # nosec B404 - subprocess used for orchestration of harness t
 import sys
 import time
 import uuid
-import atexit
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from harnesslib import (
+    EXECUTION_PROFILES,
     RUNNER_VERSION,
     compute_dependencies_hash,
-    EXECUTION_PROFILES,
     default_run_contract,
     evaluate_policy_guardrail,
+    guardrail_policy_snapshot,
     load_policy,
     load_run_contract,
     make_result_template,
     now_utc,
-    guardrail_policy_snapshot,
     resolve_execution_settings,
     write_json,
 )
@@ -1118,9 +1118,9 @@ class RunTaskRunner:
             self._truncate_file(self.run_dir / "transcript.jsonl", self.max_transcript_bytes_int)
             self._truncate_file(self.run_dir / "pi.stderr.log", self.max_pi_stderr_bytes_int)
             with (self.run_dir / "transcript.jsonl").open("ab") as raw_handle:
-                raw_handle.write(f"attempt={attempt}\n".encode("utf-8"))
+                raw_handle.write(f"attempt={attempt}\n".encode())
             with (self.run_dir / "pi.stderr.log").open("ab") as raw_handle:
-                raw_handle.write(f"attempt={attempt}\n".encode("utf-8"))
+                raw_handle.write(f"attempt={attempt}\n".encode())
             self.pi_started_epoch_ms = now_ms()
             self._log_event(
                 self.phase,
@@ -1302,10 +1302,10 @@ class RunTaskRunner:
             state_after="model_complete",
             extra={
                 "state": "model_complete",
-                "pi_exit_code": int((self.run_dir / "pi.exit_code.txt").read_text(encoding=\"utf-8\").strip() or 1),
+                "pi_exit_code": int((self.run_dir / "pi.exit_code.txt").read_text(encoding="utf-8").strip() or 1),
             },
         )
-        print(f"run state: model_complete")
+        print("run state: model_complete")
         print(f"run dir: {self.run_dir}")
         print(f"pi exit code: {self.pi_exit}")
         raise SystemExit(0)

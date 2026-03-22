@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import pathlib
 import shutil
-import os
 import sys
 import time
 from typing import Any
 
 from harnesslib import (
-    load_policy,
-    load_run_contract,
     evaluate_policy_guardrail,
     guardrail_policy_snapshot,
+    load_policy,
+    load_run_contract,
     parse_task_file,
-    resolve_retrieval_index_policy,
     resolve_execution_settings,
+    resolve_retrieval_index_policy,
     sha256_file,
     sha256_text,
     write_json,

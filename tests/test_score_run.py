@@ -389,6 +389,142 @@ def test_score_run_happy_path(isolated_repo: pathlib.Path) -> None:
     assert payload["retrieval"]["enabled"] is False
 
 
+def test_score_run_persists_guardrail_artifacts_and_merges_existing_decisions(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    contract = json.loads((run_dir / "run.contract.json").read_text(encoding="utf-8"))
+    policy_path = isolated_repo / "starter" / "policies" / "test-deny-tool-use.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "opt_in_env": "HARNESS_ALLOW_DANGEROUS_EVAL",
+                "allow_network_env": "HARNESS_ALLOW_NETWORK_TASKS",
+                "allowed_programs": [],
+                "blocked_programs": [],
+                "network_programs": [],
+                "guardrails": {
+                    "hooks": {
+                        "pre_tool_use": {
+                            "enabled": True,
+                            "allow": False,
+                            "allow_network_tools": True,
+                            "allow_dangerous_commands": True,
+                        }
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    contract["policy_path"] = "policies/test-deny-tool-use.json"
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "outputs" / "guardrails.json").write_text(
+        json.dumps(
+            {
+                "selected_profile_id": "strict",
+                "policy_path": "policies/strict.json",
+                "decisions": [
+                    {
+                        "hook": "pre_run",
+                        "allowed": True,
+                        "violations": [],
+                        "policy_version_source": "seed",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+    persisted_guardrails = json.loads(
+        (run_dir / "outputs" / "guardrails.json").read_text(encoding="utf-8")
+    )
+    persisted_hooks = {item["hook"] for item in persisted_guardrails["decisions"]}
+
+    assert payload["overall_pass"] is False
+    assert payload["failure_classifications"] == ["guardrail_policy_violation"]
+    assert payload["guardrails"]["decisions"] == persisted_guardrails["decisions"]
+    assert persisted_hooks == {"pre_run", "pre_tool_use"}
+    assert persisted_guardrails["score_overall_pass"] is False
+    assert persisted_guardrails["score_overall_error_code"] == "guardrail_policy_violation"
+
+
+@pytest.mark.parametrize(
+    "contract_version,contract_profile,env_profile,expected_profile,expected_policy,expected_retrieval_enabled",
+    [
+        ("v2", "strict", None, "strict", "policies/strict.json", False),
+        ("v2", "capability", None, "capability", "policies/capability.json", True),
+        ("v2", "heavy_tools", None, "heavy_tools", "policies/heavy_tools.json", True),
+        ("v1", "strict", None, "strict", "policies/strict.json", False),
+        ("v1", "strict", "networked", "networked", "policies/networked.json", False),
+    ],
+)
+def test_score_run_contract_matrix_controls_execution_profile_and_policy(
+    isolated_repo: pathlib.Path,
+    monkeypatch,
+    contract_version: str,
+    contract_profile: str,
+    env_profile: str | None,
+    expected_profile: str,
+    expected_policy: str,
+    expected_retrieval_enabled: bool,
+) -> None:
+    run_dir = make_run_dir(
+        isolated_repo,
+        contract_version=contract_version,
+        execution_profile=contract_profile,
+    )
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": ["outputs/claim.txt"]}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if env_profile is None:
+        monkeypatch.delenv("HARNESS_EXECUTION_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("HARNESS_EXECUTION_PROFILE", env_profile)
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+    assert payload["execution_profile"] == expected_profile
+    assert payload["policy_path"] == expected_policy
+    assert payload["retrieval"]["enabled"] is expected_retrieval_enabled
+
+
 def test_score_run_includes_selected_source_count_and_empty_context(
     isolated_repo: pathlib.Path,
 ) -> None:

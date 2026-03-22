@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 
-from harnesslib import default_run_contract
-from harnesslib import parse_task_file
+from harnesslib import default_run_contract, parse_task_file
 from retrieval_index import build_index_entry, build_query, score_index_entry
 
 

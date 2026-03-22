@@ -7,11 +7,12 @@ import pathlib
 import shutil
 import tempfile
 import time
+from collections.abc import Iterable
 from itertools import islice, product
-from typing import Any, Iterable
+from typing import Any
 
 from benchmark_harness import benchmark_retrieval
-from retrieval_index import DEFAULT_RETRIEVAL_PROFILE, load_retrieval_profile
+from retrieval_index import load_retrieval_profile
 
 
 def clone_profile(profile: dict[str, Any]) -> dict[str, Any]:

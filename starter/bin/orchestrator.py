@@ -5,13 +5,13 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from typing import Any
-import shutil
 
 from harnesslib import (
     default_policy_path,
@@ -20,7 +20,6 @@ from harnesslib import (
     resolve_execution_settings,
     resolve_retention_policy,
 )
-
 
 STATE_QUEUED = "queued"
 STATE_CLAIMED = "claimed"
@@ -380,7 +379,7 @@ class Orchestrator:
         self._score_queue_state_cache: dict[str, int] = {}
 
     @classmethod
-    def from_environment(cls, config: OrchestratorConfig | None = None) -> "Orchestrator":
+    def from_environment(cls, config: OrchestratorConfig | None = None) -> Orchestrator:
         if config is None:
             script_dir = pathlib.Path(__file__).resolve().parent
             repo_root = script_dir.parent
@@ -983,36 +982,53 @@ class Orchestrator:
             "purged_artifacts": purged_artifacts,
         }
 
-    def _run_retention_maintenance(self) -> None:
+    def _run_retention_maintenance(
+        self,
+        *,
+        reason: str = "periodic",
+        force: bool = False,
+    ) -> dict[str, int] | None:
         if self.config.retention_maintenance_interval_seconds <= 0:
-            return
+            return None
         now_epoch_ms = now_ms()
         interval_ms = int(self.config.retention_maintenance_interval_seconds * 1000)
-        if self._last_retention_ms and now_epoch_ms - self._last_retention_ms < interval_ms:
-            return
+        if (
+            not force
+            and self._last_retention_ms
+            and now_epoch_ms - self._last_retention_ms < interval_ms
+        ):
+            return None
 
         self._last_retention_ms = now_epoch_ms
         policy = self._resolve_default_retention_policy()
         run_metrics = self._apply_run_retention(now_epoch_ms=now_epoch_ms, policy=policy)
         queue_metrics = self._apply_queue_retention(now_epoch_ms=now_epoch_ms, policy=policy)
         artifact_metrics = self._apply_artifact_retention(now_epoch_ms=now_epoch_ms, policy=policy)
+        retained_score_artifacts = artifact_metrics["retained_artifacts"]
+        purged_score_artifacts = artifact_metrics["purged_artifacts"]
+        metrics: dict[str, int] = {
+            "retained_runs": run_metrics["retained_runs"],
+            "purged_runs": run_metrics["purged_runs"],
+            "retained_score_artifacts": retained_score_artifacts,
+            "purged_score_artifacts": purged_score_artifacts,
+            "retained_artifacts": artifact_metrics["retained_artifacts"],
+            "purged_artifacts": artifact_metrics["purged_artifacts"],
+            "purged_queue_items": queue_metrics["purged_queue_items"],
+            "retained_queue_items": queue_metrics["retained_queue_items"],
+            "purged_queue_bytes": queue_metrics["purged_queue_bytes"],
+        }
         if any(
             value > 0
             for value in (
-                run_metrics["purged_runs"],
-                queue_metrics["purged_queue_items"],
-                artifact_metrics["purged_artifacts"],
+                metrics["purged_runs"],
+                metrics["purged_queue_items"],
+                metrics["purged_score_artifacts"],
             )
         ):
             self._write_retention_service_event(
                 {
-                    "retained_runs": run_metrics["retained_runs"],
-                    "purged_runs": run_metrics["purged_runs"],
-                    "retained_artifacts": artifact_metrics["retained_artifacts"],
-                    "purged_artifacts": artifact_metrics["purged_artifacts"],
-                    "purged_queue_items": queue_metrics["purged_queue_items"],
-                    "retained_queue_items": queue_metrics["retained_queue_items"],
-                    "purged_queue_bytes": queue_metrics["purged_queue_bytes"],
+                    "retention_reason": reason,
+                    **metrics,
                     "retention_scope": {
                         "run": policy.get("run", {}),
                         "queue": policy.get("queue", {}),
@@ -1020,6 +1036,7 @@ class Orchestrator:
                     },
                 }
             )
+        return metrics
     def _queue_run(self, run_dir: pathlib.Path, *, attempt: int, worker_id: str) -> None:
         self._mark_queue_state(
             run_dir,
@@ -2070,10 +2087,10 @@ class Orchestrator:
 
     def _discover_backlog_exists(self) -> bool:
         return any(
-            (
+            
                 bool(self._discover_model_queue())
                 or bool(self._discover_score_candidates())
-            )
+            
         )
 
     def run(self) -> int:
@@ -2111,10 +2128,12 @@ class Orchestrator:
             self._collect_model_results()
             self._collect_score_results()
             self._drain_stale_workers()
+            self._run_retention_maintenance(reason="pre_async_cycle")
             self._heartbeat_workers()
-            self._run_retention_maintenance()
+            self._run_retention_maintenance(reason="heartbeat")
             self._dispatch_model_work()
             self._dispatch_score_work()
+            self._run_retention_maintenance(reason="post_async_cycle")
 
             if (
                 not self._running_model
