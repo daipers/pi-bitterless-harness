@@ -51,7 +51,9 @@ def test_benchmark_harness_includes_candidate_bundle_metadata(
 ) -> None:
     starter = isolated_repo / "starter"
     candidate_path = starter / "candidates" / "retrieval" / "active.json"
+    bundle_path = starter / "candidates" / "bundle" / "active.json"
     candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
     write_candidate_manifest(
         candidate_path,
         build_candidate_manifest(
@@ -65,6 +67,18 @@ def test_benchmark_harness_includes_candidate_bundle_metadata(
             },
         ),
     )
+    write_candidate_manifest(
+        bundle_path,
+        build_candidate_manifest(
+            candidate_type="bundle",
+            candidate_id="bundle-candidate-1",
+            mode="active",
+            runtime={
+                "transport_mode": "rpc",
+                "library_fingerprint": "library-fp-1",
+            },
+        ),
+    )
     completed = subprocess.run(
         [
             sys.executable,
@@ -73,6 +87,8 @@ def test_benchmark_harness_includes_candidate_bundle_metadata(
             "retrieval",
             "--retrieval-candidate",
             str(candidate_path),
+            "--bundle-candidate",
+            str(bundle_path),
             "--candidate-bundle-id",
             "bundle-1",
         ],
@@ -87,7 +103,9 @@ def test_benchmark_harness_includes_candidate_bundle_metadata(
     assert payload["candidate_bundle_id"] == "bundle-1"
     assert payload["promotion_summary"]["bundle_id"] == "bundle-1"
     assert payload["promotion_summary"]["candidate_types"]["retrieval"] == "retrieval-candidate-1"
+    assert payload["promotion_summary"]["candidate_types"]["bundle"] == "bundle-candidate-1"
     assert payload["candidates"]["retrieval"]["candidate_id"] == "retrieval-candidate-1"
+    assert payload["candidates"]["bundle"]["candidate_id"] == "bundle-candidate-1"
 
 
 def test_analyze_retrieval_benchmarks_records_history_and_emits_trend(

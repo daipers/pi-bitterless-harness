@@ -54,10 +54,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("HARNESS_POLICY_CANDIDATE_PATH"),
         help="optional policy candidate manifest to activate during the canary",
     )
+    parser.add_argument(
+        "--bundle-candidate",
+        default=os.environ.get("HARNESS_BUNDLE_CANDIDATE_PATH"),
+        help="optional bundle candidate manifest to record in canary metadata",
+    )
     return parser.parse_args(argv)
 
 
-def base_env(*, policy_candidate: str | None = None) -> dict[str, str]:
+def base_env(
+    *,
+    policy_candidate: str | None = None,
+    bundle_candidate: str | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     auth_path = env.get("HARNESS_PI_AUTH_JSON")
     if not auth_path:
@@ -65,10 +74,12 @@ def base_env(*, policy_candidate: str | None = None) -> dict[str, str]:
     env["PYTHONPATH"] = str(BIN_DIR)
     if policy_candidate:
         env["HARNESS_POLICY_CANDIDATE_PATH"] = str(pathlib.Path(policy_candidate).resolve())
+    if bundle_candidate:
+        env["HARNESS_BUNDLE_CANDIDATE_PATH"] = str(pathlib.Path(bundle_candidate).resolve())
     return env
 
 
-def policy_candidate_metadata(candidate_path: str | None) -> dict[str, Any] | None:
+def candidate_metadata(candidate_path: str | None) -> dict[str, Any] | None:
     if not candidate_path:
         return None
     path = pathlib.Path(candidate_path).resolve()
@@ -313,7 +324,7 @@ def scenario_partial_recovery(env: dict[str, str], model: str) -> dict[str, Any]
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    env = base_env(policy_candidate=args.policy_candidate)
+    env = base_env(policy_candidate=args.policy_candidate, bundle_candidate=args.bundle_candidate)
     model = env.get("HARNESS_REAL_PI_MODEL", "")
     label_slug = "".join(
         character if character.isalnum() or character in {"-", "_"} else "-"
@@ -378,7 +389,8 @@ def main(argv: list[str] | None = None) -> int:
         "supported_pi_version": (REPO_ROOT / "PI_VERSION").read_text(encoding="utf-8").strip(),
         "model": model or None,
         "canary_label": args.label,
-        "policy_candidate": policy_candidate_metadata(args.policy_candidate),
+        "policy_candidate": candidate_metadata(args.policy_candidate),
+        "bundle_candidate": candidate_metadata(args.bundle_candidate),
         "git_sha": git_sha() or os.environ.get("GITHUB_SHA", ""),
         "git_ref": os.environ.get("GITHUB_REF", ""),
         "git_ref_name": os.environ.get("GITHUB_REF_NAME", ""),

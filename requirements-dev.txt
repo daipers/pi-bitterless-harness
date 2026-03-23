@@ -3,6 +3,8 @@ hypothesis==6.131.15
 jsonschema==4.25.1
 numpy==2.3.3
 pip-audit==2.9.0
+PyYAML==6.0.3
 pytest==8.4.2
 pytest-cov==7.0.0
 ruff==0.12.10
+textual==0.79.1

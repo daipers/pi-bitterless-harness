@@ -76,6 +76,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="optional policy candidate report JSON produced by evaluate_policy_candidate.py",
     )
     parser.add_argument(
+        "--bundle-candidate-report",
+        default=None,
+        help="optional bundle candidate report JSON produced by build_candidate_report.py",
+    )
+    parser.add_argument(
         "--expected-python-version",
         default=None,
         help="required Python version prefix; defaults to repo .python-version",
@@ -430,6 +435,13 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
         )
     else:
         policy_candidate_report = skipped_check("policy candidate report not provided")
+    if args.bundle_candidate_report:
+        bundle_candidate_report = validate_candidate_report(
+            pathlib.Path(args.bundle_candidate_report).resolve(),
+            expected_candidate_type="bundle",
+        )
+    else:
+        bundle_candidate_report = skipped_check("bundle candidate report not provided")
 
     runtime_report = validate_runtime_evidence(
         expected_python=expected_python,
@@ -442,6 +454,7 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
         "replay_benchmark": replay_report,
         "fault_injection_benchmark": fault_report,
         "policy_candidate": policy_candidate_report,
+        "bundle_candidate": bundle_candidate_report,
         "provenance": provenance_report,
         "runtime": runtime_report,
     }
@@ -456,6 +469,7 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
             "replay_report": replay_report.get("path"),
             "fault_report": fault_report.get("path"),
             "policy_candidate_report": policy_candidate_report.get("path"),
+            "bundle_candidate_report": bundle_candidate_report.get("path"),
             "provenance_file": provenance_report.get("path"),
         },
         "summary": {

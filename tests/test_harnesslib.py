@@ -46,6 +46,10 @@ def test_run_contract_and_template_helpers(tmp_path: pathlib.Path) -> None:
     assert "missing eval_policy field: blocked_programs" in validate_run_contract(
         missing_policy_field
     )
+    v3_contract = default_run_contract(version="v3")
+    assert validate_run_contract(v3_contract) == []
+    assert v3_contract["transport"]["mode"] == "cli_json"
+    assert v3_contract["capabilities"]["manifest_path"] == "context/capability-manifest.json"
 
     template = make_result_template()
     path = tmp_path / "result.json"
@@ -400,6 +404,30 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
     assert "retrieval.max_artifact_bytes must be a positive integer" in v2_errors
     assert "retrieval.artifact_selection must be 'evidence_first'" in v2_errors
     assert "retrieval.enabled must be a boolean" in v2_errors
+
+    broken_v3 = default_run_contract(version="v3")
+    broken_v3["transport"] = {"mode": "invalid"}
+    broken_v3["capabilities"] = {
+        "enabled": False,
+        "library_path": "",
+        "manifest_path": "wrong.json",
+        "subagents": {
+            "allowed": True,
+            "max_agents": -1,
+            "allowed_profiles": [],
+        },
+    }
+    v3_errors = validate_run_contract(broken_v3)
+    assert "transport.mode must be one of: cli_json, rpc" in v3_errors
+    assert "capabilities.library_path must be a non-empty string" in v3_errors
+    assert "capabilities.manifest_path must be 'context/capability-manifest.json'" in v3_errors
+    assert "capabilities.subagents.max_agents must be a non-negative integer" in v3_errors
+    assert (
+        "capabilities.subagents.allowed_profiles must contain at least one profile "
+        "when subagents are allowed"
+        in v3_errors
+    )
+    assert "capabilities.enabled must be true when subagents are allowed" in v3_errors
 
 
 def test_analyze_eval_command_and_env_unwrap_cover_remaining_edge_cases() -> None:

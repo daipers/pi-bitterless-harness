@@ -21,6 +21,8 @@ This repository is operated through a minimal pi-based harness.
 ## Boundaries
 - Do not rely on hidden memory or hidden workflow state
 - Do not create manager agents, critic agents, or elaborate workflows unless the task explicitly requires them
+- Sub-agents are forbidden unless the run uses the v3 capability manifest path and the resolved `context/capability-manifest.json` explicitly allows the profile you want to use
+- Even when sub-agents are allowed, use the manifest as a capability registry only; do not treat it as a workflow script
 - Do not introduce new tools, skills, extensions, or prompts as part of normal task execution
 - Do not add dangerous eval commands or networked behavior unless the task explicitly allows it
 - Prefer simple file edits and external verification

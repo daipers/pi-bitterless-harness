@@ -1,0 +1,46 @@
+capability_library_version: v1
+entries:
+  - kind: tool_bundle
+    id: default_pi_tools
+    description: Default Bitterless Harness pi tool surface.
+    tools:
+      - read
+      - write
+      - edit
+      - bash
+  - kind: subagent_profile
+    id: focused_reader
+    description: Narrow read-first helper for repo inspection and evidence gathering.
+    tool_bundles:
+      - default_pi_tools
+    transports:
+      - rpc
+    allow_network: false
+    allow_write: false
+    read_scopes:
+      - .
+    write_scopes: []
+    budgets:
+      max_spawn_count: 1
+      max_tokens: 4000
+      max_runtime_seconds: 180
+    expected_artifacts: []
+  - kind: subagent_profile
+    id: patch_worker
+    description: Scoped helper allowed to edit files inside the current run and repo workspace.
+    tool_bundles:
+      - default_pi_tools
+    transports:
+      - rpc
+    allow_network: false
+    allow_write: true
+    read_scopes:
+      - .
+    write_scopes:
+      - .
+    budgets:
+      max_spawn_count: 1
+      max_tokens: 8000
+      max_runtime_seconds: 300
+    expected_artifacts:
+      - outputs/subagent-usage.json

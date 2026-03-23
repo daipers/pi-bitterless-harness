@@ -33,6 +33,17 @@ def write_result(run_dir: pathlib.Path, payload: dict[str, object]) -> None:
     (run_dir / "result.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def write_optional_subagent_usage(run_dir: pathlib.Path, scenario_payload: dict[str, object]) -> None:
+    usage = scenario_payload.get("subagent_usage")
+    if not isinstance(usage, dict):
+        return
+    (run_dir / "outputs").mkdir(parents=True, exist_ok=True)
+    (run_dir / "outputs" / "subagent-usage.json").write_text(
+        json.dumps(usage, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     if "--version" in sys.argv:
         print("fake-pi 1.0.0")
@@ -56,6 +67,7 @@ def main() -> int:
     if scenario == "happy_path":
         (run_dir / "outputs").mkdir(parents=True, exist_ok=True)
         (run_dir / "outputs" / "claim.txt").write_text("claim\n", encoding="utf-8")
+        write_optional_subagent_usage(run_dir, scenario_payload)
         write_result(
             run_dir,
             {
@@ -88,6 +100,7 @@ def main() -> int:
             return 75
         (run_dir / "outputs").mkdir(parents=True, exist_ok=True)
         (run_dir / "outputs" / "claim.txt").write_text("claim\n", encoding="utf-8")
+        write_optional_subagent_usage(run_dir, scenario_payload)
         write_result(
             run_dir,
             {
@@ -166,6 +179,7 @@ def main() -> int:
         sys.stdout.flush()
         (run_dir / "outputs").mkdir(parents=True, exist_ok=True)
         (run_dir / "outputs" / "claim.txt").write_text("claim\n", encoding="utf-8")
+        write_optional_subagent_usage(run_dir, scenario_payload)
         write_result(
             run_dir,
             {

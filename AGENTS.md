@@ -18,7 +18,9 @@ You are operating in a repository with a minimal pi-based harness.
 - Preserve state in files only; do not invent hidden orchestrator state.
 
 ## Boundaries
-- Do not use sub-agents, planner/critic pipelines, or custom skills/extensions/themes.
+- Do not use sub-agents, planner/critic pipelines, or custom skills/extensions/themes by default.
+- Sub-agents are only allowed when the active `run.contract.json` explicitly opts into the v3 capability manifest and the resolved `context/capability-manifest.json` lists the profile being used.
+- When sub-agents are allowed, treat the capability manifest as the source of truth; do not invent new roles, workflows, or helper pipelines.
 - Do not rely on hidden memory, manager prompts, or workflow graphs.
 - Do not introduce dangerous eval commands, network access, or wider HOME copies unless the task explicitly opts in.
 - Do not change public contracts unless the task explicitly requires it.

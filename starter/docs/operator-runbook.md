@@ -22,6 +22,21 @@ starter/bin/check-supported-runtime.sh
 3. Provide auth through `HARNESS_PI_AUTH_JSON=/absolute/path/to/auth.json`.
 4. Keep the auth file scoped to this harness or CI canary job. Do not copy an entire home directory into runs.
 
+## Command center
+
+For local operator workflows across multiple Bitterless harness repos, use the
+Textual command center:
+
+```bash
+python3 starter/bin/control_center.py
+```
+
+The command center is local-only, reads the existing file-native artifacts as the
+source of truth, and owns one orchestrator process per configured repo. Use
+[`../control-center.example.toml`](../control-center.example.toml) as the config
+starting point and [`control-center.md`](./control-center.md) for keybindings,
+filters, and command palette actions.
+
 ## Release-candidate gate
 
 Run these commands from the repository root:
@@ -66,6 +81,7 @@ python3 starter/bin/verify_release_evidence.py \
   --benchmark-report starter/runs/retrieval-latest.json \
   --replay-report starter/runs/replay-latest.json \
   --fault-report starter/runs/fault-latest.json \
+  --bundle-candidate-report starter/runs/bundle-candidate-report.json \
   --provenance-file dist/pi-bitterless-harness-$(cat VERSION).provenance.json \
   --min-runs 2 \
   --freshness-hours 36 \

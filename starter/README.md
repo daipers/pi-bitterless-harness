@@ -76,6 +76,7 @@ Runtime governance is codified, not implied:
 - `result.schema.json`
 - `contracts/run-contract-v1.schema.json`
 - `contracts/run-contract-v2.schema.json`
+- `contracts/run-contract-v3.schema.json`
 - `contracts/run-manifest-v1.schema.json`
 - `contracts/score-v1.schema.json`
 - `contracts/context-manifest-v1.schema.json`
@@ -88,10 +89,12 @@ Runtime governance is codified, not implied:
 - `contracts/model-example-v1.schema.json`
 - `contracts/candidate-manifest-v1.schema.json`
 - `contracts/candidate-report-v1.schema.json`
+- `contracts/capability-library-v1.schema.json`
 - `contracts/runtime-governance-v1.schema.json`
 - `governance/runtime-governance-v1.json`
 - `policies/strict.json`
 - `policies/capability.json`
+- `library.yaml`
 - `bin/check-run-contract.sh` (must be executable)
 
 ## Quick start
@@ -133,6 +136,24 @@ bin/run-task.sh --profile capability runs/<run-id>
 
 V2 defaults to the `strict` profile. `capability` keeps the same eval/network policy in this release, but adds explicit retrieval context materialization from prior successful runs.
 
+## Command Center
+
+Use the local command center when you want one terminal cockpit across multiple
+Bitterless harness repos:
+
+```bash
+python3 starter/bin/control_center.py
+```
+
+It reads the existing run files and queue JSONL logs, owns one orchestrator
+process per configured repo, and exposes safe operator actions like start, stop,
+restart, canary, cancel, enqueue, and rerun.
+
+Configuration lives at `~/.config/bitterless/control-center.toml` by default.
+Start from [`control-center.example.toml`](./control-center.example.toml) and see
+[`docs/control-center.md`](./docs/control-center.md) for keybindings and command
+palette usage.
+
 ## Run directory contract
 
 Each run creates:
@@ -159,6 +180,7 @@ Each run creates:
 - `context/` (capability-profile retrieval context, only when enabled)
   - `context/retrieval-manifest.json`
   - `context/retrieval-summary.md`
+  - `context/capability-manifest.json` for v3 capability-manifest runs
   - `context/source-runs/<run-id>/retrieval-view.md`
   - `context/source-runs/<run-id>/outputs/...` for copied evidence files only
 
@@ -180,7 +202,8 @@ Everything else is for humans and the model.
 
 - `strict` is the default profile for new V2 runs.
 - `capability` adds explicit retrieval context under `context/` before launch.
-- Existing V1 run directories still execute unchanged; the runner detects the contract version from `run.contract.json`.
+- Existing V1 and V2 run directories still execute unchanged; the runner detects the contract version from `run.contract.json`.
+- V3 adds an opt-in capability manifest and RPC transport selection for subagent-capable runs.
 
 Profile precedence at runtime:
 

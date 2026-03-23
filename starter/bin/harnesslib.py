@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
+from capabilitylib import DEFAULT_CAPABILITIES_CONFIG
+
 if not hasattr(pathlib.Path, "utime"):
     setattr(
         pathlib.Path,
@@ -23,6 +25,7 @@ if not hasattr(pathlib.Path, "utime"):
 RUNNER_VERSION = "1.0.0"
 RUN_CONTRACT_VERSION_V1 = "v1"
 RUN_CONTRACT_VERSION_V2 = "v2"
+RUN_CONTRACT_VERSION_V3 = "v3"
 RUN_CONTRACT_VERSION = RUN_CONTRACT_VERSION_V2
 RESULT_INTERFACE_VERSION = "v1"
 EXECUTION_PROFILES = {"strict", "offline", "networked", "heavy_tools", "capability"}
@@ -137,6 +140,24 @@ _RUN_CONTRACT_REQUIRED_KEYS_V2 = [
     "context_manifest_path",
     "context_summary_path",
     "retrieval",
+]
+
+_RUN_CONTRACT_REQUIRED_KEYS_V3 = [
+    "required_run_files",
+    "required_directories",
+    "required_task_sections",
+    "result_schema_path",
+    "result_template_path",
+    "manifest_path",
+    "event_log_path",
+    "execution_profile",
+    "policy_path",
+    "context_dir",
+    "context_manifest_path",
+    "context_summary_path",
+    "retrieval",
+    "transport",
+    "capabilities",
 ]
 
 _RUN_CONTRACT_REQUIRED_RETRIEVAL_KEYS = [
@@ -727,7 +748,7 @@ def default_run_contract(
     if execution_profile not in EXECUTION_PROFILES:
         raise ValueError(f"unsupported execution profile: {execution_profile}")
 
-    return {
+    base_v2 = {
         **contract,
         "run_contract_version": RUN_CONTRACT_VERSION_V2,
         "result_interface_version": RESULT_INTERFACE_VERSION,
@@ -741,6 +762,16 @@ def default_run_contract(
             "enabled": execution_profile in {"capability", "heavy_tools"},
         },
     }
+    if version == RUN_CONTRACT_VERSION_V2:
+        return base_v2
+    if version == RUN_CONTRACT_VERSION_V3:
+        return {
+            **base_v2,
+            "run_contract_version": RUN_CONTRACT_VERSION_V3,
+            "transport": {"mode": "cli_json"},
+            "capabilities": copy.deepcopy(DEFAULT_CAPABILITIES_CONFIG),
+        }
+    raise ValueError(f"unsupported run contract version: {version}")
 
 
 def validate_run_contract(payload: dict[str, Any]) -> list[str]:
@@ -772,15 +803,23 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
         )
         return errors
 
-    if version != RUN_CONTRACT_VERSION_V2:
-        errors.append("run_contract_version must be v1 or v2")
+    if version not in {RUN_CONTRACT_VERSION_V2, RUN_CONTRACT_VERSION_V3}:
+        errors.append("run_contract_version must be v1, v2, or v3")
         return errors
 
-    expected = default_run_contract(version=RUN_CONTRACT_VERSION_V2)
+    expected = default_run_contract(version=version)
     if payload.get("result_interface_version") != RESULT_INTERFACE_VERSION:
         errors.append("result_interface_version must be v1")
     errors.extend(
-        _collect_missing_fields(payload, _RUN_CONTRACT_REQUIRED_KEYS_V2, prefix="run contract")
+        _collect_missing_fields(
+            payload,
+            (
+                _RUN_CONTRACT_REQUIRED_KEYS_V3
+                if version == RUN_CONTRACT_VERSION_V3
+                else _RUN_CONTRACT_REQUIRED_KEYS_V2
+            ),
+            prefix="run contract",
+        )
     )
     errors.extend(
         _collect_fixed_field_errors(
@@ -831,6 +870,58 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
                 errors.append("retrieval.max_candidates must be a positive integer")
         if "enabled" in retrieval and not isinstance(retrieval["enabled"], bool):
             errors.append("retrieval.enabled must be a boolean")
+    if version == RUN_CONTRACT_VERSION_V3:
+        transport = payload.get("transport")
+        if not isinstance(transport, dict):
+            errors.append("transport must be an object")
+        else:
+            if transport.get("mode") not in {"cli_json", "rpc"}:
+                errors.append("transport.mode must be one of: cli_json, rpc")
+        capabilities = payload.get("capabilities")
+        if not isinstance(capabilities, dict):
+            errors.append("capabilities must be an object")
+        else:
+            if "enabled" in capabilities and not isinstance(capabilities["enabled"], bool):
+                errors.append("capabilities.enabled must be a boolean")
+            if (
+                not isinstance(capabilities.get("library_path"), str)
+                or not str(capabilities.get("library_path", "")).strip()
+            ):
+                errors.append("capabilities.library_path must be a non-empty string")
+            if capabilities.get("manifest_path") != DEFAULT_CAPABILITIES_CONFIG["manifest_path"]:
+                errors.append(
+                    "capabilities.manifest_path must be 'context/capability-manifest.json'"
+                )
+            subagents = capabilities.get("subagents")
+            if not isinstance(subagents, dict):
+                errors.append("capabilities.subagents must be an object")
+            else:
+                if "allowed" in subagents and not isinstance(subagents["allowed"], bool):
+                    errors.append("capabilities.subagents.allowed must be a boolean")
+                max_agents = subagents.get("max_agents")
+                if not isinstance(max_agents, int) or max_agents < 0:
+                    errors.append(
+                        "capabilities.subagents.max_agents must be a non-negative integer"
+                    )
+                allowed_profiles = subagents.get("allowed_profiles")
+                if not isinstance(allowed_profiles, list):
+                    errors.append("capabilities.subagents.allowed_profiles must be an array")
+                else:
+                    for index, value in enumerate(allowed_profiles):
+                        if not isinstance(value, str) or not value.strip():
+                            errors.append(
+                                "capabilities.subagents.allowed_profiles"
+                                f"[{index}] must be a non-empty string"
+                            )
+                if bool(subagents.get("allowed")) and not allowed_profiles:
+                    errors.append(
+                        "capabilities.subagents.allowed_profiles must contain at least one profile "
+                        "when subagents are allowed"
+                    )
+            if capabilities.get("enabled") is False and bool(
+                (capabilities.get("subagents") or {}).get("allowed")
+            ):
+                errors.append("capabilities.enabled must be true when subagents are allowed")
     return errors
 
 
@@ -864,6 +955,41 @@ def resolve_execution_settings(
             "retrieval_enabled": profile in {"capability", "heavy_tools"}
             and bool(retrieval.get("enabled") or profile in {"capability", "heavy_tools"}),
         }
+    if version == RUN_CONTRACT_VERSION_V3:
+        profile = profile_override or run_contract.get("execution_profile") or "strict"
+        retrieval = dict(DEFAULT_RETRIEVAL_CONFIG)
+        retrieval.update(run_contract.get("retrieval", {}))
+        capabilities = copy.deepcopy(DEFAULT_CAPABILITIES_CONFIG)
+        capabilities.update(run_contract.get("capabilities", {}))
+        capabilities["subagents"] = {
+            **copy.deepcopy(DEFAULT_CAPABILITIES_CONFIG["subagents"]),
+            **dict((run_contract.get("capabilities") or {}).get("subagents", {})),
+        }
+        transport = {"mode": "cli_json", **dict(run_contract.get("transport", {}))}
+        return {
+            "run_contract_version": version,
+            "execution_profile": profile,
+            "policy_path": (
+                default_policy_path(profile) if profile_override else run_contract["policy_path"]
+            ),
+            "context_dir": run_contract["context_dir"],
+            "context_manifest_path": run_contract["context_manifest_path"],
+            "context_summary_path": run_contract["context_summary_path"],
+            "retrieval": retrieval,
+            "retrieval_enabled": profile in {"capability", "heavy_tools"}
+            and bool(retrieval.get("enabled") or profile in {"capability", "heavy_tools"}),
+            "transport": transport,
+            "transport_mode": transport["mode"],
+            "capabilities": capabilities,
+            "capabilities_enabled": bool(capabilities.get("enabled", False)),
+            "capability_library_path": capabilities.get("library_path"),
+            "capability_manifest_path": capabilities.get("manifest_path"),
+            "subagents_allowed": bool(capabilities.get("subagents", {}).get("allowed", False)),
+            "subagent_max_agents": int(capabilities.get("subagents", {}).get("max_agents", 0) or 0),
+            "allowed_subagent_profiles": list(
+                capabilities.get("subagents", {}).get("allowed_profiles", [])
+            ),
+        }
 
     profile = profile_override or "strict"
     return {
@@ -875,6 +1001,15 @@ def resolve_execution_settings(
         "context_summary_path": "context/retrieval-summary.md",
         "retrieval": dict(DEFAULT_RETRIEVAL_CONFIG),
         "retrieval_enabled": False,
+        "transport": {"mode": "cli_json"},
+        "transport_mode": "cli_json",
+        "capabilities": copy.deepcopy(DEFAULT_CAPABILITIES_CONFIG),
+        "capabilities_enabled": False,
+        "capability_library_path": DEFAULT_CAPABILITIES_CONFIG["library_path"],
+        "capability_manifest_path": DEFAULT_CAPABILITIES_CONFIG["manifest_path"],
+        "subagents_allowed": False,
+        "subagent_max_agents": 0,
+        "allowed_subagent_profiles": [],
     }
 
 

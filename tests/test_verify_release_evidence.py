@@ -68,6 +68,21 @@ def make_policy_candidate_report(*, overall_pass: bool = True) -> dict[str, obje
     }
 
 
+def make_bundle_candidate_report(*, overall_pass: bool = True) -> dict[str, object]:
+    return {
+        "candidate_report_version": "v1",
+        "generated_at": "2026-03-22T11:20:00Z",
+        "candidate_type": "bundle",
+        "candidate_id": "bundle-candidate-1",
+        "overall_pass": overall_pass,
+        "promotion_summary": {
+            "bundle_id": "bundle-1",
+            "candidate_types": {"bundle": "bundle-candidate-1"},
+            "threshold_results": {"bundle_canary_pass": overall_pass},
+        },
+    }
+
+
 def test_validate_summaries_accepts_fresh_matching_history(monkeypatch) -> None:
     monkeypatch.setattr(
         verify_release_evidence,
@@ -137,6 +152,7 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
     summary_path = tmp_path / "canary.summary.json"
     benchmark_path = tmp_path / "benchmark.json"
     policy_candidate_path = tmp_path / "policy-candidate.json"
+    bundle_candidate_path = tmp_path / "bundle-candidate.json"
     provenance_path = tmp_path / "provenance.json"
     summary_path.write_text(
         json.dumps(make_summary(generated_at="2026-03-22T10:00:00Z"), indent=2) + "\n",
@@ -153,6 +169,10 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
     )
     policy_candidate_path.write_text(
         json.dumps(make_policy_candidate_report(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    bundle_candidate_path.write_text(
+        json.dumps(make_bundle_candidate_report(), indent=2) + "\n",
         encoding="utf-8",
     )
     provenance_path.write_text(
@@ -172,6 +192,8 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
             str(benchmark_path),
             "--policy-candidate-report",
             str(policy_candidate_path),
+            "--bundle-candidate-report",
+            str(bundle_candidate_path),
             "--provenance-file",
             str(provenance_path),
         ]
@@ -187,6 +209,8 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
     assert report["checks"]["benchmark"]["candidate_types"]["retrieval"] == "retrieval-candidate-1"
     assert report["checks"]["policy_candidate"]["passed"] is True
     assert report["checks"]["policy_candidate"]["candidate_id"] == "policy-candidate-1"
+    assert report["checks"]["bundle_candidate"]["passed"] is True
+    assert report["checks"]["bundle_candidate"]["candidate_id"] == "bundle-candidate-1"
     assert report["checks"]["provenance"]["passed"] is True
     assert report["checks"]["runtime"]["passed"] is True
     assert report["checks"]["runtime"]["expected_python_policy"] == "3.12.x"

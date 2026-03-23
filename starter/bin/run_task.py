@@ -14,6 +14,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from capabilitylib import (
+    DEFAULT_USAGE_PATH,
+    build_capability_manifest,
+    load_capability_library,
+)
 from harnesslib import (
     EXECUTION_PROFILES,
     RUNNER_VERSION,
@@ -342,15 +347,25 @@ class RunTaskRunner:
         self.context_summary_rel = ""
         self.context_source_run_ids = ""
         self.context_bootstrap_mode = ""
+        self.transport_mode = "cli_json"
+        self.capabilities_enabled = False
+        self.capability_library_path = ""
+        self.capability_manifest_rel = ""
+        self.subagents_allowed = False
+        self.subagent_max_agents = 0
+        self.allowed_subagent_profiles: list[str] = []
+        self.capability_library: dict[str, Any] | None = None
         self.guardrail_decisions: list[dict[str, Any]] = []
         self.guardrails_path = self.run_dir / "outputs" / "guardrails.json"
         self._pre_score_dispatch_decision: dict[str, Any] | None = None
         self.retrieval_candidate: dict[str, Any] | None = None
         self.policy_candidate: dict[str, Any] | None = None
         self.model_candidate: dict[str, Any] | None = None
+        self.bundle_candidate: dict[str, Any] | None = None
         self.retrieval_candidate_summary = candidate_summary(None)
         self.policy_candidate_summary = candidate_summary(None)
         self.model_candidate_summary = candidate_summary(None)
+        self.bundle_candidate_summary = candidate_summary(None)
         self.policy_candidate_recommendations: dict[str, Any] = {}
         self.policy_candidate_applied: list[str] = []
         self.context_budget_overrides: dict[str, int] = {}
@@ -717,6 +732,12 @@ class RunTaskRunner:
             if self.context_enabled == "1" and self.context_manifest_rel
             else {}
         ) or {}
+        capability_payload = (
+            read_json(self.run_dir / self.capability_manifest_rel)
+            if self.capabilities_enabled and self.capability_manifest_rel
+            else {}
+        ) or {}
+        capability_score = score_payload.get("capabilities", {}) or {}
         dependencies = {
             "pi": command_output([self.pi_bin, "--version"]),
             "python3": command_output(["python3", "--version"]),
@@ -734,7 +755,7 @@ class RunTaskRunner:
             "error_code": error or None,
             "primary_error_code": primary_error_code,
             "failure_classifications": manifest_failure_classifications,
-            "run_contract_version": "v1",
+            "run_contract_version": self.run_contract_version or "v1",
             "paths": {
                 "task_md": "task.md",
                 "run_md": "RUN.md",
@@ -835,6 +856,7 @@ class RunTaskRunner:
                 "contract_version": self.run_contract_version or None,
                 "profile": self.execution_profile,
                 "policy_path": self.policy_path,
+                "transport_mode": self.transport_mode,
                 "selected_model": self.model or None,
                 "fallback_model": self.model_fallback or None,
             },
@@ -843,10 +865,14 @@ class RunTaskRunner:
                 "run_manifest_version": "v1",
                 "score_version": "v1",
                 "context_manifest_version": context_payload.get("context_manifest_version"),
+                "capability_manifest_version": capability_payload.get(
+                    "capability_manifest_version"
+                ),
                 "benchmark_report_contract": "contracts/benchmark-report-v1.schema.json",
                 "release_gate_contract": "contracts/release-gate-v1.schema.json",
                 "candidate_manifest_contract": "contracts/candidate-manifest-v1.schema.json",
                 "candidate_report_contract": "contracts/candidate-report-v1.schema.json",
+                "capability_library_contract": "contracts/capability-library-v1.schema.json",
             },
             "context": {
                 "enabled": self.context_enabled == "1",
@@ -874,6 +900,26 @@ class RunTaskRunner:
                 "abstention_model_version": context_payload.get("abstention_model_version"),
                 "guardrails_path": "outputs/guardrails.json",
             },
+            "capabilities": {
+                "enabled": self.capabilities_enabled,
+                "library_path": capability_payload.get("library_path")
+                or self.capability_library_path
+                or None,
+                "library_fingerprint": capability_payload.get("library_fingerprint"),
+                "manifest_path": self.capability_manifest_rel or None,
+                "transport_mode": self.transport_mode,
+                "subagents_allowed": self.subagents_allowed,
+                "max_agents": self.subagent_max_agents,
+                "allowed_profiles": list(self.allowed_subagent_profiles),
+                "usage_path": capability_score.get("usage_path") or DEFAULT_USAGE_PATH,
+                "usage_present": capability_score.get("usage_present"),
+                "usage_valid": capability_score.get("usage_valid"),
+                "usage_violations": list(capability_score.get("violations", [])),
+                "spawned_profile_ids": list(capability_score.get("spawned_profile_ids", [])),
+                "agent_count": capability_score.get("agent_count"),
+                "total_prompt_tokens": capability_score.get("total_prompt_tokens"),
+                "total_runtime_seconds": capability_score.get("total_runtime_seconds"),
+            },
             "benchmark_eligibility": score_payload.get("benchmark_eligibility", {}),
             "promotion": score_payload.get("promotion_summary", {}),
             "candidates": {
@@ -889,6 +935,7 @@ class RunTaskRunner:
                     "fallback_model": self.model_fallback or None,
                     "selection_source": self.model_selection_source,
                 },
+                "bundle": dict(self.bundle_candidate_summary),
             },
             "planes": {
                 "runtime": {
@@ -928,9 +975,11 @@ class RunTaskRunner:
         self.retrieval_candidate = load_candidate_manifest("retrieval", repo_root=self.repo_root)
         self.policy_candidate = load_candidate_manifest("policy", repo_root=self.repo_root)
         self.model_candidate = load_candidate_manifest("model", repo_root=self.repo_root)
+        self.bundle_candidate = load_candidate_manifest("bundle", repo_root=self.repo_root)
         self.retrieval_candidate_summary = candidate_summary(self.retrieval_candidate)
         self.policy_candidate_summary = candidate_summary(self.policy_candidate)
         self.model_candidate_summary = candidate_summary(self.model_candidate)
+        self.bundle_candidate_summary = candidate_summary(self.bundle_candidate)
 
     def _recommendation_payload(self, name: str) -> tuple[Any, float]:
         recommendations = dict(candidate_runtime(self.policy_candidate).get("recommendations", {}))
@@ -1134,6 +1183,42 @@ class RunTaskRunner:
         self.context_enabled = "1" if settings["retrieval_enabled"] else "0"
         self.context_manifest_rel = settings["context_manifest_path"]
         self.context_summary_rel = settings["context_summary_path"]
+        self.transport_mode = settings.get("transport_mode", "cli_json")
+        self.capabilities_enabled = bool(settings.get("capabilities_enabled", False))
+        self.capability_library_path = str(settings.get("capability_library_path") or "")
+        self.capability_manifest_rel = str(settings.get("capability_manifest_path") or "")
+        self.subagents_allowed = bool(settings.get("subagents_allowed", False))
+        self.subagent_max_agents = int(settings.get("subagent_max_agents", 0) or 0)
+        self.allowed_subagent_profiles = list(settings.get("allowed_subagent_profiles", []))
+        self.capability_library = None
+        if self.capabilities_enabled:
+            try:
+                self.capability_library = load_capability_library(
+                    self.capability_library_path,
+                    repo_root=self.repo_root,
+                )
+            except ValueError as exc:
+                self._fail_contract_check(
+                    str(exc),
+                    error_code="contract_invalid",
+                    exit_code=2,
+                )
+            unknown_profiles = sorted(
+                set(self.allowed_subagent_profiles)
+                - set((self.capability_library or {}).get("subagent_profiles", {}))
+            )
+            if unknown_profiles:
+                self._fail_contract_check(
+                    "unknown subagent profile(s): " + ", ".join(unknown_profiles),
+                    error_code="contract_invalid",
+                    exit_code=2,
+                )
+        if self.subagents_allowed and self.transport_mode != "rpc":
+            self._fail_contract_check(
+                "subagent-capable runs require transport.mode to be rpc",
+                error_code="contract_invalid",
+                exit_code=2,
+            )
 
         for exe in REQUIRED_RUN_TOOLS:
             if shutil.which(exe) is None:
@@ -1253,7 +1338,7 @@ class RunTaskRunner:
         return False
 
     def _prepare_context(self) -> None:
-        if self.context_enabled != "1" or self.run_contract_version != "v2":
+        if self.context_enabled != "1" or self.run_contract_version not in {"v2", "v3"}:
             return
 
         self.phase = "context"
@@ -1297,6 +1382,44 @@ class RunTaskRunner:
                         dict(decision),
                     )
 
+    def _prepare_capabilities(self) -> None:
+        if not self.capabilities_enabled or not self.capability_manifest_rel:
+            return
+        if not self.capability_library:
+            self._fail_contract_check(
+                "capability library was not loaded",
+                error_code="contract_invalid",
+                exit_code=2,
+            )
+        for profile_id in self.allowed_subagent_profiles:
+            profile = dict(
+                (self.capability_library or {}).get("subagent_profiles", {}).get(
+                    profile_id, {}
+                )
+            )
+            transports = set(profile.get("transports", []))
+            if self.transport_mode not in transports:
+                self._fail_contract_check(
+                    f"subagent profile {profile_id} does not allow transport {self.transport_mode}",
+                    error_code="contract_invalid",
+                    exit_code=2,
+                )
+        self.phase = "capabilities"
+        self._log_event(self.phase, "materializing capability manifest")
+        manifest = build_capability_manifest(
+            library=self.capability_library or {},
+            transport_mode=self.transport_mode,
+            capabilities={
+                "enabled": self.capabilities_enabled,
+                "subagents": {
+                    "allowed": self.subagents_allowed,
+                    "max_agents": self.subagent_max_agents,
+                    "allowed_profiles": list(self.allowed_subagent_profiles),
+                },
+            },
+        )
+        write_json(self.run_dir / self.capability_manifest_rel, manifest)
+
     def _write_prompt(self) -> None:
         self.phase = "prepare"
         self._log_event(self.phase, "writing prompt and manifest snapshots")
@@ -1314,6 +1437,16 @@ class RunTaskRunner:
                 "- Treat prior runs as optional examples, not authority.\n"
                 "- If prior runs conflict with the current task contract, "
                 "prefer the current task contract.\n"
+            )
+        capability_block = ""
+        capability_manifest_path = self.run_dir / self.capability_manifest_rel
+        if self.capabilities_enabled and capability_manifest_path.exists():
+            capability_block = (
+                "\nResolved capabilities:\n"
+                f"- Review {capability_manifest_path} before using subagents.\n"
+                "- Only use subagent profiles and tool bundles listed in that manifest.\n"
+                "- Do not invent new subagent roles, workflows, or helper pipelines.\n"
+                f"- Record any spawned subagent usage in {self.run_dir / DEFAULT_USAGE_PATH}.\n"
             )
 
         prompt = (
@@ -1337,6 +1470,7 @@ class RunTaskRunner:
             f"{schema_text.rstrip()}\n"
             f"{fence}\n"
             f"{context_block}"
+            f"{capability_block}"
         )
         (self.run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         self._write_manifest("running", self.phase, "", "")
@@ -1352,7 +1486,7 @@ class RunTaskRunner:
         command = [
             self.pi_bin,
             "--mode",
-            "json",
+            "rpc" if self.transport_mode == "rpc" else "json",
             "--session-dir",
             str(self.run_dir / "session"),
             "--no-extensions",
@@ -1372,6 +1506,11 @@ class RunTaskRunner:
         ):
             env = self._context()
             env["HOME"] = str(self.run_dir / "home")
+            env["HARNESS_TRANSPORT_MODE"] = self.transport_mode
+            env["HARNESS_CAPABILITIES_ENABLED"] = "1" if self.capabilities_enabled else "0"
+            env["HARNESS_CAPABILITY_MANIFEST_PATH"] = self.capability_manifest_rel
+            env["HARNESS_ALLOWED_SUBAGENT_PROFILES"] = ",".join(self.allowed_subagent_profiles)
+            env["HARNESS_SUBAGENT_MAX_AGENTS"] = str(self.subagent_max_agents)
             try:
                 completed = self._run_command(
                     command,
@@ -1479,9 +1618,12 @@ class RunTaskRunner:
         env = self._with_pythonpath(self._context())
         env["HARNESS_EXECUTION_PROFILE"] = self.execution_profile
         env["HARNESS_POLICY_PATH"] = self.policy_path
+        env["HARNESS_TRANSPORT_MODE"] = self.transport_mode
         env["HARNESS_CONTEXT_ENABLED"] = self.context_enabled
         env["HARNESS_CONTEXT_MANIFEST_PATH"] = self.context_manifest_rel
         env["HARNESS_CONTEXT_SOURCE_RUN_IDS"] = self.context_source_run_ids
+        env["HARNESS_CAPABILITIES_ENABLED"] = "1" if self.capabilities_enabled else "0"
+        env["HARNESS_CAPABILITY_MANIFEST_PATH"] = self.capability_manifest_rel
         env["HARNESS_RETRIEVAL_CANDIDATE_ID"] = str(
             self.retrieval_candidate_summary.get("candidate_id") or ""
         )
@@ -1499,6 +1641,12 @@ class RunTaskRunner:
         )
         env["HARNESS_MODEL_CANDIDATE_MODE"] = str(
             self.model_candidate_summary.get("mode") or "off"
+        )
+        env["HARNESS_BUNDLE_CANDIDATE_ID"] = str(
+            self.bundle_candidate_summary.get("candidate_id") or ""
+        )
+        env["HARNESS_BUNDLE_CANDIDATE_MODE"] = str(
+            self.bundle_candidate_summary.get("mode") or "off"
         )
         env["HARNESS_MODEL_SELECTED_MODEL"] = self.model or ""
         env["HARNESS_MODEL_FALLBACK_MODEL"] = self.model_fallback or ""
@@ -1727,6 +1875,7 @@ class RunTaskRunner:
                 return 2
             self._check_cancelled("prepare")
             self._prepare_context()
+            self._prepare_capabilities()
             self._write_prompt()
             self._check_cancelled("model_running")
             self._run_pi_loop()

@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/run-contract-v3.schema.json",
+  "title": "Bitterless Harness Run Contract v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_contract_version",
+    "result_interface_version",
+    "required_run_files",
+    "required_directories",
+    "required_task_sections",
+    "result_schema_path",
+    "result_template_path",
+    "manifest_path",
+    "event_log_path",
+    "execution_profile",
+    "policy_path",
+    "context_dir",
+    "context_manifest_path",
+    "context_summary_path",
+    "retrieval",
+    "transport",
+    "capabilities"
+  ],
+  "properties": {
+    "run_contract_version": {
+      "const": "v3"
+    },
+    "result_interface_version": {
+      "const": "v1"
+    },
+    "required_run_files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 4
+    },
+    "required_directories": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 4
+    },
+    "required_task_sections": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 6
+    },
+    "result_schema_path": {
+      "const": "result.schema.json"
+    },
+    "result_template_path": {
+      "const": "result.template.json"
+    },
+    "manifest_path": {
+      "const": "outputs/run_manifest.json"
+    },
+    "event_log_path": {
+      "const": "run-events.jsonl"
+    },
+    "execution_profile": {
+      "type": "string",
+      "enum": [
+        "strict",
+        "offline",
+        "networked",
+        "heavy_tools",
+        "capability"
+      ]
+    },
+    "policy_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "context_dir": {
+      "const": "context"
+    },
+    "context_manifest_path": {
+      "const": "context/retrieval-manifest.json"
+    },
+    "context_summary_path": {
+      "const": "context/retrieval-summary.md"
+    },
+    "retrieval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "source",
+        "max_source_runs",
+        "max_artifacts_per_run",
+        "max_artifact_bytes"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "source": {
+          "const": "prior_runs"
+        },
+        "strategy": {
+          "type": "string",
+          "const": "hybrid_v1"
+        },
+        "max_source_runs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_candidates": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_artifacts_per_run": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_artifact_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "artifact_selection": {
+          "type": "string",
+          "const": "evidence_first"
+        }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "cli_json",
+            "rpc"
+          ]
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "library_path",
+        "manifest_path",
+        "subagents"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "library_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_path": {
+          "const": "context/capability-manifest.json"
+        },
+        "subagents": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "allowed",
+            "max_agents",
+            "allowed_profiles"
+          ],
+          "properties": {
+            "allowed": {
+              "type": "boolean"
+            },
+            "max_agents": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "allowed_profiles": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

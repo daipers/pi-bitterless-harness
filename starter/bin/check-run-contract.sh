@@ -85,11 +85,16 @@ import json
 import pathlib
 import sys
 
+from capabilitylib import load_capability_library
 from harnesslib import load_policy, load_run_contract, resolve_execution_settings
 
 run_contract = load_run_contract(pathlib.Path(sys.argv[1]))
 settings = resolve_execution_settings(run_contract)
 policy = load_policy(settings["policy_path"], repo_root=pathlib.Path(sys.argv[2]))
+if settings.get("capabilities_enabled"):
+    load_capability_library(settings.get("capability_library_path"), repo_root=pathlib.Path(sys.argv[2]))
+if settings.get("subagents_allowed") and settings.get("transport_mode") != "rpc":
+    raise SystemExit("subagent-capable runs require transport.mode=rpc")
 print(
     json.dumps(
         {
@@ -98,6 +103,7 @@ print(
             "policy_path": settings["policy_path"],
             "opt_in_env": policy["opt_in_env"],
             "allow_network_env": policy["allow_network_env"],
+            "transport_mode": settings.get("transport_mode", "cli_json"),
         }
     )
 )

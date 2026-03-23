@@ -952,6 +952,10 @@ def parse_args() -> argparse.Namespace:
         help="optional model candidate manifest path",
     )
     parser.add_argument(
+        "--bundle-candidate",
+        help="optional bundle candidate manifest path",
+    )
+    parser.add_argument(
         "--candidate-bundle-id",
         help="optional bundle id to include in benchmark promotion metadata",
     )
@@ -981,6 +985,9 @@ def main() -> None:
     )
     model_candidate_path = (
         pathlib.Path(args.model_candidate).resolve() if args.model_candidate else None
+    )
+    bundle_candidate_path = (
+        pathlib.Path(args.bundle_candidate).resolve() if args.bundle_candidate else None
     )
     replay_corpus_path = pathlib.Path(args.replay_corpus).resolve() if args.replay_corpus else None
     history_dir = pathlib.Path(args.history_dir).resolve() if args.history_dir else None
@@ -1016,6 +1023,8 @@ def main() -> None:
                 env_extra["HARNESS_POLICY_CANDIDATE_PATH"] = str(policy_candidate_path)
             if model_candidate_path is not None:
                 env_extra["HARNESS_MODEL_CANDIDATE_PATH"] = str(model_candidate_path)
+            if bundle_candidate_path is not None:
+                env_extra["HARNESS_BUNDLE_CANDIDATE_PATH"] = str(bundle_candidate_path)
             payload["replay"] = benchmark_replay(
                 harness_root,
                 fake_pi,
@@ -1094,6 +1103,11 @@ def main() -> None:
             load_candidate_manifest("model", model_candidate_path, repo_root=repo_root)
             if model_candidate_path is not None
             else load_candidate_manifest("model", repo_root=repo_root)
+        ),
+        "bundle": candidate_summary(
+            load_candidate_manifest("bundle", bundle_candidate_path, repo_root=repo_root)
+            if bundle_candidate_path is not None
+            else load_candidate_manifest("bundle", repo_root=repo_root)
         ),
     }
     payload["promotion_summary"] = {

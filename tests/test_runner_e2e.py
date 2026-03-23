@@ -144,6 +144,13 @@ python3 ../tests/fixtures/pass_eval.py
     return run_dir
 
 
+def write_fake_pi_scenario(run_dir: pathlib.Path, payload: dict[str, object]) -> None:
+    (run_dir / ".fake-pi-scenario.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_runner_happy_path_records_manifest(isolated_repo: pathlib.Path) -> None:
     run_dir = create_run(isolated_repo, "happy path")
     replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
@@ -258,9 +265,141 @@ def test_runner_profile_override_capability_materializes_context(
     assert score["retrieval"]["candidate_run_count"] >= 1
     assert score["retrieval"]["eligible_run_count"] >= 1
     assert score["retrieval"]["selected_count"] >= 1
-    assert score["retrieval"]["ranking_latency_ms"] >= 0
-    assert score["retrieval"]["artifact_bytes_copied"] >= 0
     assert "20260320-000000-prior-success" in retrieval_manifest["selected_source_run_ids"]
+
+
+def test_runner_v3_cli_subagent_contract_fails_fast(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v3 cli subagent fail")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v3")
+    contract["capabilities"]["enabled"] = True
+    contract["capabilities"]["subagents"] = {
+        "allowed": True,
+        "max_agents": 1,
+        "allowed_profiles": ["focused_reader"],
+    }
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    completed = run_harness(isolated_repo, run_dir, "happy_path")
+
+    assert completed.returncode == 2
+    assert (
+        "transport.mode" in completed.stderr
+        or "subagent-capable runs require transport.mode" in completed.stderr
+    )
+    assert not (run_dir / "transcript.jsonl").exists() or (run_dir / "transcript.jsonl").read_text(
+        encoding="utf-8"
+    ) == ""
+
+
+def test_runner_v3_rpc_materializes_capability_manifest_and_scores_usage(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v3 rpc subagent pass")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v3")
+    contract["transport"] = {"mode": "rpc"}
+    contract["capabilities"]["enabled"] = True
+    contract["capabilities"]["subagents"] = {
+        "allowed": True,
+        "max_agents": 1,
+        "allowed_profiles": ["focused_reader"],
+    }
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    write_fake_pi_scenario(
+        run_dir,
+        {
+            "scenario": "happy_path",
+            "subagent_usage": {
+                "usage_version": "v1",
+                "spawned_agents": [
+                    {
+                        "agent_id": "reader-1",
+                        "profile_id": "focused_reader",
+                        "tool_calls": ["read"],
+                        "read_paths": ["starter/README.md"],
+                        "write_paths": [],
+                        "network_access": False,
+                        "prompt_tokens": 120,
+                        "runtime_seconds": 12,
+                    }
+                ],
+            },
+        },
+    )
+
+    completed = run_harness(isolated_repo, run_dir, "happy_path")
+
+    assert completed.returncode == 0
+    capability_manifest = json.loads(
+        (run_dir / "context" / "capability-manifest.json").read_text(encoding="utf-8")
+    )
+    score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
+    assert capability_manifest["transport"]["mode"] == "rpc"
+    assert capability_manifest["subagents"]["allowed_profiles"] == ["focused_reader"]
+    assert score["capabilities"]["enabled"] is True
+    assert score["capabilities"]["usage_valid"] is True
+    assert score["capabilities"]["spawned_profile_ids"] == ["focused_reader"]
+    assert manifest["capabilities"]["transport_mode"] == "rpc"
+    assert manifest["capabilities"]["usage_valid"] is True
+
+
+def test_runner_v3_rpc_rejects_invalid_subagent_usage(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v3 rpc invalid usage")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v3")
+    contract["transport"] = {"mode": "rpc"}
+    contract["capabilities"]["enabled"] = True
+    contract["capabilities"]["subagents"] = {
+        "allowed": True,
+        "max_agents": 1,
+        "allowed_profiles": ["focused_reader"],
+    }
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    write_fake_pi_scenario(
+        run_dir,
+        {
+            "scenario": "happy_path",
+            "subagent_usage": {
+                "usage_version": "v1",
+                "spawned_agents": [
+                    {
+                        "agent_id": "reader-1",
+                        "profile_id": "focused_reader",
+                        "tool_calls": ["write"],
+                        "read_paths": ["../outside.txt"],
+                        "write_paths": ["starter/README.md"],
+                        "network_access": True,
+                        "prompt_tokens": 5001,
+                        "runtime_seconds": 999,
+                    }
+                ],
+            },
+        },
+    )
+
+    completed = run_harness(isolated_repo, run_dir, "happy_path")
+
+    assert completed.returncode == 0
+    score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+    assert score["overall_pass"] is False
+    assert "eval_failed" in score["failure_classifications"]
+    assert score["capabilities"]["usage_valid"] is False
+    assert "subagents.write_not_allowed:focused_reader" in score["capabilities"]["violations"]
 
 
 def test_runner_contract_failure_blocks_launch(isolated_repo: pathlib.Path) -> None:

@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from capabilitylib import DEFAULT_USAGE_PATH, validate_subagent_usage
 from harnesslib import (
     build_run_event,
     canonicalize_json_file,
@@ -20,7 +21,6 @@ from harnesslib import (
     guardrail_policy_snapshot,
     load_policy,
     load_run_contract,
-    now_utc,
     parse_task_file,
     resolve_execution_settings,
     scan_paths_for_secrets,
@@ -291,6 +291,19 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
     )
     manifest_path = context.run_dir / manifest_path_setting
     manifest_payload = load_json(manifest_path) if manifest_path.exists() else None
+    capability_manifest_setting = (
+        os.environ.get("HARNESS_CAPABILITY_MANIFEST_PATH")
+        or settings.get("capability_manifest_path")
+        or ""
+    )
+    capability_manifest_path = (
+        context.run_dir / capability_manifest_setting if capability_manifest_setting else None
+    )
+    capability_manifest_payload = (
+        load_json(capability_manifest_path)
+        if capability_manifest_path is not None and capability_manifest_path.exists()
+        else None
+    )
     source_run_ids: list[str] = []
     if os.environ.get("HARNESS_CONTEXT_SOURCE_RUN_IDS"):
         source_run_ids = _split_csv(os.environ["HARNESS_CONTEXT_SOURCE_RUN_IDS"])
@@ -306,6 +319,9 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
     return {
         "run_contract_version": settings["run_contract_version"],
         "execution_profile": settings["execution_profile"],
+        "transport_mode": settings.get(
+            "transport_mode", os.environ.get("HARNESS_TRANSPORT_MODE", "cli_json")
+        ),
         "policy": policy,
         "policy_path": (
             settings["policy_path"]
@@ -319,6 +335,13 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
         ),
         "context_source_run_ids": source_run_ids,
         "context_manifest_payload": manifest_payload if isinstance(manifest_payload, dict) else {},
+        "capabilities_enabled": _env_is_true(os.environ.get("HARNESS_CAPABILITIES_ENABLED"))
+        if os.environ.get("HARNESS_CAPABILITIES_ENABLED") is not None
+        else bool(settings.get("capabilities_enabled", False)),
+        "capability_manifest_path": capability_manifest_path,
+        "capability_manifest_payload": capability_manifest_payload
+        if isinstance(capability_manifest_payload, dict)
+        else {},
         "retrieval_candidate": {
             "candidate_id": os.environ.get("HARNESS_RETRIEVAL_CANDIDATE_ID") or None,
             "mode": os.environ.get("HARNESS_RETRIEVAL_CANDIDATE_MODE") or "off",
@@ -332,6 +355,10 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
             "mode": os.environ.get("HARNESS_MODEL_CANDIDATE_MODE") or "off",
             "selected_model": os.environ.get("HARNESS_MODEL_SELECTED_MODEL") or None,
             "fallback_model": os.environ.get("HARNESS_MODEL_FALLBACK_MODEL") or None,
+        },
+        "bundle_candidate": {
+            "candidate_id": os.environ.get("HARNESS_BUNDLE_CANDIDATE_ID") or None,
+            "mode": os.environ.get("HARNESS_BUNDLE_CANDIDATE_MODE") or "off",
         },
         "guardrails_artifact_path": (
             context.run_dir / os.environ.get("HARNESS_GUARDRAILS_PATH", "outputs/guardrails.json")
@@ -772,6 +799,45 @@ def _build_retrieval_metadata(
     }
 
 
+def _build_capabilities_metadata(
+    context: ScoreContext,
+    execution_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    manifest_payload = execution_metadata.get("capability_manifest_payload", {})
+    usage_path = context.run_dir / DEFAULT_USAGE_PATH
+    usage_payload = load_json(usage_path) if usage_path.exists() else None
+    validation = validate_subagent_usage(
+        usage_payload if isinstance(usage_payload, dict) else None,
+        manifest_payload if isinstance(manifest_payload, dict) else {},
+        repo_root=context.repo_root,
+    )
+    return {
+        "enabled": bool(execution_metadata.get("capabilities_enabled")),
+        "transport_mode": execution_metadata.get("transport_mode"),
+        "manifest_path": _relative_to_run_dir(
+            context,
+            execution_metadata.get("capability_manifest_path"),
+        ),
+        "manifest_version": manifest_payload.get("capability_manifest_version"),
+        "library_path": manifest_payload.get("library_path"),
+        "library_fingerprint": manifest_payload.get("library_fingerprint"),
+        "subagents_allowed": bool((manifest_payload.get("subagents") or {}).get("allowed", False)),
+        "max_agents": (manifest_payload.get("subagents") or {}).get("max_agents"),
+        "allowed_profiles": list(
+            (manifest_payload.get("subagents") or {}).get("allowed_profiles", [])
+        ),
+        "usage_path": _relative_to_run_dir(context, usage_path),
+        "usage_present": validation["usage_present"],
+        "usage_version": validation["usage_version"],
+        "usage_valid": validation["valid"],
+        "violations": list(validation["violations"]),
+        "agent_count": validation["agent_count"],
+        "spawned_profile_ids": list(validation["spawned_profile_ids"]),
+        "total_prompt_tokens": validation["total_prompt_tokens"],
+        "total_runtime_seconds": validation["total_runtime_seconds"],
+    }
+
+
 def _result_has_evidence_backed_claim(payload: dict[str, Any]) -> bool:
     claims = payload.get("claims", [])
     if not isinstance(claims, list):
@@ -834,6 +900,7 @@ def _build_promotion_summary(
             "retrieval": dict(execution_metadata.get("retrieval_candidate", {})),
             "policy": dict(execution_metadata.get("policy_candidate", {})),
             "model": dict(execution_metadata.get("model_candidate", {})),
+            "bundle": dict(execution_metadata.get("bundle_candidate", {})),
         },
     }
 
@@ -888,7 +955,10 @@ def _assemble_score_payload(
     execution_metadata: dict[str, Any],
     max_eval_commands: int,
 ) -> dict[str, Any]:
+    capabilities_metadata = _build_capabilities_metadata(context, execution_metadata)
     failure_classifications = _collect_failure_classifications(inputs)
+    if capabilities_metadata["enabled"] and not capabilities_metadata["usage_valid"]:
+        failure_classifications.add("eval_failed")
     overall_pass = len(failure_classifications) == 0
     overall_error_code = "none" if overall_pass else ",".join(sorted(failure_classifications))
     try:
@@ -948,10 +1018,12 @@ def _assemble_score_payload(
             ),
         },
         "retrieval": _build_retrieval_metadata(context, execution_metadata),
+        "capabilities": capabilities_metadata,
         "candidates": {
             "retrieval": dict(execution_metadata.get("retrieval_candidate", {})),
             "policy": dict(execution_metadata.get("policy_candidate", {})),
             "model": dict(execution_metadata.get("model_candidate", {})),
+            "bundle": dict(execution_metadata.get("bundle_candidate", {})),
         },
         "benchmark_eligibility": benchmark_eligibility,
         "promotion_summary": promotion_summary,

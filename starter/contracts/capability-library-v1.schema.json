@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/capability-library-v1.schema.json",
+  "title": "Bitterless Harness Capability Library v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capability_library_version",
+    "entries"
+  ],
+  "properties": {
+    "capability_library_version": {
+      "const": "v1"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "id",
+              "description",
+              "tools"
+            ],
+            "properties": {
+              "kind": {
+                "const": "tool_bundle"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tools": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "edit",
+                    "bash"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "id",
+              "description",
+              "tool_bundles",
+              "transports",
+              "allow_network",
+              "allow_write",
+              "read_scopes",
+              "write_scopes",
+              "budgets",
+              "expected_artifacts"
+            ],
+            "properties": {
+              "kind": {
+                "const": "subagent_profile"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tool_bundles": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "transports": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "cli_json",
+                    "rpc"
+                  ]
+                }
+              },
+              "allow_network": {
+                "type": "boolean"
+              },
+              "allow_write": {
+                "type": "boolean"
+              },
+              "read_scopes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "write_scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "budgets": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "max_spawn_count",
+                  "max_tokens",
+                  "max_runtime_seconds"
+                ],
+                "properties": {
+                  "max_spawn_count": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "max_tokens": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "max_runtime_seconds": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "expected_artifacts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
