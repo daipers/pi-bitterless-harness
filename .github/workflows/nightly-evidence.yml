@@ -53,6 +53,12 @@ jobs:
             --out "${{ runner.temp }}/replay-corpus.json" \
             --limit 12
 
+      - name: Run retrieval benchmark
+        run: |
+          python3 starter/bin/benchmark_harness.py \
+            --mode retrieval \
+            --out "${{ runner.temp }}/retrieval-benchmark.json"
+
       - name: Run replay benchmark
         run: |
           python3 starter/bin/benchmark_harness.py \
@@ -77,6 +83,7 @@ jobs:
           name: nightly-evidence
           path: |
             ${{ runner.temp }}/real-pi-canary.summary.json
+            ${{ runner.temp }}/retrieval-benchmark.json
             ${{ runner.temp }}/replay-corpus.json
             ${{ runner.temp }}/replay-benchmark.json
             ${{ runner.temp }}/fault-benchmark.json

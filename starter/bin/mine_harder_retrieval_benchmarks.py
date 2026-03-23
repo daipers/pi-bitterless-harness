@@ -126,7 +126,7 @@ def propose_same_words_wrong_artifact(
         return None
     if set(gold["artifact_paths"]) == set(confuser["artifact_paths"]):
         return None
-    if entry_similarity(gold, confuser) < 8:
+    if entry_similarity(gold, confuser) < 6:
         return None
     return {
         "case_kind": "same_words_wrong_artifact",
@@ -156,7 +156,7 @@ def propose_same_claim_weaker_evidence(
         gold_quality.get("evidence_backed_claim_count", 0)
     ):
         return None
-    if entry_similarity(gold, confuser) < 6:
+    if entry_similarity(gold, confuser) < 4:
         return None
     return {
         "case_kind": "same_claim_weaker_evidence",
@@ -210,18 +210,19 @@ def main(argv: list[str] | None = None) -> int:
         eval_policy=policy,
         retrieval_profile=retrieval_profile,
     )
-    entries = [entry for entry in state["entries"] if entry.get("eligible")]
+    gold_entries = [entry for entry in state["entries"] if entry.get("eligible")]
+    confuser_entries = [entry for entry in state["entries"] if entry.get("overall_pass")]
     existing_keys = load_existing_keys(output_dir)
     written_paths: list[str] = []
 
-    for gold in entries:
+    for gold in gold_entries:
         gold_quality = dict(gold.get("quality", {}))
         if not (
             int(gold_quality.get("evidence_backed_claim_count", 0)) >= 1
             or int(gold_quality.get("descriptive_artifact_count", 0)) >= 1
         ):
             continue
-        for confuser in entries:
+        for confuser in confuser_entries:
             if confuser["run_id"] == gold["run_id"]:
                 continue
             for builder in [propose_same_words_wrong_artifact, propose_same_claim_weaker_evidence]:
@@ -240,7 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "index_version": state["index_version"],
         "retrieval_profile_id": retrieval_profile["profile_id"],
-        "eligible_run_count": len(entries),
+        "eligible_run_count": len(gold_entries),
+        "confuser_candidate_count": len(confuser_entries),
         "proposal_count": len(written_paths),
         "proposal_paths": written_paths,
         "output_dir": str(output_dir),

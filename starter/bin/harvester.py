@@ -76,7 +76,7 @@ def _read_state(run_dir: pathlib.Path) -> str:
 def _parse_ts_ms(value: Any) -> int | None:
     if value is None:
         return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         numeric = int(value)
         return numeric * 1000 if numeric < 10_000_000_000 else numeric
     text = str(value).strip()

@@ -130,3 +130,42 @@ def test_real_pi_proxy_corrupt_result_is_scored_as_failure(
     assert completed.returncode == 0
     score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
     assert "result_invalid" in score["failure_classifications"]
+
+
+def test_real_pi_proxy_startup_failure_before_transcript_exhausts_retries(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "real pi startup failure")
+    write_task(run_dir, "startup failure before transcript")
+
+    completed = run_harness(
+        isolated_repo,
+        run_dir,
+        extra_env={
+            "HARNESS_PI_BIN": str(isolated_repo / "starter" / "bin" / "real_pi_proxy.py"),
+            "HARNESS_REAL_PI_BIN": "pi",
+            "HARNESS_REAL_PI_PROXY_MODE": "startup-fail-always",
+            "HARNESS_PI_RETRY_COUNT": "2",
+        },
+    )
+
+    assert completed.returncode == 0
+    manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
+    score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+    events = [
+        json.loads(line)
+        for line in (run_dir / "run-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    transcript_path = run_dir / "transcript.jsonl"
+    assert not transcript_path.exists() or transcript_path.read_text(encoding="utf-8") == ""
+    assert not (run_dir / "result.json").exists()
+    assert (run_dir / "pi.exit_code.txt").read_text(encoding="utf-8").strip() == "75"
+    assert sum(1 for event in events if event["message"] == "starting model attempt") == 2
+    assert sum(1 for event in events if event["message"] == "retrying pi startup failure") == 1
+    assert manifest["state"] == "complete"
+    assert manifest["primary_error_code"] == "model_invocation_failed"
+    assert "model_invocation_failed" in manifest["failure_classifications"]
+    assert "model_invocation_failed" in str(manifest["error_code"])
+    assert score["overall_pass"] is False
+    assert "model_invocation_failed" in score["failure_classifications"]

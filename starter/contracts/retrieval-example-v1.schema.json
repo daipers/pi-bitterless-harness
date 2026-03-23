@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/retrieval-example-v1.schema.json",
+  "title": "Bitterless Harness Retrieval Example v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "retrieval_example_version",
+    "example_id",
+    "query",
+    "abstention_label"
+  ],
+  "properties": {
+    "retrieval_example_version": {
+      "const": "v1"
+    },
+    "example_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query": {
+      "type": "object"
+    },
+    "candidate_set": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "gold_source_run_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hard_negative_run_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "abstention_label": {
+      "type": "boolean"
+    },
+    "usefulness_label": {
+      "type": "boolean"
+    }
+  }
+}

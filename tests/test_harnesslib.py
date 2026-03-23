@@ -121,6 +121,67 @@ def test_policy_helpers_cover_resolution_and_invalid_payloads(
         load_policy(invalid_policy, repo_root=repo_root)
 
 
+def test_policy_helpers_cover_nested_policy_validation_and_index_env_overrides(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    nested_errors = harnesslib.validate_policy(
+        {
+            "opt_in_env": "ALLOW_DANGEROUS",
+            "allow_network_env": "ALLOW_NETWORK",
+            "allowed_programs": [],
+            "blocked_programs": [],
+            "network_programs": [],
+            "retrieval_index": {
+                "ttl_seconds": "bad",
+                "max_entries": -1,
+                "max_bytes": "nope",
+            },
+            "retention": {
+                "run": {"ttl_days": "bad"},
+                "artifact": "bad",
+                "queue": {"max_bytes": "bad"},
+            },
+            "guardrails": {
+                "hooks": {
+                    "pre_run": {
+                        "enabled": "yes",
+                        "allow": "yes",
+                        "allow_network_tools": "yes",
+                        "allow_dangerous_commands": "yes",
+                    },
+                    "pre_score": "bad",
+                }
+            },
+        }
+    )
+
+    assert "policy.ttl_seconds must be an integer" in nested_errors
+    assert "policy.max_bytes must be an integer" in nested_errors
+    assert "retention.artifact must be an object" in nested_errors
+    assert "policy.ttl_days must be an integer" in nested_errors
+    assert "policy.max_bytes must be an integer" in nested_errors
+    assert "guardrails.hooks.pre_run.enabled must be a boolean" in nested_errors
+    assert "guardrails.hooks.pre_run.allow must be a boolean" in nested_errors
+    assert "guardrails.hooks.pre_run.allow_network_tools must be a boolean" in nested_errors
+    assert "guardrails.hooks.pre_run.allow_dangerous_commands must be a boolean" in nested_errors
+    assert "guardrails.hooks.pre_score must be an object" in nested_errors
+
+    monkeypatch.setenv("HARNESS_RETRIEVAL_INDEX_TTL_SECONDS", "17")
+    monkeypatch.setenv("HARNESS_RETRIEVAL_INDEX_MAX_ENTRIES", "-3")
+    monkeypatch.setenv("HARNESS_RETRIEVAL_INDEX_MAX_BYTES", "invalid")
+    resolved = harnesslib.resolve_retrieval_index_policy(
+        {"ttl_seconds": 5, "max_entries": 9, "max_bytes": 11},
+        profile_defaults={"ttl_seconds": 7, "max_entries": 13, "max_bytes": 15},
+    )
+
+    assert resolved == {
+        "ttl_seconds": 17,
+        "max_entries": 9,
+        "max_bytes": 11,
+    }
+
+
 def test_validate_result_payload_and_secret_helpers(tmp_path: pathlib.Path, monkeypatch) -> None:
     schema = {
         "type": "object",

@@ -14,6 +14,14 @@ if str(STARTER_BIN) not in sys.path:
     sys.path.insert(0, str(STARTER_BIN))
 
 
+@pytest.fixture(autouse=True)
+def stable_backpressure_thresholds(monkeypatch) -> None:
+    # Keep runner subprocess tests deterministic instead of depending on host load or free space.
+    monkeypatch.setenv("HARNESS_DISK_USED_THRESHOLD_PERCENT", "100")
+    monkeypatch.setenv("HARNESS_FREE_MB_THRESHOLD", "0")
+    monkeypatch.setenv("HARNESS_LOAD_PER_CPU_THRESHOLD", "999")
+
+
 @pytest.fixture
 def isolated_repo(tmp_path: pathlib.Path) -> pathlib.Path:
     destination = tmp_path / "repo"

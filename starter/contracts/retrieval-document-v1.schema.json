@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/retrieval-document-v1.schema.json",
+  "title": "Bitterless Harness Retrieval Document v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "retrieval_document_version",
+    "run_id",
+    "text",
+    "query_sections",
+    "summary",
+    "claims",
+    "evidence_paths",
+    "artifact_records",
+    "quality",
+    "source_snapshot_fingerprint"
+  ],
+  "properties": {
+    "retrieval_document_version": {
+      "const": "v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "text": {
+      "type": "string"
+    },
+    "query_sections": {
+      "type": "object",
+      "required": [
+        "task_title",
+        "goal",
+        "constraints",
+        "done"
+      ],
+      "properties": {
+        "task_title": {
+          "type": "string"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "constraints": {
+          "type": "string"
+        },
+        "done": {
+          "type": "string"
+        }
+      }
+    },
+    "summary": {
+      "type": "string"
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_records": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "quality": {
+      "type": "object"
+    },
+    "source_snapshot_fingerprint": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

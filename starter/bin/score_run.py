@@ -5,7 +5,7 @@ import json
 import os
 import pathlib
 import signal
-import subprocess  # nosec B404 - harness scoring executes argv-based local evaluation commands
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -294,6 +294,20 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
         ),
         "context_source_run_ids": source_run_ids,
         "context_manifest_payload": manifest_payload if isinstance(manifest_payload, dict) else {},
+        "retrieval_candidate": {
+            "candidate_id": os.environ.get("HARNESS_RETRIEVAL_CANDIDATE_ID") or None,
+            "mode": os.environ.get("HARNESS_RETRIEVAL_CANDIDATE_MODE") or "off",
+        },
+        "policy_candidate": {
+            "candidate_id": os.environ.get("HARNESS_POLICY_CANDIDATE_ID") or None,
+            "mode": os.environ.get("HARNESS_POLICY_CANDIDATE_MODE") or "off",
+        },
+        "model_candidate": {
+            "candidate_id": os.environ.get("HARNESS_MODEL_CANDIDATE_ID") or None,
+            "mode": os.environ.get("HARNESS_MODEL_CANDIDATE_MODE") or "off",
+            "selected_model": os.environ.get("HARNESS_MODEL_SELECTED_MODEL") or None,
+            "fallback_model": os.environ.get("HARNESS_MODEL_FALLBACK_MODEL") or None,
+        },
         "guardrails_artifact_path": (
             context.run_dir / os.environ.get("HARNESS_GUARDRAILS_PATH", "outputs/guardrails.json")
         ),
@@ -471,7 +485,7 @@ def run_evaluation(
     stdout_path, stderr_path = _result_log_paths(score_dir, index)
     started = time.monotonic()
     try:
-        proc = subprocess.run(  # nosec B603 - eval uses parsed argv with shell disabled
+        proc = subprocess.run(  # nosec B603
             detail["argv"],
             cwd=str(context.repo_root),
             text=True,
@@ -517,13 +531,15 @@ def _read_pi_exit_code(exit_code_path: pathlib.Path) -> int:
 def _collect_evaluations(
     context: ScoreContext,
     parsed_task: dict[str, Any],
-    execution_metadata: dict[str, Any],
+    execution_metadata: dict[str, Any] | None = None,
     *,
-    max_eval_commands: int,
+    max_eval_commands: int = 0,
     eval_timeout_seconds: int,
     allow_dangerous_eval: bool,
     allow_network_tasks: bool,
 ) -> EvaluationBatchResult:
+    if execution_metadata is None:
+        execution_metadata = _load_execution_metadata(context)
     evaluations: list[dict[str, Any]] = []
     failure_classifications: set[str] = set()
     tool_guardrail_decisions: list[dict[str, Any]] = []
@@ -705,15 +721,95 @@ def _build_retrieval_metadata(
         "context_manifest_path": _relative_to_run_dir(
             context, execution_metadata["context_manifest_path"]
         ),
+        "context_manifest_version": manifest_payload.get("context_manifest_version"),
         "retrieval_profile_id": manifest_payload.get("retrieval_profile_id"),
+        "retrieval_profile_fingerprint": manifest_payload.get("retrieval_profile_fingerprint"),
+        "retrieval_candidate_id": manifest_payload.get("retrieval_candidate_id"),
+        "retrieval_candidate_mode": manifest_payload.get("retrieval_candidate_mode"),
+        "retriever_version": manifest_payload.get("retriever_version"),
+        "reranker_version": manifest_payload.get("reranker_version"),
+        "abstention_model_version": manifest_payload.get("abstention_model_version"),
+        "selection_source": manifest_payload.get("selection_source"),
         "index_mode": manifest_payload.get("index_mode"),
+        "index_provenance_token": manifest_payload.get("index_provenance_token"),
         "candidate_run_count": manifest_payload.get("candidate_run_count"),
         "eligible_run_count": manifest_payload.get("eligible_run_count"),
         "selected_count": manifest_payload.get("selected_count"),
         "selected_source_count": manifest_payload.get("selected_source_count"),
         "empty_context": manifest_payload.get("empty_context"),
+        "abstained": manifest_payload.get("abstained"),
+        "abstention_reason": manifest_payload.get("abstention_reason"),
+        "abstention_thresholds": manifest_payload.get("abstention_thresholds"),
+        "top_candidate_score": manifest_payload.get("top_candidate_score"),
+        "top_candidate_score_margin": manifest_payload.get("top_candidate_score_margin"),
         "ranking_latency_ms": manifest_payload.get("ranking_latency_ms"),
         "artifact_bytes_copied": manifest_payload.get("artifact_bytes_copied"),
+    }
+
+
+def _result_has_evidence_backed_claim(payload: dict[str, Any]) -> bool:
+    claims = payload.get("claims", [])
+    if not isinstance(claims, list):
+        return False
+    for item in claims:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("evidence", [])
+        if isinstance(evidence, list) and any(
+            isinstance(entry, str) and entry for entry in evidence
+        ):
+            return True
+    return False
+
+
+def _build_benchmark_eligibility(
+    *,
+    result_payload: dict[str, Any],
+    result_validation: ResultValidationResult,
+    secret_scan: SecretScanResult,
+    overall_pass: bool,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    criteria = {
+        "overall_pass": overall_pass,
+        "result_schema_valid": result_validation.result_json_valid_schema,
+        "secret_clean": len(secret_scan.findings) == 0,
+        "evidence_backed_claims": _result_has_evidence_backed_claim(result_payload),
+    }
+    if not criteria["overall_pass"]:
+        reasons.append("score_not_passing")
+    if not criteria["result_schema_valid"]:
+        reasons.append("result_schema_invalid")
+    if not criteria["secret_clean"]:
+        reasons.append("secret_scan_findings")
+    if not criteria["evidence_backed_claims"]:
+        reasons.append("missing_evidence_backed_claim")
+    return {
+        "eligible": len(reasons) == 0,
+        "criteria": criteria,
+        "reasons": reasons,
+    }
+
+
+def _build_promotion_summary(
+    *,
+    failure_classifications: set[str],
+    benchmark_eligibility: dict[str, Any],
+    execution_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "eligible_release_signal": len(failure_classifications) == 0
+        and bool(benchmark_eligibility.get("eligible")),
+        "requires_recent_canary": True,
+        "requires_benchmark_report": True,
+        "requires_signed_provenance": True,
+        "blocking_failure_count": len(failure_classifications),
+        "blocking_failure_classifications": sorted(failure_classifications),
+        "candidates": {
+            "retrieval": dict(execution_metadata.get("retrieval_candidate", {})),
+            "policy": dict(execution_metadata.get("policy_candidate", {})),
+            "model": dict(execution_metadata.get("model_candidate", {})),
+        },
     }
 
 
@@ -770,6 +866,23 @@ def _assemble_score_payload(
     failure_classifications = _collect_failure_classifications(inputs)
     overall_pass = len(failure_classifications) == 0
     overall_error_code = "none" if overall_pass else ",".join(sorted(failure_classifications))
+    try:
+        result_payload = load_json(context.run_dir / DEFAULT_RESULT_FILE)
+    except Exception:
+        result_payload = {}
+    if not isinstance(result_payload, dict):
+        result_payload = {}
+    benchmark_eligibility = _build_benchmark_eligibility(
+        result_payload=result_payload,
+        result_validation=inputs.result_validation,
+        secret_scan=inputs.secret_scan,
+        overall_pass=overall_pass,
+    )
+    promotion_summary = _build_promotion_summary(
+        failure_classifications=failure_classifications,
+        benchmark_eligibility=benchmark_eligibility,
+        execution_metadata=execution_metadata,
+    )
 
     return {
         "pi_exit_code": inputs.pi_exit_code,
@@ -810,6 +923,13 @@ def _assemble_score_payload(
             ),
         },
         "retrieval": _build_retrieval_metadata(context, execution_metadata),
+        "candidates": {
+            "retrieval": dict(execution_metadata.get("retrieval_candidate", {})),
+            "policy": dict(execution_metadata.get("policy_candidate", {})),
+            "model": dict(execution_metadata.get("model_candidate", {})),
+        },
+        "benchmark_eligibility": benchmark_eligibility,
+        "promotion_summary": promotion_summary,
         "failure_classifications": sorted(failure_classifications),
         "overall_error_code": overall_error_code,
         "overall_pass": overall_pass,
@@ -894,7 +1014,14 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException as exc:  # noqa: BLE001
         append_event(context, "score", "score generation interrupted", error_code="eval_failed")
         partial_payload = build_score_payload(context, cancelled=True)
-        _persist_guardrail_artifact(context, _load_execution_metadata(context), partial_payload)
+        try:
+            _persist_guardrail_artifact(
+                context,
+                _load_execution_metadata(context),
+                partial_payload,
+            )
+        except Exception as persist_error:  # noqa: BLE001
+            partial_payload["guardrail_persist_error"] = str(persist_error)
         partial_payload["interruption"] = str(exc)
         write_json(context.out_path, partial_payload)
         print(context.out_path)

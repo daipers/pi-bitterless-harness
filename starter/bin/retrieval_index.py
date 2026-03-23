@@ -10,6 +10,8 @@ import shutil
 from datetime import UTC, datetime
 from typing import Any
 
+import numpy
+from dense_retrieval import encode_text, load_dense_retriever_runtime
 from harnesslib import (
     evaluate_required_artifact_path,
     now_utc,
@@ -17,11 +19,18 @@ from harnesslib import (
     sha256_text,
     write_json,
 )
+from learninglib import (
+    candidate_runtime,
+    effective_candidate_mode,
+    load_candidate_manifest,
+    sigmoid,
+)
 
 INDEX_VERSION = "retrieval-v4"
 INDEX_ROOT_PARTS = (".index", INDEX_VERSION)
 INDEX_DEFAULT_TTL_SECONDS = 0
 INDEX_DEFAULT_MAX_ENTRIES = 0
+DENSE_STAGE1_CACHE_DIR = "dense-stage1-cache"
 
 
 def _to_positive_int(value: str | int | None, *, default: int) -> int:
@@ -72,6 +81,11 @@ DEFAULT_RETRIEVAL_PROFILE = {
         "summary_bonus": 1,
         "evidence_backed_claim_bonus": 2,
         "descriptive_artifact_bonus": 1,
+    },
+    "abstention": {
+        "enabled": True,
+        "min_top_score": 6,
+        "min_score_margin": 2,
     },
 }
 
@@ -153,6 +167,16 @@ def validate_retrieval_profile(payload: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"retrieval profile quality_prior.{key} must be a non-negative integer"
                 )
+    abstention = payload.get("abstention")
+    if not isinstance(abstention, dict):
+        errors.append("retrieval profile abstention must be an object")
+    else:
+        if not isinstance(abstention.get("enabled"), bool):
+            errors.append("retrieval profile abstention.enabled must be a boolean")
+        for key in ["min_top_score", "min_score_margin"]:
+            value = abstention.get(key)
+            if not isinstance(value, int) or value < 0:
+                errors.append(f"retrieval profile abstention.{key} must be a non-negative integer")
     return errors
 
 
@@ -171,6 +195,8 @@ def load_retrieval_profile(
     merged["field_weights"].update(payload.get("field_weights", {}))
     merged["quality_prior"] = dict(DEFAULT_RETRIEVAL_PROFILE["quality_prior"])
     merged["quality_prior"].update(payload.get("quality_prior", {}))
+    merged["abstention"] = dict(DEFAULT_RETRIEVAL_PROFILE["abstention"])
+    merged["abstention"].update(payload.get("abstention", {}))
     errors = validate_retrieval_profile(merged)
     if errors:
         raise ValueError("; ".join(errors))
@@ -612,6 +638,8 @@ def build_index_entry(
             "eligible_artifact_count": 0,
         },
         "document_tokens": {},
+        "encoder_text": "",
+        "encoder_text_fingerprint": "",
     }
 
     task_path = source_run_dir / "task.md"
@@ -628,6 +656,18 @@ def build_index_entry(
         return entry
     if score_payload.get("overall_pass") is not True:
         entry["skip_reason"] = "score_not_passing"
+        return entry
+    entry["overall_pass"] = True
+    benchmark_eligibility = score_payload.get("benchmark_eligibility")
+    if isinstance(benchmark_eligibility, dict) and benchmark_eligibility.get("eligible") is False:
+        entry["skip_reason"] = "benchmark_ineligible"
+        return entry
+    if score_payload.get("result_json_valid_schema") is False:
+        entry["skip_reason"] = "result_schema_invalid"
+        return entry
+    secret_scan = score_payload.get("secret_scan")
+    if isinstance(secret_scan, dict) and secret_scan.get("findings"):
+        entry["skip_reason"] = "secret_scan_findings"
         return entry
 
     result_payload = parse_json_file(result_path)
@@ -647,14 +687,6 @@ def build_index_entry(
         result_payload=result_payload,
         retrieval_profile=profile,
     )
-    artifact_description_tokens = collections.Counter()
-    artifact_excerpt_tokens = collections.Counter()
-    for artifact in view["artifact_records"]:
-        artifact_description_tokens.update(collections.Counter(artifact["description_tokens"]))
-        artifact_excerpt_tokens.update(collections.Counter(artifact["excerpt_tokens"]))
-
-    entry["eligible"] = True
-    entry["overall_pass"] = True
     entry["query_text_hash"] = sha256_text(build_query_text(parsed_task))
     entry["summary"] = view["summary"]
     entry["claims"] = list(view["claims"])
@@ -663,6 +695,16 @@ def build_index_entry(
     entry["artifact_records"] = list(view["artifact_records"])
     entry["retrieval_view"] = view
     entry["quality"] = dict(view["quality"])
+    entry["encoder_text"] = str(view["text"])
+    entry["encoder_text_fingerprint"] = sha256_text(entry["encoder_text"])
+    artifact_description_tokens = collections.Counter()
+    artifact_excerpt_tokens = collections.Counter()
+    for artifact in view["artifact_records"]:
+        artifact_description_tokens.update(collections.Counter(artifact["description_tokens"]))
+        artifact_excerpt_tokens.update(collections.Counter(artifact["excerpt_tokens"]))
+
+    entry["eligible"] = True
+    entry["overall_pass"] = True
     entry["document_tokens"] = {
         "task_title": serialize_counter(tokenize(view["task_title"])),
         "goal": serialize_counter(tokenize(view["goal"])),
@@ -675,6 +717,9 @@ def build_index_entry(
         "evidence_paths": serialize_counter(tokenize("\n".join(view["evidence_paths"]))),
         "view_text": serialize_counter(tokenize(view["text"])),
     }
+    if int(view["quality"].get("evidence_backed_claim_count", 0)) < 1:
+        entry["skip_reason"] = "missing_evidence_backed_claim"
+        return entry
     entry["source_snapshot_fingerprint"] = entry_source_snapshot_fingerprint(entry)
     return entry
 
@@ -778,6 +823,128 @@ def _build_index_provenance(
     )
 
 
+def retrieval_candidate_is_dense(retrieval_candidate: dict[str, Any] | None) -> bool:
+    if not retrieval_candidate:
+        return False
+    runtime = candidate_runtime(retrieval_candidate)
+    retriever = runtime.get("retriever", {})
+    return (
+        str(runtime.get("retriever_version", "")) == "dense-hashed-shared-encoder-v1"
+        or (
+            isinstance(retriever, dict)
+            and str(retriever.get("retriever_type", "")) == "dense-v1"
+        )
+    )
+
+
+def dense_stage1_cache_root(
+    index_root: pathlib.Path,
+    retrieval_candidate: dict[str, Any],
+) -> pathlib.Path:
+    candidate_id = str(retrieval_candidate.get("candidate_id", "retrieval-candidate")).strip()
+    return index_root / DENSE_STAGE1_CACHE_DIR / candidate_id
+
+
+def _dense_stage1_cache_path(cache_root: pathlib.Path, run_id: str) -> pathlib.Path:
+    return cache_root / f"{run_id}.json"
+
+
+def _dense_stage1_embedding_for_entry(
+    cache_root: pathlib.Path,
+    entry: dict[str, Any],
+    *,
+    dense_runtime: dict[str, Any],
+) -> numpy.ndarray:
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_path = _dense_stage1_cache_path(cache_root, str(entry["run_id"]))
+    expected = {
+        "candidate_artifact_fingerprint": dense_runtime["artifact_fingerprint"],
+        "source_snapshot_fingerprint": entry.get("source_snapshot_fingerprint"),
+        "encoder_text_fingerprint": entry.get("encoder_text_fingerprint"),
+        "embedding_dim": dense_runtime["embedding_dim"],
+    }
+    cached = parse_json_file(cache_path)
+    if isinstance(cached, dict):
+        embedding = cached.get("embedding")
+        metadata_matches = all(cached.get(key) == value for key, value in expected.items())
+        if metadata_matches and isinstance(embedding, list):
+            array = numpy.asarray(embedding, dtype=numpy.float32)
+            if array.shape == (dense_runtime["embedding_dim"],):
+                return array
+
+    encoded = encode_text(
+        str(entry.get("encoder_text", "")),
+        hash_dim=dense_runtime["hash_dim"],
+        feature_weights=dense_runtime["feature_weights"],
+        projection=dense_runtime["projection"],
+    )
+    write_json(
+        cache_path,
+        {
+            **expected,
+            "run_id": entry["run_id"],
+            "embedding": [round(float(value), 8) for value in encoded.tolist()],
+        },
+    )
+    return encoded
+
+
+def dense_stage1_ranking(
+    query_text: str,
+    entries: list[dict[str, Any]],
+    *,
+    index_root: pathlib.Path,
+    retrieval_candidate: dict[str, Any],
+    stage1_k: int,
+) -> dict[str, Any]:
+    try:
+        dense_runtime = load_dense_retriever_runtime(
+            dict(candidate_runtime(retrieval_candidate).get("retriever", {}))
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "fallback_reason": str(exc),
+            "scores": {},
+            "ordered_run_ids": [],
+            "top_scores": [],
+            "stage1_k": stage1_k,
+        }
+
+    cache_root = dense_stage1_cache_root(index_root, retrieval_candidate)
+    query_embedding = encode_text(
+        query_text,
+        hash_dim=dense_runtime["hash_dim"],
+        feature_weights=dense_runtime["feature_weights"],
+        projection=dense_runtime["projection"],
+    )
+    ranked: list[tuple[str, float]] = []
+    for entry in entries:
+        if not entry.get("eligible"):
+            continue
+        embedding = _dense_stage1_embedding_for_entry(
+            cache_root,
+            entry,
+            dense_runtime=dense_runtime,
+        )
+        score = float(numpy.dot(query_embedding, embedding))
+        ranked.append((str(entry["run_id"]), round(score, 6)))
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    limited = ranked[: max(1, stage1_k)]
+    return {
+        "ok": True,
+        "fallback_reason": None,
+        "scores": {run_id: score for run_id, score in limited},
+        "ordered_run_ids": [run_id for run_id, _ in limited],
+        "top_scores": [
+            {"run_id": run_id, "dense_stage1_score": score}
+            for run_id, score in limited[:5]
+        ],
+        "stage1_k": stage1_k,
+        "cache_root": str(cache_root),
+    }
+
+
 def stage1_candidate_score(query: dict[str, Any], entry: dict[str, Any]) -> int:
     field_tokens = collections.Counter(entry.get("document_tokens", {}).get("view_text", {}))
     return lexical_score(query["candidate_tokens"], dict(field_tokens))
@@ -804,6 +971,7 @@ def score_index_entry(
     query: dict[str, Any],
     entry: dict[str, Any],
     retrieval_profile: dict[str, Any] | None = None,
+    retrieval_candidate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = retrieval_profile or load_retrieval_profile()
     weights = profile["field_weights"]
@@ -885,12 +1053,46 @@ def score_index_entry(
         score_breakdown["quality_prior"] += int(quality_prior["descriptive_artifact_bonus"])
 
     total_score = sum(score_breakdown.values())
+    candidate_features = {
+        **{key: float(value) for key, value in score_breakdown.items()},
+        "stage1_score": float(stage1_candidate_score(query, entry)),
+        "summary_token_count": float(quality.get("summary_token_count", 0)),
+        "claim_count": float(quality.get("claim_count", 0)),
+        "artifact_count": float(quality.get("artifact_count", 0)),
+        "evidence_backed_claim_count": float(quality.get("evidence_backed_claim_count", 0)),
+        "descriptive_artifact_count": float(quality.get("descriptive_artifact_count", 0)),
+    }
+    usefulness_probability = None
+    candidate_score = None
+    candidate_summary: dict[str, Any] = {}
+    effective_mode = effective_candidate_mode(retrieval_candidate)
+    if retrieval_candidate and effective_mode in {"shadow", "active"}:
+        runtime = candidate_runtime(retrieval_candidate)
+        reranker = dict(runtime.get("reranker", {}))
+        feature_weights = dict(reranker.get("feature_weights", {}))
+        bias = float(reranker.get("bias", 0.0))
+        linear_score = bias
+        for feature_name, feature_value in candidate_features.items():
+            linear_score += float(feature_weights.get(feature_name, 0.0)) * float(feature_value)
+        usefulness_probability = round(sigmoid(linear_score), 6)
+        candidate_score = usefulness_probability
+        candidate_summary = {
+            "candidate_id": retrieval_candidate.get("candidate_id"),
+            "mode": effective_mode,
+            "retriever_version": runtime.get("retriever_version"),
+            "reranker_version": runtime.get("reranker_version"),
+            "abstention_model_version": runtime.get("abstention_model_version"),
+        }
     return {
         "run_id": entry["run_id"],
         "total_score": total_score,
         "score_breakdown": score_breakdown,
         "phrase_hits": phrase_hits,
-        "stage1_score": stage1_candidate_score(query, entry),
+        "stage1_score": candidate_features["stage1_score"],
+        "candidate_score": candidate_score,
+        "usefulness_probability": usefulness_probability,
+        "candidate_features": candidate_features,
+        "candidate_summary": candidate_summary,
     }
 
 
@@ -900,21 +1102,50 @@ def rank_index_entries(
     *,
     retrieval_profile: dict[str, Any],
     max_candidates: int | None = None,
+    retrieval_candidate: dict[str, Any] | None = None,
+    prefer_candidate_scores: bool = False,
+    stage1_score_overrides: dict[str, float] | None = None,
+    use_stage1_overrides: bool = False,
 ) -> list[dict[str, Any]]:
     cutoff = int(retrieval_profile["stage1_candidate_cutoff"])
     if max_candidates is not None:
         cutoff = min(cutoff, int(max_candidates))
+    if retrieval_candidate:
+        selection = dict(candidate_runtime(retrieval_candidate).get("selection", {}))
+        cutoff = min(cutoff, int(selection.get("stage1_k", cutoff)))
 
     stage1_candidates: list[dict[str, Any]] = []
     for entry in entries:
         if not entry.get("eligible"):
             continue
-        scored = score_index_entry(query, entry, retrieval_profile=retrieval_profile)
-        if scored["stage1_score"] <= 0:
+        scored = score_index_entry(
+            query,
+            entry,
+            retrieval_profile=retrieval_profile,
+            retrieval_candidate=retrieval_candidate,
+        )
+        dense_stage1_score = None
+        if stage1_score_overrides is not None:
+            dense_stage1_score = stage1_score_overrides.get(str(entry["run_id"]))
+        if use_stage1_overrides:
+            if dense_stage1_score is None:
+                continue
+            stage1_selection_score = float(dense_stage1_score)
+        else:
+            if scored["stage1_score"] <= 0:
+                continue
+            stage1_selection_score = float(scored["stage1_score"])
+
+        scored_with_stage1 = {
+            **scored,
+            "stage1_selection_score": stage1_selection_score,
+            "dense_stage1_score": dense_stage1_score,
+        }
+        if scored_with_stage1["stage1_selection_score"] <= 0:
             continue
         stage1_candidates.append(
             {
-                **scored,
+                **scored_with_stage1,
                 "summary": str(entry.get("summary", "")),
                 "claims": list(entry.get("claims", [])),
                 "claim_records": list(entry.get("claim_records", [])),
@@ -924,16 +1155,38 @@ def rank_index_entries(
             }
         )
 
-    stage1_candidates.sort(key=lambda item: (-item["stage1_score"], item["run_id"]))
-    rerank_pool = stage1_candidates[:cutoff]
-    rerank_pool.sort(
-        key=lambda item: (
-            -item["total_score"],
-            -item["stage1_score"],
-            item["run_id"],
-        )
+    stage1_candidates.sort(
+        key=lambda item: (-float(item["stage1_selection_score"]), item["run_id"])
     )
+    rerank_pool = stage1_candidates[:cutoff]
+    if (
+        prefer_candidate_scores
+        and retrieval_candidate
+        and effective_candidate_mode(retrieval_candidate) == "active"
+    ):
+        rerank_pool.sort(
+            key=lambda item: (
+                -float(item.get("candidate_score") or 0.0),
+                -item["stage1_score"],
+                item["run_id"],
+            )
+        )
+    else:
+        rerank_pool.sort(
+            key=lambda item: (
+                -item["total_score"],
+                -item["stage1_score"],
+                item["run_id"],
+            )
+        )
     return rerank_pool
+
+
+def load_runtime_retrieval_candidate(
+    *,
+    repo_root: pathlib.Path | None = None,
+) -> dict[str, Any] | None:
+    return load_candidate_manifest("retrieval", repo_root=repo_root)
 
 
 def sync_retrieval_index(
@@ -946,15 +1199,27 @@ def sync_retrieval_index(
     index_ttl_seconds: int | None = None,
     max_index_entries: int | None = None,
     max_index_bytes: int | None = None,
+    ttl_seconds: int | None = None,
+    max_entries: int | None = None,
+    max_bytes: int | None = None,
     retrieval_mode: str | None = None,
 ) -> dict[str, Any]:
     runs_dir = runs_root(runs_dir)
     profile = retrieval_profile or load_retrieval_profile(repo_root=runs_dir.parent)
     index_root = retrieval_index_root_for_runs(runs_dir)
     retrieval_mode = retrieval_mode or "hybrid_v1"
-    ttl_seconds = _to_positive_int(index_ttl_seconds, default=INDEX_DEFAULT_TTL_SECONDS)
-    max_entries = _to_positive_int(max_index_entries, default=INDEX_DEFAULT_MAX_ENTRIES)
-    max_bytes = _to_positive_int(max_index_bytes, default=0)
+    ttl_seconds = _to_positive_int(
+        index_ttl_seconds if index_ttl_seconds is not None else ttl_seconds,
+        default=INDEX_DEFAULT_TTL_SECONDS,
+    )
+    max_entries = _to_positive_int(
+        max_index_entries if max_index_entries is not None else max_entries,
+        default=INDEX_DEFAULT_MAX_ENTRIES,
+    )
+    max_bytes = _to_positive_int(
+        max_index_bytes if max_index_bytes is not None else max_bytes,
+        default=0,
+    )
     had_index = index_root.exists()
     index_rebuild_count = 0
 

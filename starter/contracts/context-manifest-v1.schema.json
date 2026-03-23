@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/context-manifest-v1.schema.json",
+  "title": "Bitterless Harness Context Manifest v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "context_manifest_version",
+    "index_version",
+    "index_mode",
+    "selection_strategy",
+    "retrieval_profile_id",
+    "selected_count",
+    "empty_context"
+  ],
+  "properties": {
+    "context_manifest_version": {
+      "const": "v1"
+    },
+    "index_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "index_mode": {
+      "type": "string",
+      "minLength": 1
+    },
+    "selection_strategy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "retrieval_profile_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "retrieval_profile_fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "retrieval_candidate_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "retrieval_candidate_mode": {
+      "type": "string"
+    },
+    "retriever_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reranker_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "abstention_model_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selection_source": {
+      "type": "string"
+    },
+    "selected_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "selected_source_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "empty_context": {
+      "type": "boolean"
+    },
+    "abstained": {
+      "type": "boolean"
+    },
+    "abstention_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selected_source_run_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "top_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "selected_sources": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "candidate_shadow": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  }
+}

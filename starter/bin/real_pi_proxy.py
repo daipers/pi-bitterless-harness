@@ -19,6 +19,14 @@ def main() -> int:
     target_bin = os.environ.get("HARNESS_REAL_PI_BIN", "pi")
     mode = os.environ.get("HARNESS_REAL_PI_PROXY_MODE", "passthrough")
 
+    if "--version" in sys.argv:
+        completed = subprocess.run([target_bin, *sys.argv[1:]], check=False)
+        return completed.returncode
+
+    if mode == "startup-fail-always":
+        print("startup failed", file=sys.stderr)
+        return 75
+
     if mode == "startup-fail-once":
         sentinel_raw = os.environ.get("HARNESS_REAL_PI_PROXY_SENTINEL")
         if not sentinel_raw:

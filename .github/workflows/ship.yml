@@ -109,10 +109,35 @@ jobs:
           HARNESS_REAL_CANARY_SUMMARY_PATH: ${{ runner.temp }}/real-pi-canary.summary.json
         run: python3 starter/bin/run_real_canary.py
 
+      - name: Build main-branch benchmark bundle
+        run: |
+          python3 starter/bin/benchmark_harness.py \
+            --mode retrieval \
+            --out "${{ runner.temp }}/retrieval-benchmark.json"
+          python3 starter/bin/build_replay_corpus.py \
+            --runs-root starter/runs \
+            --out "${{ runner.temp }}/replay-corpus.json" \
+            --limit 12
+          python3 starter/bin/benchmark_harness.py \
+            --mode replay \
+            --replay-corpus "${{ runner.temp }}/replay-corpus.json" \
+            --replay-runs 6 \
+            --history-dir "${{ runner.temp }}/replay-history" \
+            --out "${{ runner.temp }}/replay-benchmark.json"
+          python3 starter/bin/benchmark_harness.py \
+            --mode fault-injection \
+            --fault-samples 10 \
+            --fault-seed 11 \
+            --fault-corpus-out "${{ runner.temp }}/fault-novel.json" \
+            --out "${{ runner.temp }}/fault-benchmark.json"
+
       - name: Verify main-branch evidence summary
         run: |
           python3 starter/bin/verify_release_evidence.py \
             --summary-glob "${{ runner.temp }}/real-pi-canary.summary.json" \
+            --benchmark-report "${{ runner.temp }}/retrieval-benchmark.json" \
+            --replay-report "${{ runner.temp }}/replay-benchmark.json" \
+            --fault-report "${{ runner.temp }}/fault-benchmark.json" \
             --min-runs 1 \
             --freshness-hours 36
 
@@ -120,7 +145,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: main-real-pi-evidence-summary
-          path: ${{ runner.temp }}/real-pi-canary.summary.json
+          path: |
+            ${{ runner.temp }}/real-pi-canary.summary.json
+            ${{ runner.temp }}/retrieval-benchmark.json
+            ${{ runner.temp }}/replay-corpus.json
+            ${{ runner.temp }}/replay-benchmark.json
+            ${{ runner.temp }}/fault-benchmark.json
+            ${{ runner.temp }}/fault-novel.json
+            ${{ runner.temp }}/replay-history
 
   tag-evidence-gate:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

@@ -18,7 +18,30 @@ done
 shellcheck "$script_dir"/*.sh
 ruff check "$repo_root/starter/bin" "$repo_root/tests"
 python3 -m pytest
-bandit -q -r "$repo_root/starter/bin"
+python3 - <<'PY' "$repo_root"
+import json
+import pathlib
+import sys
+
+import jsonschema
+
+repo_root = pathlib.Path(sys.argv[1])
+for rel_path in [
+    "starter/contracts/context-manifest-v1.schema.json",
+    "starter/contracts/benchmark-report-v1.schema.json",
+    "starter/contracts/release-gate-v1.schema.json",
+    "starter/contracts/trajectory-record-v1.schema.json",
+    "starter/contracts/retrieval-example-v1.schema.json",
+    "starter/contracts/retrieval-document-v1.schema.json",
+    "starter/contracts/policy-example-v1.schema.json",
+    "starter/contracts/model-example-v1.schema.json",
+    "starter/contracts/candidate-manifest-v1.schema.json",
+    "starter/contracts/candidate-report-v1.schema.json",
+]:
+    schema = json.loads((repo_root / rel_path).read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+PY
+bandit -q --ini "$repo_root/.bandit" -r "$repo_root/starter/bin"
 pip-audit -r "$repo_root/requirements-dev.txt"
 python3 "$script_dir/scan_secrets.py" "$repo_root"
 if [[ -f "$repo_root/Dockerfile" ]]; then

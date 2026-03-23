@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/candidate-report-v1.schema.json",
+  "title": "Bitterless Harness Candidate Report v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "candidate_report_version",
+    "generated_at",
+    "candidate_type",
+    "candidate_id",
+    "overall_pass"
+  ],
+  "properties": {
+    "candidate_report_version": {
+      "const": "v1"
+    },
+    "generated_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_type": {
+      "enum": [
+        "retrieval",
+        "policy",
+        "model",
+        "bundle"
+      ]
+    },
+    "candidate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "enum": [
+        "off",
+        "shadow",
+        "active"
+      ]
+    },
+    "overall_pass": {
+      "type": "boolean"
+    },
+    "promotion_summary": {
+      "type": "object"
+    },
+    "metrics": {
+      "type": "object"
+    }
+  }
+}

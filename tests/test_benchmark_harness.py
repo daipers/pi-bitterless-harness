@@ -6,6 +6,8 @@ import pathlib
 import subprocess
 import sys
 
+from learninglib import build_candidate_manifest, write_candidate_manifest
+
 
 def test_benchmark_harness_emits_retrieval_relevance_metrics(
     isolated_repo: pathlib.Path,
@@ -21,21 +23,71 @@ def test_benchmark_harness_emits_retrieval_relevance_metrics(
     )
 
     payload = json.loads(completed.stdout)
+    assert payload["benchmark_report_version"] == "v1"
     retrieval = payload["retrieval"]
     assert retrieval["scenario_count"] == 8
     assert retrieval["top_1_hit_rate"] >= 0
     assert retrieval["top_3_hit_rate"] >= retrieval["top_1_hit_rate"]
     assert retrieval["abstention_hit_rate"] >= 0
     assert retrieval["empty_context_rate"] >= 0
+    assert retrieval["empty_context_precision"] >= 0
     assert retrieval["mean_selected_source_count"] >= 0
     assert retrieval["mean_selected_score"] >= 0
     assert retrieval["hard_negative_win_rate"] >= 0
+    assert retrieval["copied_artifact_usefulness_rate"] >= 0
+    assert retrieval["hallucinated_evidence_rate"] >= 0
     assert retrieval["retrieval_profile_id"] == "retrieval-v4-default"
+    assert retrieval["retrieval_profile_fingerprint"]
     assert retrieval["cold_build_ms"] >= 0
     assert retrieval["warm_reuse_ms"] >= 0
     assert retrieval["cold_index_mode"] == "cold_build"
     assert retrieval["warm_index_mode"] == "warm_reuse"
+    assert isinstance(retrieval["threshold_results"], dict)
     assert len(retrieval["scenario_results"]) == 8
+
+
+def test_benchmark_harness_includes_candidate_bundle_metadata(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    candidate_path = starter / "candidates" / "retrieval" / "active.json"
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    write_candidate_manifest(
+        candidate_path,
+        build_candidate_manifest(
+            candidate_type="retrieval",
+            candidate_id="retrieval-candidate-1",
+            mode="active",
+            runtime={
+                "retriever_version": "embedding-ann-v1",
+                "reranker_version": "linear-reranker-v1",
+                "abstention_model_version": "logistic-v1",
+            },
+        ),
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(starter / "bin" / "benchmark_harness.py"),
+            "--mode",
+            "retrieval",
+            "--retrieval-candidate",
+            str(candidate_path),
+            "--candidate-bundle-id",
+            "bundle-1",
+        ],
+        cwd=starter,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"PYTHONPATH": str(starter / "bin")},
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["candidate_bundle_id"] == "bundle-1"
+    assert payload["promotion_summary"]["bundle_id"] == "bundle-1"
+    assert payload["promotion_summary"]["candidate_types"]["retrieval"] == "retrieval-candidate-1"
+    assert payload["candidates"]["retrieval"]["candidate_id"] == "retrieval-candidate-1"
 
 
 def test_analyze_retrieval_benchmarks_records_history_and_emits_trend(

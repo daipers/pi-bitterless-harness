@@ -72,7 +72,10 @@ def candidate_sort_key(result: dict[str, Any]) -> tuple[Any, ...]:
         -float(metrics["hard_negative_win_rate"]),
         -float(metrics["top_1_hit_rate"]),
         -float(metrics["abstention_hit_rate"]),
+        -float(metrics["empty_context_precision"]),
         -float(metrics["top_3_hit_rate"]),
+        -float(metrics["copied_artifact_usefulness_rate"]),
+        float(metrics["hallucinated_evidence_rate"]),
         float(metrics["mean_selected_source_count"]),
         result["profile"]["profile_id"],
     )
@@ -163,7 +166,10 @@ def main() -> None:
                         "hard_negative_win_rate",
                         "top_1_hit_rate",
                         "abstention_hit_rate",
+                        "empty_context_precision",
                         "top_3_hit_rate",
+                        "copied_artifact_usefulness_rate",
+                        "hallucinated_evidence_rate",
                         "mean_selected_source_count",
                     ]
                 },

@@ -1,0 +1,7 @@
+[bandit]
+# Intentional skips for this local file-based harness:
+# - B105: false positives on booleans/threshold fields
+# - B110/B112: best-effort cleanup and lossy JSONL parsing paths
+# - B311: deterministic benchmark sampling is deliberate
+# - B404/B603/B607: subprocess orchestration of pinned local tools is core behavior
+skips = B105,B110,B112,B311,B404,B603,B607

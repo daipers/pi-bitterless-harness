@@ -49,6 +49,30 @@ Treat the recent canary history as the primary promotion signal. Before tagging 
 python3 starter/bin/verify_release_evidence.py --summary-glob "starter/runs/real-canary-*.summary.json" --min-runs 2 --freshness-hours 36
 ```
 
+Promotion-ready release evidence should also include the benchmark report and provenance file:
+
+```bash
+python3 starter/bin/verify_release_evidence.py \
+  --summary-glob "starter/runs/real-canary-*.summary.json" \
+  --benchmark-report starter/runs/retrieval-latest.json \
+  --replay-report starter/runs/replay-latest.json \
+  --fault-report starter/runs/fault-latest.json \
+  --provenance-file dist/pi-bitterless-harness-$(cat VERSION).provenance.json \
+  --min-runs 2 \
+  --freshness-hours 36 \
+  --out dist/pi-bitterless-harness-$(cat VERSION).release-gate.json
+```
+
+Build the release bundle from the supported runtime only, and attach the full evidence set:
+
+```bash
+HARNESS_BENCHMARK_REPORT=starter/runs/retrieval-latest.json \
+HARNESS_REPLAY_REPORT=starter/runs/replay-latest.json \
+HARNESS_FAULT_REPORT=starter/runs/fault-latest.json \
+HARNESS_CANARY_SUMMARY_GLOB="starter/runs/real-canary-*.summary.json" \
+starter/bin/build-release-artifacts.sh
+```
+
 ## Operational defaults
 
 - `HARNESS_STRICT_MODE=1`
@@ -85,6 +109,10 @@ The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use
 - Mine harder benchmark proposals with `python3 starter/bin/mine_harder_retrieval_benchmarks.py`
 - Sweep offline retrieval profiles with `python3 starter/bin/sweep_retrieval_profiles.py`
 - Analyze benchmark snapshots with `python3 starter/bin/analyze_retrieval_benchmarks.py`
+- Build learning datasets with `python3 starter/bin/build_learning_datasets.py`
+- Train retrieval candidates with `python3 starter/bin/train_retrieval_candidate.py`
+- Evaluate and promote retrieval candidates with `python3 starter/bin/evaluate_retrieval_candidate.py`
+- Build candidate reports with `python3 starter/bin/build_candidate_report.py`
 - Restore an archived run with `starter/bin/restore-run-evidence.sh`
 - Partial reruns are automatically moved into `runs/<run-id>/recovery/<timestamp>/`
 - Recovery evidence is included in secret scanning; reruns fail if archived recovery artifacts
@@ -92,6 +120,7 @@ The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use
 - Imported retrieval payloads under `context/source-runs/` are treated as historical references and
   are excluded from current-run secret scanning
 - Review `outputs/run_manifest.json`, `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` before signing off a canary
+- Treat missing fresh canary summaries, retrieval benchmark output, replay benchmark output, or fault-injection benchmark output as a release blocker
 
 ## Real canary expectations
 
@@ -129,6 +158,8 @@ Run replay/load and generated fault-injection benchmarks:
 python3 starter/bin/benchmark_harness.py --mode replay --replay-corpus starter/benchmarks/replay-corpus.json --history-dir starter/runs --out starter/runs/replay-latest.json
 python3 starter/bin/benchmark_harness.py --mode fault-injection --fault-samples 6 --fault-seed 7 --fault-corpus-out starter/runs/fault-novel.json --out starter/runs/fault-latest.json
 ```
+
+`prepare-context.py` now emits the `context-manifest-v1` sidecar, `benchmark_harness.py` emits the `benchmark-report-v1` contract, and `verify_release_evidence.py` emits the `release-gate-v1` artifact for promotion decisions.
 
 ## Security posture
 

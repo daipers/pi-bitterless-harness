@@ -345,6 +345,52 @@ def test_collect_evaluations_defaults_failed_eval_classification(
     assert result.evaluations == ({"passed": False},)
 
 
+def test_collect_evaluations_enforces_max_eval_command_limit(
+    isolated_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    context = make_context(tmp_path, isolated_repo=isolated_repo)
+    score_dir = tmp_path / "score"
+    score_dir.mkdir()
+    monkeypatch.setattr(
+        score_run,
+        "run_evaluation",
+        lambda *args, **kwargs: {
+            "raw": "python3 one.py",
+            "passed": True,
+            "blocked": False,
+            "stderr": "",
+        },
+    )
+
+    result = score_run._collect_evaluations(
+        context,
+        {
+            "ok": True,
+            "eval_command_details": [
+                {"argv": ["python3", "one.py"], "raw": "python3 one.py"},
+                {"argv": ["python3", "two.py"], "raw": "python3 two.py"},
+            ],
+        },
+        max_eval_commands=1,
+        eval_timeout_seconds=1,
+        allow_dangerous_eval=True,
+        allow_network_tasks=True,
+    )
+
+    assert result.failure_classifications == frozenset({"eval_command_limit_exceeded"})
+    assert len(result.evaluations) == 2
+    assert result.evaluations[0]["raw"] == "python3 one.py"
+    assert result.evaluations[1]["blocked"] is True
+    assert result.evaluations[1]["failure_classification"] == "eval_command_limit_exceeded"
+    assert result.evaluations[1]["stderr_path"] == "score/eval-2.stderr.log"
+    assert (score_dir / "eval-2.stdout.log").read_text(encoding="utf-8") == ""
+    assert (score_dir / "eval-2.stderr.log").read_text(
+        encoding="utf-8"
+    ) == "max eval command limit exceeded (1)\n"
+
+
 def test_score_run_happy_path(isolated_repo: pathlib.Path) -> None:
     run_dir = make_run_dir(isolated_repo)
     (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
@@ -527,6 +573,7 @@ def test_score_run_contract_matrix_controls_execution_profile_and_policy(
 
 def test_score_run_includes_selected_source_count_and_empty_context(
     isolated_repo: pathlib.Path,
+    monkeypatch,
 ) -> None:
     run_dir = make_run_dir(isolated_repo, execution_profile="capability")
     (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
@@ -535,6 +582,12 @@ def test_score_run_includes_selected_source_count_and_empty_context(
         json.dumps(
             {
                 "retrieval_profile_id": "retrieval-v4-default",
+                "retrieval_candidate_id": "retrieval-linear-1",
+                "retrieval_candidate_mode": "active",
+                "retriever_version": "embedding-ann-v1",
+                "reranker_version": "linear-reranker-v1",
+                "abstention_model_version": "logistic-v1",
+                "selection_source": "candidate",
                 "selected_count": 1,
                 "selected_source_count": 1,
                 "empty_context": False,
@@ -564,14 +617,32 @@ def test_score_run_includes_selected_source_count_and_empty_context(
         encoding="utf-8",
     )
     (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_RETRIEVAL_CANDIDATE_ID", "retrieval-linear-1")
+    monkeypatch.setenv("HARNESS_RETRIEVAL_CANDIDATE_MODE", "active")
+    monkeypatch.setenv("HARNESS_POLICY_CANDIDATE_ID", "policy-gbdt-1")
+    monkeypatch.setenv("HARNESS_POLICY_CANDIDATE_MODE", "shadow")
+    monkeypatch.setenv("HARNESS_MODEL_CANDIDATE_ID", "model-distilled-1")
+    monkeypatch.setenv("HARNESS_MODEL_CANDIDATE_MODE", "active")
+    monkeypatch.setenv("HARNESS_MODEL_SELECTED_MODEL", "openai/gpt-5.4-mini")
+    monkeypatch.setenv("HARNESS_MODEL_FALLBACK_MODEL", "anthropic/claude-sonnet-4")
 
     payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
 
     assert payload["retrieval"]["enabled"] is True
+    assert payload["retrieval"]["context_manifest_version"] is None
     assert payload["retrieval"]["retrieval_profile_id"] == "retrieval-v4-default"
+    assert payload["retrieval"]["retrieval_candidate_id"] == "retrieval-linear-1"
+    assert payload["retrieval"]["selection_source"] == "candidate"
     assert payload["retrieval"]["selected_count"] == 1
     assert payload["retrieval"]["selected_source_count"] == 1
     assert payload["retrieval"]["empty_context"] is False
+    assert payload["candidates"]["policy"]["candidate_id"] == "policy-gbdt-1"
+    assert payload["candidates"]["model"]["selected_model"] == "openai/gpt-5.4-mini"
+    assert payload["promotion_summary"]["candidates"]["retrieval"]["candidate_id"] == (
+        "retrieval-linear-1"
+    )
+    assert payload["benchmark_eligibility"]["eligible"] is True
+    assert payload["promotion_summary"]["eligible_release_signal"] is True
 
 
 def test_score_run_reports_invalid_result(isolated_repo: pathlib.Path) -> None:
@@ -929,5 +1000,35 @@ def test_score_run_records_retrieval_provenance(
     assert payload["retrieval"]["candidate_run_count"] == 5
     assert payload["retrieval"]["eligible_run_count"] == 4
     assert payload["retrieval"]["selected_count"] == 2
+    assert payload["retrieval"]["abstained"] is None
     assert payload["retrieval"]["ranking_latency_ms"] == 1.25
     assert payload["retrieval"]["artifact_bytes_copied"] == 99
+
+
+def test_score_run_marks_missing_evidence_as_benchmark_ineligible(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = make_run_dir(isolated_repo)
+    (run_dir / "outputs" / "claim.txt").write_text("ok\n", encoding="utf-8")
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "x-interface-version": "v1",
+                "status": "success",
+                "summary": "all good",
+                "artifacts": [{"path": "outputs/claim.txt", "description": "proof"}],
+                "claims": [{"claim": "ok", "evidence": []}],
+                "remaining_risks": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "pi.exit_code.txt").write_text("0\n", encoding="utf-8")
+
+    payload = score_run.build_score_payload(make_context(run_dir, isolated_repo=isolated_repo))
+
+    assert payload["overall_pass"] is True
+    assert payload["benchmark_eligibility"]["eligible"] is False
+    assert "missing_evidence_backed_claim" in payload["benchmark_eligibility"]["reasons"]
+    assert payload["promotion_summary"]["eligible_release_signal"] is False

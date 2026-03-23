@@ -1187,7 +1187,7 @@ class Orchestrator:
         queue_entries = self._load_queue_entries("run")
         queued_run_ids: set[str] = set()
         for run_id, entry in queue_entries.items():
-            if self._is_queue_state_terminal(_extract_queue_state(entry.get("state"))):
+            if _is_queue_state_terminal(_extract_queue_state(entry.get("state"))):
                 continue
             run_dir = pathlib.Path(str(entry.get("run_dir", "")))
             if not run_dir.exists() or not run_dir.is_dir():
@@ -1233,7 +1233,7 @@ class Orchestrator:
                 self._handle_queue_timeout(run_dir, score=False)
                 continue
 
-            if not queue_state or not self._is_queue_state_terminal(queue_state):
+            if not queue_state or not _is_queue_state_terminal(queue_state):
                 if state in {STATE_SCORE_PENDING, STATE_MODEL_COMPLETE}:
                     continue
                 queued_run_ids.add(run_id)
@@ -1557,7 +1557,7 @@ class Orchestrator:
                 continue
 
             if code in {0, 124} and state in {STATE_SCORE_PENDING, STATE_MODEL_COMPLETE}:
-                self._append_run_event(
+                _append_run_event(
                     worker.run_dir,
                     "model_complete",
                     "model run produced score-required output",
@@ -1584,7 +1584,7 @@ class Orchestrator:
                 continue
 
             if code == 0 and state == STATE_COMPLETE:
-                self._append_run_event(
+                _append_run_event(
                     worker.run_dir,
                     "model_complete",
                     "model run completed and score already resolved by run task",
@@ -1669,7 +1669,7 @@ class Orchestrator:
             del self._running_score[run_id]
             payload = _read_json(worker.run_dir / "score.json")
             if code == 0 and payload.get("overall_pass", False):
-                self._append_run_event(
+                _append_run_event(
                     worker.run_dir,
                     "score_complete",
                     "score worker completed successfully",

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/model-example-v1.schema.json",
+  "title": "Bitterless Harness Model Example v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "model_example_version",
+    "example_id",
+    "task",
+    "target"
+  ],
+  "properties": {
+    "model_example_version": {
+      "const": "v1"
+    },
+    "example_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task": {
+      "type": "object"
+    },
+    "context": {
+      "type": "object"
+    },
+    "trajectory": {
+      "type": "object"
+    },
+    "target": {
+      "type": "object"
+    }
+  }
+}

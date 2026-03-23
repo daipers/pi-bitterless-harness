@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/candidate-manifest-v1.schema.json",
+  "title": "Bitterless Harness Candidate Manifest v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "candidate_manifest_version",
+    "candidate_type",
+    "candidate_id",
+    "mode",
+    "created_at",
+    "artifact_fingerprint",
+    "training_dataset_fingerprints",
+    "evaluation_dataset_fingerprints",
+    "runtime",
+    "promotion"
+  ],
+  "properties": {
+    "candidate_manifest_version": {
+      "const": "v1"
+    },
+    "candidate_type": {
+      "enum": [
+        "retrieval",
+        "policy",
+        "model",
+        "bundle"
+      ]
+    },
+    "candidate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundle_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "off",
+        "shadow",
+        "active"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "training_dataset_fingerprints": {
+      "type": "object"
+    },
+    "evaluation_dataset_fingerprints": {
+      "type": "object"
+    },
+    "runtime": {
+      "type": "object"
+    },
+    "promotion": {
+      "type": "object"
+    }
+  }
+}

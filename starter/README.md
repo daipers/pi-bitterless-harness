@@ -26,7 +26,9 @@ starter/bin/setup-dev-env.sh
 
 This creates `.venv/` and installs the Python tooling that `starter/bin/preflight.sh`
 expects. The ship gate automatically prefers `.venv/bin` when it exists, so you do not
-need to activate the virtual environment first.
+need to activate the virtual environment first. `starter/bin/setup-dev-env.sh` now
+fails fast if the supported Python `3.12.x` runtime is not available, rather than
+creating a mismatched environment.
 
 Supported local readiness workflow:
 
@@ -38,6 +40,15 @@ starter/bin/preflight.sh
 ```
 
 CI installs the full ship-gate toolchain, including `shellcheck`, `jq`, `trivy`, and the pinned `pi` version from `PI_VERSION`, before running `starter/bin/preflight.sh`.
+
+## Architecture planes
+
+The harness keeps the runtime path thin and moves most new capability into typed evidence and promotion checks:
+
+- Runtime plane: execution, scoring, guardrails, retries, secret scanning, and artifact validation
+- Evidence plane: run artifacts, replay corpora, canary summaries, provenance, and promotion bundles
+- Learning plane: retrieval indexing, profile sweeps, hard-negative mining, and benchmark reports
+- Promotion plane: runtime verification, benchmark thresholds, canary freshness, and release gates
 
 ## Supported runtime policy
 
@@ -55,6 +66,18 @@ CI installs the full ship-gate toolchain, including `shellcheck`, `jq`, `trivy`,
 - `result.schema.json`
 - `contracts/run-contract-v1.schema.json`
 - `contracts/run-contract-v2.schema.json`
+- `contracts/run-manifest-v1.schema.json`
+- `contracts/score-v1.schema.json`
+- `contracts/context-manifest-v1.schema.json`
+- `contracts/benchmark-report-v1.schema.json`
+- `contracts/release-gate-v1.schema.json`
+- `contracts/trajectory-record-v1.schema.json`
+- `contracts/retrieval-example-v1.schema.json`
+- `contracts/retrieval-document-v1.schema.json`
+- `contracts/policy-example-v1.schema.json`
+- `contracts/model-example-v1.schema.json`
+- `contracts/candidate-manifest-v1.schema.json`
+- `contracts/candidate-report-v1.schema.json`
 - `policies/strict.json`
 - `policies/capability.json`
 - `bin/check-run-contract.sh` (must be executable)
@@ -283,6 +306,48 @@ python3 starter/bin/benchmark_harness.py --mode retrieval --out starter/runs/ret
 python3 starter/bin/analyze_retrieval_benchmarks.py starter/runs/retrieval-latest.json --history-dir starter/runs
 ```
 
+Train a retrieval candidate from learning examples:
+
+```bash
+python3 starter/bin/train_retrieval_candidate.py \
+  --examples starter/learning/latest/retrieval-examples.jsonl \
+  --out starter/candidates/retrieval/active.json
+```
+
+Evaluate the retrieval candidate against the baseline and optionally promote it:
+
+```bash
+python3 starter/bin/evaluate_retrieval_candidate.py \
+  --candidate starter/candidates/retrieval/active.json \
+  --harness-root starter \
+  --out starter/runs/retrieval-candidate-report.json \
+  --promote-if-passed
+```
+
+Build immutable learning datasets from run evidence:
+
+```bash
+python3 starter/bin/build_learning_datasets.py --runs-root starter/runs --out-root starter/learning/latest
+```
+
+This emits:
+
+- `trajectory-records.jsonl`
+- `retrieval-examples.jsonl`
+- `retrieval-documents.jsonl`
+- `policy-examples.jsonl`
+- `model-examples.jsonl`
+
+Convert a candidate manifest plus benchmark output into a typed promotion artifact:
+
+```bash
+python3 starter/bin/build_candidate_report.py \
+  --candidate-type retrieval \
+  --candidate starter/candidates/retrieval/active.json \
+  --benchmark-report starter/runs/retrieval-latest.json \
+  --out starter/runs/retrieval-candidate-latest.json
+```
+
 ## Real `pi` coverage and canaries
 
 Operator-controlled production readiness should be justified primarily by recent real-`pi` canary history and replayable production-like evidence, not fixture-only coverage.
@@ -319,6 +384,31 @@ python3 starter/bin/benchmark_harness.py --mode replay --replay-corpus starter/b
 python3 starter/bin/benchmark_harness.py --mode fault-injection --fault-samples 6 --fault-seed 7 --fault-corpus-out starter/runs/fault-novel.json --out starter/runs/fault-latest.json
 ```
 
+`benchmark_harness.py` now emits the `benchmark-report-v1` sidecar contract with threshold results and an `overall_pass` promotion signal.
+
+## Release gate evidence
+
+Verify canary freshness, benchmark thresholds, and release provenance as one typed artifact:
+
+```bash
+python3 starter/bin/verify_release_evidence.py \
+  --summary-glob "starter/runs/real-canary-*.summary.json" \
+  --benchmark-report starter/runs/retrieval-latest.json \
+  --replay-report starter/runs/replay-latest.json \
+  --fault-report starter/runs/fault-latest.json \
+  --provenance-file dist/pi-bitterless-harness-$(cat VERSION).provenance.json \
+  --min-runs 2 \
+  --freshness-hours 36 \
+  --out dist/pi-bitterless-harness-$(cat VERSION).release-gate.json
+```
+
+If `HARNESS_BENCHMARK_REPORT` and `HARNESS_CANARY_SUMMARY_GLOB` are set, `starter/bin/build-release-artifacts.sh` also emits:
+
+- `dist/<artifact>.release-gate.json`
+- `dist/<artifact>.promotion-bundle.json`
+
+Set `HARNESS_REPLAY_REPORT` and `HARNESS_FAULT_REPORT` as well when building a promotion-ready bundle so replay and fault-injection evidence are attached to the same release package.
+
 For automation-facing failure handling, use `outputs/run_manifest.json.primary_error_code` and `outputs/run_manifest.json.failure_classifications`. The legacy aggregate `error_code` remains for compatibility, and the raw evidence in `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` remains the richer source of truth.
 
 ## Release Gate
@@ -330,6 +420,10 @@ starter/bin/setup-dev-env.sh
 starter/bin/check-supported-runtime.sh
 .venv/bin/python -m pytest
 starter/bin/preflight.sh
+HARNESS_BENCHMARK_REPORT=starter/runs/retrieval-latest.json \
+HARNESS_REPLAY_REPORT=starter/runs/replay-latest.json \
+HARNESS_FAULT_REPORT=starter/runs/fault-latest.json \
+HARNESS_CANARY_SUMMARY_GLOB="starter/runs/real-canary-*.summary.json" \
 starter/bin/build-release-artifacts.sh
 ```
 

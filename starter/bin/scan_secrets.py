@@ -13,22 +13,19 @@ def collect_files(root: pathlib.Path) -> list[pathlib.Path]:
     for child in root.rglob("*"):
         if child.is_dir():
             continue
-        if any(
-            part
-            in {
-                "home",
-                "session",
-                ".git",
-                "node_modules",
-                ".pytest_cache",
-                ".ruff_cache",
-                ".hypothesis",
-                ".venv",
-                "__pycache__",
-                "dist",
-            }
-            for part in child.parts
-        ):
+        ignored_parts = {
+            "home",
+            "session",
+            ".git",
+            "node_modules",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".hypothesis",
+            ".venv",
+            "__pycache__",
+            "dist",
+        }
+        if any(part in ignored_parts or part.startswith(".venv-") for part in child.parts):
             continue
         paths.append(child)
     return paths

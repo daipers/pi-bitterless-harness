@@ -12,9 +12,12 @@ SUMMARY_METRIC_KEYS = (
     "top_3_hit_rate",
     "abstention_hit_rate",
     "empty_context_rate",
+    "empty_context_precision",
     "mean_selected_source_count",
     "mean_selected_score",
     "hard_negative_win_rate",
+    "copied_artifact_usefulness_rate",
+    "hallucinated_evidence_rate",
 )
 
 

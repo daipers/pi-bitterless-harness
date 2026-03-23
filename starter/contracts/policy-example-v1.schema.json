@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/policy-example-v1.schema.json",
+  "title": "Bitterless Harness Policy Example v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "policy_example_version",
+    "example_id",
+    "features",
+    "labels"
+  ],
+  "properties": {
+    "policy_example_version": {
+      "const": "v1"
+    },
+    "example_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "features": {
+      "type": "object"
+    },
+    "labels": {
+      "type": "object"
+    }
+  }
+}

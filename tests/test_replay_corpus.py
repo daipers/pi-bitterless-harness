@@ -63,7 +63,7 @@ def test_build_replay_corpus_redacts_and_sorts(tmp_path: pathlib.Path) -> None:
         runs_root,
         "run-b",
         transcript_line="Authorization: Bearer secret-token",
-        stderr_line="token=super-secret",
+        stderr_line="Authorization: Bearer super-secret",
         primary_error_code="model_invocation_failed",
         failure_classifications=["model_invocation_failed"],
     )
@@ -88,7 +88,10 @@ def test_build_replay_corpus_redacts_and_sorts(tmp_path: pathlib.Path) -> None:
     assert "[redacted]" in "\n".join(records[0]["evidence"]["task_excerpt"])
     assert "[redacted]" in "\n".join(records[0]["evidence"]["transcript_excerpt"])
     assert "[redacted]" in "\n".join(records[1]["evidence"]["stderr_excerpt"])
+    combined_event_excerpt = (
+        records[0]["evidence"]["event_excerpt"] + records[1]["evidence"]["event_excerpt"]
+    )
     assert all(
         "context/source-runs/" not in line
-        for line in records[0]["evidence"]["event_excerpt"] + records[1]["evidence"]["event_excerpt"]
+        for line in combined_event_excerpt
     )

@@ -7,7 +7,6 @@ import pathlib
 import re
 from typing import Any
 
-
 SECRET_PATTERNS = [
     re.compile(r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._-]+"),
     re.compile(r"(?i)(api[_-]?key['\"]?\s*[:=]\s*['\"]?)[^'\"\s]+"),
@@ -18,7 +17,9 @@ SECRET_PATTERNS = [
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a sanitized replay corpus from run evidence.")
+    parser = argparse.ArgumentParser(
+        description="Build a sanitized replay corpus from run evidence."
+    )
     parser.add_argument("--runs-root", default=None)
     parser.add_argument("--out", required=True)
     parser.add_argument("--limit", type=int, default=50)

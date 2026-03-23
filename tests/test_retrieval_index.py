@@ -149,3 +149,65 @@ python3 ../tests/fixtures/pass_eval.py
         == "comet-lattice proof\n"
     )
     assert "outputs/comet-proof.txt" in concrete_entry["retrieval_view"]["text"]
+
+
+def test_build_index_entry_skips_benchmark_ineligible_runs(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    schema_text = (starter / "result.schema.json").read_text(encoding="utf-8")
+    task_body = f"""# Task
+Improve harness retrieval
+
+## Goal
+Produce a passing score for harness retrieval.
+
+## Constraints
+- Stay local.
+
+## Done
+- Score is written.
+
+## Eval
+```bash
+python3 ../tests/fixtures/pass_eval.py
+```
+
+## Required Artifacts
+- result.json
+- outputs/run_manifest.json
+
+## Result JSON schema (source of truth)
+```json
+{schema_text.strip()}
+```
+"""
+    run_dir = starter / "runs" / "20260322-090003-ineligible"
+    write_capability_run(run_dir, task_body=task_body)
+    (run_dir / "result.schema.json").write_text(schema_text, encoding="utf-8")
+    write_result_payload(
+        run_dir,
+        summary="retrieval scoring success",
+        claims=[{"claim": "retrieval helped", "evidence": ["outputs/proof.txt"]}],
+        artifacts=[{"path": "outputs/proof.txt", "description": "proof artifact"}],
+        artifact_contents={"outputs/proof.txt": "proof\n"},
+    )
+    (run_dir / "score.json").write_text(
+        json.dumps(
+            {
+                "overall_pass": True,
+                "benchmark_eligibility": {
+                    "eligible": False,
+                    "reasons": ["secret_scan_findings"],
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    entry = build_index_entry(run_dir)
+
+    assert entry["eligible"] is False
+    assert entry["skip_reason"] == "benchmark_ineligible"

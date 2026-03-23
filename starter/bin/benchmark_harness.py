@@ -8,7 +8,7 @@ import pathlib
 import random
 import shutil
 import statistics
-import subprocess  # nosec B404 - harness benchmark uses fixed local subprocess invocations
+import subprocess
 import sys
 import tempfile
 import time
@@ -17,6 +17,7 @@ from typing import Any
 from build_replay_corpus import excerpt_lines
 from harnesslib import default_run_contract
 from harvester import harvest
+from learninglib import candidate_summary, load_candidate_manifest
 from retrieval_index import load_retrieval_profile
 
 SUMMARY_METRIC_KEYS = (
@@ -24,10 +25,30 @@ SUMMARY_METRIC_KEYS = (
     "top_3_hit_rate",
     "abstention_hit_rate",
     "empty_context_rate",
+    "empty_context_precision",
     "mean_selected_source_count",
     "mean_selected_score",
     "hard_negative_win_rate",
+    "copied_artifact_usefulness_rate",
+    "hallucinated_evidence_rate",
 )
+
+DEFAULT_THRESHOLDS = {
+    "retrieval": {
+        "top_1_hit_rate": 0.5,
+        "hard_negative_win_rate": 0.75,
+        "abstention_hit_rate": 0.75,
+        "empty_context_precision": 0.75,
+        "hallucinated_evidence_rate": 0.25,
+    },
+    "replay": {
+        "pass_rate_percent": 0.5,
+        "retry_recovery_rate": 0.5,
+    },
+    "fault_injection": {
+        "novel_failure_records": 1,
+    },
+}
 
 
 def create_benchmark_run(
@@ -98,7 +119,10 @@ def benchmark_run_task(harness_root: pathlib.Path, fake_pi: pathlib.Path) -> dic
 
 
 def load_json(path: pathlib.Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def write_task(
@@ -252,6 +276,12 @@ def build_scenario_result(
     selected_score = 0.0
     if selected_sources:
         selected_score = float(selected_sources[0].get("total_score", 0))
+    copied_file_count = 0
+    copied_claim_evidence_count = 0
+    for source in selected_sources:
+        copy_summary = source.get("copy_summary", {})
+        copied_file_count += int(copy_summary.get("copied_file_count", 0))
+        copied_claim_evidence_count += int(copy_summary.get("claim_evidence_copy_count", 0))
 
     hard_negative_run_ids = [
         str(item)
@@ -311,6 +341,10 @@ def build_scenario_result(
         "selected_source_count": selected_source_count,
         "empty_context": empty_context,
         "selected_score": round(selected_score, 2),
+        "copied_file_count": copied_file_count,
+        "copied_claim_evidence_count": copied_claim_evidence_count,
+        "useful_copied_evidence": copied_claim_evidence_count > 0,
+        "hallucinated_evidence": selected_source_count > 0 and copied_claim_evidence_count == 0,
         "top_candidate_run_ids": top_ids,
         "top_1_hit": top_1_hit,
         "top_3_hit": top_3_hit,
@@ -339,6 +373,7 @@ def benchmark_retrieval(
     harness_root: pathlib.Path,
     *,
     profile_path: pathlib.Path | None = None,
+    retrieval_candidate_path: pathlib.Path | None = None,
 ) -> dict[str, object]:
     schema_text = (harness_root / "result.schema.json").read_text(encoding="utf-8").rstrip()
     runs_root = harness_root / "runs"
@@ -349,6 +384,13 @@ def benchmark_retrieval(
         profile = load_retrieval_profile(profile_path)
     else:
         profile = load_retrieval_profile(repo_root=harness_root)
+    retrieval_candidate = (
+        load_candidate_manifest("retrieval", retrieval_candidate_path, repo_root=harness_root)
+        if retrieval_candidate_path is not None
+        else load_candidate_manifest("retrieval", repo_root=harness_root)
+    )
+    if retrieval_candidate_path is not None:
+        env["HARNESS_RETRIEVAL_CANDIDATE_PATH"] = str(retrieval_candidate_path)
     corpus = load_retrieval_corpus(harness_root)
 
     cold_ms = 0.0
@@ -418,10 +460,13 @@ def benchmark_retrieval(
 
     positive_results = [item for item in scenario_results if not item["expected_empty_context"]]
     abstention_results = [item for item in scenario_results if item["expected_empty_context"]]
+    actual_empty_results = [item for item in scenario_results if item["empty_context"]]
+    nonempty_results = [item for item in scenario_results if not item["empty_context"]]
 
     retrieval: dict[str, Any] = {
         "scenario_count": len(scenario_results),
         "retrieval_profile_id": profile["profile_id"],
+        "retrieval_profile_fingerprint": profile["profile_fingerprint"],
         "top_1_hit_rate": round_rate(
             sum(1 for item in positive_results if item["top_1_hit"]),
             len(positive_results),
@@ -438,6 +483,10 @@ def benchmark_retrieval(
             sum(1 for item in scenario_results if item["empty_context"]),
             len(scenario_results),
         ),
+        "empty_context_precision": round_rate(
+            sum(1 for item in actual_empty_results if item["expected_empty_context"]),
+            len(actual_empty_results),
+        ),
         "mean_selected_source_count": round_mean(
             [int(item["selected_source_count"]) for item in scenario_results]
         ),
@@ -448,11 +497,21 @@ def benchmark_retrieval(
             sum(1 for item in positive_results if item["hard_negative_pass"]),
             len(positive_results),
         ),
+        "copied_artifact_usefulness_rate": round_rate(
+            sum(1 for item in nonempty_results if item["useful_copied_evidence"]),
+            len(nonempty_results),
+        ),
+        "hallucinated_evidence_rate": round_rate(
+            sum(1 for item in nonempty_results if item["hallucinated_evidence"]),
+            len(nonempty_results),
+        ),
         "cold_build_ms": round(cold_ms, 2),
         "warm_reuse_ms": round(warm_ms, 2),
         "cold_index_mode": cold_manifest.get("index_mode"),
         "warm_index_mode": warm_manifest.get("index_mode"),
         "candidate_run_count": warm_manifest.get("candidate_run_count"),
+        "abstention_thresholds": profile.get("abstention", {}),
+        "candidate": candidate_summary(retrieval_candidate),
         "scenario_results": scenario_results,
     }
     return retrieval
@@ -545,7 +604,8 @@ def prepare_replay_runs(
                 "scenario": scenario_payload["scenario"],
             }
         )
-    assert runs_root.exists()
+    if not runs_root.exists():
+        raise RuntimeError(f"expected runs root to exist: {runs_root}")
     return prepared
 
 
@@ -555,6 +615,7 @@ def run_orchestrator_benchmark(
     *,
     max_model_workers: int,
     max_score_workers: int,
+    env_extra: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     runs_root = harness_root / "runs"
     benchmark_duration_seconds = max(
@@ -567,6 +628,8 @@ def run_orchestrator_benchmark(
         "HARNESS_ORCHESTRATOR_MODEL_TIMEOUT_SECONDS": "1",
         "HARNESS_ORCHESTRATOR_SCORE_TIMEOUT_SECONDS": "30",
     }
+    if env_extra:
+        env |= env_extra
     started = time.perf_counter()
     subprocess.run(
         [
@@ -615,6 +678,7 @@ def benchmark_replay(
     corpus_path: pathlib.Path,
     max_runs: int,
     history_dir: pathlib.Path | None = None,
+    env_extra: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     corpus = load_replay_corpus(corpus_path)
     sampled = corpus[: max(1, min(max_runs, len(corpus)))]
@@ -628,6 +692,7 @@ def benchmark_replay(
             fake_pi,
             max_model_workers=concurrency,
             max_score_workers=concurrency,
+            env_extra=env_extra,
         )
         retry_records = [
             item
@@ -641,7 +706,9 @@ def benchmark_replay(
             if score_payload.get("overall_pass") is True:
                 retry_successes += 1
         terminal_total = (
-            metrics["totals"]["complete"] + metrics["totals"]["cancelled"] + metrics["totals"]["failed"]
+            metrics["totals"]["complete"]
+            + metrics["totals"]["cancelled"]
+            + metrics["totals"]["failed"]
         )
         workload_metrics.append(
             {
@@ -703,16 +770,32 @@ def benchmark_fault_injection(
     schema_text = (harness_root / "result.schema.json").read_text(encoding="utf-8").rstrip()
     rng = random.Random(seed)
     cases = [
-        ("invalid_result", {"scenario": "invalid_result"}, "python3 ../tests/fixtures/pass_eval.py"),
-        ("startup_failure", {"scenario": "startup_failure"}, "python3 ../tests/fixtures/pass_eval.py"),
+        (
+            "invalid_result",
+            {"scenario": "invalid_result"},
+            "python3 ../tests/fixtures/pass_eval.py",
+        ),
+        (
+            "startup_failure",
+            {"scenario": "startup_failure"},
+            "python3 ../tests/fixtures/pass_eval.py",
+        ),
         ("auth_failure", {"scenario": "auth_failure"}, "python3 ../tests/fixtures/pass_eval.py"),
         (
             "partial_transcript_hang",
             {"scenario": "partial_transcript_hang", "sleep_seconds": 2},
             "python3 ../tests/fixtures/pass_eval.py",
         ),
-        ("permission_denied", {"scenario": "permission_denied"}, "python3 ../tests/fixtures/pass_eval.py"),
-        ("transcript_flood", {"scenario": "transcript_flood", "event_count": 2048}, "python3 ../tests/fixtures/pass_eval.py"),
+        (
+            "permission_denied",
+            {"scenario": "permission_denied"},
+            "python3 ../tests/fixtures/pass_eval.py",
+        ),
+        (
+            "transcript_flood",
+            {"scenario": "transcript_flood", "event_count": 2048},
+            "python3 ../tests/fixtures/pass_eval.py",
+        ),
         ("contract_invalid", {"scenario": "happy_path"}, "python3 -c 'print(1)'"),
     ]
     selected = [cases[rng.randrange(len(cases))] for _ in range(max(1, sample_count))]
@@ -786,8 +869,12 @@ def benchmark_fault_injection(
                     "evidence": {
                         "manifest": manifest,
                         "score": score_payload,
-                        "event_excerpt": excerpt_lines(run_dir / "run-events.jsonl", line_limit=10),
-                        "transcript_excerpt": excerpt_lines(run_dir / "transcript.jsonl", line_limit=10),
+                        "event_excerpt": excerpt_lines(
+                            run_dir / "run-events.jsonl", line_limit=10
+                        ),
+                        "transcript_excerpt": excerpt_lines(
+                            run_dir / "transcript.jsonl", line_limit=10
+                        ),
                         "stderr_excerpt": excerpt_lines(run_dir / "pi.stderr.log", line_limit=10),
                     },
                 }
@@ -852,6 +939,22 @@ def parse_args() -> argparse.Namespace:
         "--out",
         help="optional path to write the benchmark payload JSON",
     )
+    parser.add_argument(
+        "--retrieval-candidate",
+        help="optional retrieval candidate manifest path",
+    )
+    parser.add_argument(
+        "--policy-candidate",
+        help="optional policy candidate manifest path",
+    )
+    parser.add_argument(
+        "--model-candidate",
+        help="optional model candidate manifest path",
+    )
+    parser.add_argument(
+        "--candidate-bundle-id",
+        help="optional bundle id to include in benchmark promotion metadata",
+    )
     return parser.parse_args()
 
 
@@ -859,7 +962,9 @@ def main() -> None:
     args = parse_args()
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     payload: dict[str, object] = {
+        "benchmark_report_version": "v1",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "suite": "bitterless-harness",
         "backpressure_policy": {
             "disk_used_threshold_percent": int(
                 os.environ.get("HARNESS_DISK_USED_THRESHOLD_PERCENT", "90")
@@ -868,9 +973,20 @@ def main() -> None:
         },
     }
     profile_path = pathlib.Path(args.profile_path).resolve() if args.profile_path else None
+    retrieval_candidate_path = (
+        pathlib.Path(args.retrieval_candidate).resolve() if args.retrieval_candidate else None
+    )
+    policy_candidate_path = (
+        pathlib.Path(args.policy_candidate).resolve() if args.policy_candidate else None
+    )
+    model_candidate_path = (
+        pathlib.Path(args.model_candidate).resolve() if args.model_candidate else None
+    )
     replay_corpus_path = pathlib.Path(args.replay_corpus).resolve() if args.replay_corpus else None
     history_dir = pathlib.Path(args.history_dir).resolve() if args.history_dir else None
-    fault_corpus_out = pathlib.Path(args.fault_corpus_out).resolve() if args.fault_corpus_out else None
+    fault_corpus_out = (
+        pathlib.Path(args.fault_corpus_out).resolve() if args.fault_corpus_out else None
+    )
     with tempfile.TemporaryDirectory(prefix="bitterless-bench-") as tmp_dir_name:
         tmp_dir = pathlib.Path(tmp_dir_name)
         harness_root = tmp_dir / "starter"
@@ -888,16 +1004,25 @@ def main() -> None:
             payload["retrieval"] = benchmark_retrieval(
                 harness_root,
                 profile_path=profile_path,
+                retrieval_candidate_path=retrieval_candidate_path,
             )
         if args.mode in {"all", "replay"}:
             if replay_corpus_path is None:
                 raise ValueError("--replay-corpus is required for replay mode")
+            env_extra: dict[str, str] = {}
+            if retrieval_candidate_path is not None:
+                env_extra["HARNESS_RETRIEVAL_CANDIDATE_PATH"] = str(retrieval_candidate_path)
+            if policy_candidate_path is not None:
+                env_extra["HARNESS_POLICY_CANDIDATE_PATH"] = str(policy_candidate_path)
+            if model_candidate_path is not None:
+                env_extra["HARNESS_MODEL_CANDIDATE_PATH"] = str(model_candidate_path)
             payload["replay"] = benchmark_replay(
                 harness_root,
                 fake_pi,
                 corpus_path=replay_corpus_path,
                 max_runs=max(1, args.replay_runs),
                 history_dir=history_dir,
+                env_extra=env_extra or None,
             )
         if args.mode in {"all", "fault-injection"}:
             payload["fault_injection"] = benchmark_fault_injection(
@@ -907,6 +1032,81 @@ def main() -> None:
                 seed=args.fault_seed,
                 corpus_out=fault_corpus_out,
             )
+
+    thresholds = json.loads(json.dumps(DEFAULT_THRESHOLDS))
+    threshold_results: dict[str, Any] = {}
+    if isinstance(payload.get("retrieval"), dict):
+        retrieval = payload["retrieval"]
+        threshold_results["retrieval"] = {
+            key: float(retrieval.get(key, 0.0)) >= value
+            if key != "hallucinated_evidence_rate"
+            else float(retrieval.get(key, 1.0)) <= value
+            for key, value in thresholds["retrieval"].items()
+        }
+        retrieval["thresholds"] = thresholds["retrieval"]
+        retrieval["threshold_results"] = threshold_results["retrieval"]
+        retrieval["overall_pass"] = all(threshold_results["retrieval"].values())
+    if isinstance(payload.get("replay"), dict):
+        replay_metrics = payload["replay"]["workload_metrics"]
+        latest = replay_metrics[-1] if replay_metrics else {}
+        threshold_results["replay"] = {
+            "pass_rate_percent": (
+                float(latest.get("pass_rate_percent", 0.0))
+                >= thresholds["replay"]["pass_rate_percent"]
+            ),
+            "retry_recovery_rate": (
+                float(latest.get("retry_recovery_rate", 0.0))
+                >= thresholds["replay"]["retry_recovery_rate"]
+            ),
+        }
+        payload["replay"]["thresholds"] = thresholds["replay"]
+        payload["replay"]["threshold_results"] = threshold_results["replay"]
+        payload["replay"]["overall_pass"] = all(threshold_results["replay"].values())
+    if isinstance(payload.get("fault_injection"), dict):
+        fault = payload["fault_injection"]
+        threshold_results["fault_injection"] = {
+            "novel_failure_records": int(fault.get("novel_failure_records", 0))
+            >= thresholds["fault_injection"]["novel_failure_records"]
+        }
+        fault["thresholds"] = thresholds["fault_injection"]
+        fault["threshold_results"] = threshold_results["fault_injection"]
+        fault["overall_pass"] = all(threshold_results["fault_injection"].values())
+
+    active_sections = [
+        section_payload.get("overall_pass")
+        for key, section_payload in payload.items()
+        if key in {"retrieval", "replay", "fault_injection"} and isinstance(section_payload, dict)
+    ]
+    payload["thresholds"] = thresholds
+    payload["candidate_bundle_id"] = args.candidate_bundle_id or "baseline"
+    payload["candidates"] = {
+        "retrieval": candidate_summary(
+            load_candidate_manifest("retrieval", retrieval_candidate_path, repo_root=repo_root)
+            if retrieval_candidate_path is not None
+            else load_candidate_manifest("retrieval", repo_root=repo_root)
+        ),
+        "policy": candidate_summary(
+            load_candidate_manifest("policy", policy_candidate_path, repo_root=repo_root)
+            if policy_candidate_path is not None
+            else load_candidate_manifest("policy", repo_root=repo_root)
+        ),
+        "model": candidate_summary(
+            load_candidate_manifest("model", model_candidate_path, repo_root=repo_root)
+            if model_candidate_path is not None
+            else load_candidate_manifest("model", repo_root=repo_root)
+        ),
+    }
+    payload["promotion_summary"] = {
+        "bundle_id": payload["candidate_bundle_id"],
+        "gated_sections": [key for key in threshold_results],
+        "threshold_results": threshold_results,
+        "candidate_types": {
+            key: value.get("candidate_id")
+            for key, value in payload["candidates"].items()
+            if value.get("configured")
+        },
+    }
+    payload["overall_pass"] = all(active_sections) if active_sections else True
 
     serialized = json.dumps(payload, indent=2)
     if args.out:

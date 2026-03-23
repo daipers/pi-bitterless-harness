@@ -8,7 +8,7 @@ import pathlib
 import re
 import shutil
 import signal
-import subprocess  # nosec B404 - subprocess used for orchestration of harness toolchain
+import subprocess
 import sys
 import time
 import uuid
@@ -19,6 +19,7 @@ from harnesslib import (
     EXECUTION_PROFILES,
     RUNNER_VERSION,
     compute_dependencies_hash,
+    default_policy_path,
     default_run_contract,
     evaluate_policy_guardrail,
     guardrail_policy_snapshot,
@@ -28,6 +29,12 @@ from harnesslib import (
     now_utc,
     resolve_execution_settings,
     write_json,
+)
+from learninglib import (
+    candidate_runtime,
+    candidate_summary,
+    effective_candidate_mode,
+    load_candidate_manifest,
 )
 
 
@@ -338,6 +345,17 @@ class RunTaskRunner:
         self.guardrail_decisions: list[dict[str, Any]] = []
         self.guardrails_path = self.run_dir / "outputs" / "guardrails.json"
         self._pre_score_dispatch_decision: dict[str, Any] | None = None
+        self.retrieval_candidate: dict[str, Any] | None = None
+        self.policy_candidate: dict[str, Any] | None = None
+        self.model_candidate: dict[str, Any] | None = None
+        self.retrieval_candidate_summary = candidate_summary(None)
+        self.policy_candidate_summary = candidate_summary(None)
+        self.model_candidate_summary = candidate_summary(None)
+        self.policy_candidate_recommendations: dict[str, Any] = {}
+        self.policy_candidate_applied: list[str] = []
+        self.context_budget_overrides: dict[str, int] = {}
+        self.model_selection_source = "cli_or_default"
+        self.model_fallback = ""
 
         self._orig_sigint = None
         self._orig_sigterm = None
@@ -504,6 +522,20 @@ class RunTaskRunner:
                 ),
             },
             "retrieval": {},
+            "candidates": {
+                "retrieval": dict(self.retrieval_candidate_summary),
+                "policy": {
+                    **dict(self.policy_candidate_summary),
+                    "recommendations": dict(self.policy_candidate_recommendations),
+                    "applied": list(self.policy_candidate_applied),
+                },
+                "model": {
+                    **dict(self.model_candidate_summary),
+                    "selected_model": self.model or None,
+                    "fallback_model": self.model_fallback or None,
+                    "selection_source": self.model_selection_source,
+                },
+            },
             "failure_classifications": [failure_code],
             "overall_error_code": failure_code,
             "overall_pass": False,
@@ -805,6 +837,18 @@ class RunTaskRunner:
                 "contract_version": self.run_contract_version or None,
                 "profile": self.execution_profile,
                 "policy_path": self.policy_path,
+                "selected_model": self.model or None,
+                "fallback_model": self.model_fallback or None,
+            },
+            "contracts": {
+                "run_contract_version": self.run_contract_version or None,
+                "run_manifest_version": "v1",
+                "score_version": "v1",
+                "context_manifest_version": context_payload.get("context_manifest_version"),
+                "benchmark_report_contract": "contracts/benchmark-report-v1.schema.json",
+                "release_gate_contract": "contracts/release-gate-v1.schema.json",
+                "candidate_manifest_contract": "contracts/candidate-manifest-v1.schema.json",
+                "candidate_report_contract": "contracts/candidate-report-v1.schema.json",
             },
             "context": {
                 "enabled": self.context_enabled == "1",
@@ -812,12 +856,63 @@ class RunTaskRunner:
                 "summary_path": self.context_summary_rel or None,
                 "source_run_ids": [item for item in self.context_source_run_ids.split(",") if item],
                 "bootstrap_mode": self.context_bootstrap_mode or None,
+                "retrieval_profile_id": context_payload.get("retrieval_profile_id"),
+                "retrieval_profile_fingerprint": context_payload.get(
+                    "retrieval_profile_fingerprint"
+                ),
                 "candidate_run_count": context_payload.get("candidate_run_count"),
                 "eligible_run_count": context_payload.get("eligible_run_count"),
                 "selected_count": context_payload.get("selected_count"),
+                "abstained": context_payload.get("abstained"),
+                "abstention_reason": context_payload.get("abstention_reason"),
+                "top_candidate_score": context_payload.get("top_candidate_score"),
+                "top_candidate_score_margin": context_payload.get("top_candidate_score_margin"),
                 "ranking_latency_ms": context_payload.get("ranking_latency_ms"),
                 "artifact_bytes_copied": context_payload.get("artifact_bytes_copied"),
+                "retrieval_candidate_id": context_payload.get("retrieval_candidate_id"),
+                "retrieval_candidate_mode": context_payload.get("retrieval_candidate_mode"),
+                "retriever_version": context_payload.get("retriever_version"),
+                "reranker_version": context_payload.get("reranker_version"),
+                "abstention_model_version": context_payload.get("abstention_model_version"),
                 "guardrails_path": "outputs/guardrails.json",
+            },
+            "benchmark_eligibility": score_payload.get("benchmark_eligibility", {}),
+            "promotion": score_payload.get("promotion_summary", {}),
+            "candidates": {
+                "retrieval": dict(self.retrieval_candidate_summary),
+                "policy": {
+                    **dict(self.policy_candidate_summary),
+                    "recommendations": dict(self.policy_candidate_recommendations),
+                    "applied": list(self.policy_candidate_applied),
+                },
+                "model": {
+                    **dict(self.model_candidate_summary),
+                    "selected_model": self.model or None,
+                    "fallback_model": self.model_fallback or None,
+                    "selection_source": self.model_selection_source,
+                },
+            },
+            "planes": {
+                "runtime": {
+                    "stable_kernel": [
+                        "starter/bin/run_task.py",
+                        "starter/bin/prepare-context.py",
+                        "starter/bin/score_run.py",
+                    ]
+                },
+                "evidence": {
+                    "manifest": "outputs/run_manifest.json",
+                    "score": "score.json",
+                    "transcript": "transcript.jsonl",
+                },
+                "learning": {
+                    "context_manifest": self.context_manifest_rel or None,
+                    "benchmark_contract": "contracts/benchmark-report-v1.schema.json",
+                },
+                "promotion": {
+                    "release_gate_contract": "contracts/release-gate-v1.schema.json",
+                    "provenance": "dist/*.provenance.json",
+                },
             },
             "guardrails": {
                 "policy_path": self.policy_path,
@@ -830,6 +925,107 @@ class RunTaskRunner:
         }
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         write_json(self.manifest_path, manifest)
+
+    def _load_runtime_candidates(self) -> None:
+        self.retrieval_candidate = load_candidate_manifest("retrieval", repo_root=self.repo_root)
+        self.policy_candidate = load_candidate_manifest("policy", repo_root=self.repo_root)
+        self.model_candidate = load_candidate_manifest("model", repo_root=self.repo_root)
+        self.retrieval_candidate_summary = candidate_summary(self.retrieval_candidate)
+        self.policy_candidate_summary = candidate_summary(self.policy_candidate)
+        self.model_candidate_summary = candidate_summary(self.model_candidate)
+
+    def _recommendation_payload(self, name: str) -> tuple[Any, float]:
+        recommendations = dict(candidate_runtime(self.policy_candidate).get("recommendations", {}))
+        payload = recommendations.get(name)
+        if isinstance(payload, dict) and "value" in payload:
+            return payload.get("value"), float(payload.get("confidence", 0.0))
+        if payload is None:
+            return None, 0.0
+        return payload, 0.0
+
+    def _apply_policy_candidate(self) -> None:
+        self.policy_candidate_recommendations = {}
+        self.policy_candidate_applied = []
+        if not self.policy_candidate:
+            return
+        runtime = candidate_runtime(self.policy_candidate)
+        activation_threshold = float(runtime.get("activation_threshold", 0.0))
+        mode = effective_candidate_mode(self.policy_candidate)
+
+        execution_profile, profile_confidence = self._recommendation_payload("execution_profile")
+        if execution_profile is not None:
+            self.policy_candidate_recommendations["execution_profile"] = {
+                "value": execution_profile,
+                "confidence": profile_confidence,
+            }
+            if (
+                mode == "active"
+                and profile_confidence >= activation_threshold
+                and execution_profile in EXECUTION_PROFILES
+            ):
+                self.execution_profile = str(execution_profile)
+                self.policy_path = default_policy_path(self.execution_profile)
+                self.policy_candidate_applied.append("execution_profile")
+
+        retry_limit, retry_confidence = self._recommendation_payload("retry_limit")
+        if retry_limit is not None:
+            self.policy_candidate_recommendations["retry_limit"] = {
+                "value": retry_limit,
+                "confidence": retry_confidence,
+            }
+            if mode == "active" and retry_confidence >= activation_threshold:
+                self.retry_count = str(max(1, int(retry_limit)))
+                self.policy_candidate_applied.append("retry_limit")
+
+        context_budget, context_confidence = self._recommendation_payload("context_budget")
+        if isinstance(context_budget, dict):
+            self.policy_candidate_recommendations["context_budget"] = {
+                "value": dict(context_budget),
+                "confidence": context_confidence,
+            }
+            if mode == "active" and context_confidence >= activation_threshold:
+                if "max_source_runs" in context_budget:
+                    self.context_budget_overrides["max_source_runs"] = max(
+                        1, int(context_budget["max_source_runs"])
+                    )
+                if "max_candidates" in context_budget:
+                    self.context_budget_overrides["max_candidates"] = max(
+                        1, int(context_budget["max_candidates"])
+                    )
+                if self.context_budget_overrides:
+                    self.policy_candidate_applied.append("context_budget")
+
+        benchmark_eligible, benchmark_confidence = self._recommendation_payload(
+            "benchmark_eligible"
+        )
+        if benchmark_eligible is not None:
+            self.policy_candidate_recommendations["benchmark_eligible"] = {
+                "value": bool(benchmark_eligible),
+                "confidence": benchmark_confidence,
+            }
+
+    def _apply_model_candidate(self) -> None:
+        self.model_selection_source = "cli_or_default"
+        self.model_fallback = ""
+        if not self.model_candidate:
+            return
+        runtime = candidate_runtime(self.model_candidate)
+        activation_threshold = float(runtime.get("activation_threshold", 0.0))
+        confidence = float(runtime.get("confidence", 1.0))
+        self.model_fallback = str(runtime.get("fallback_model", "")).strip()
+        if self.model:
+            self.model_selection_source = "explicit_cli_model"
+            return
+        primary_model = str(runtime.get("primary_model", "")).strip()
+        if (
+            effective_candidate_mode(self.model_candidate) == "active"
+            and primary_model
+            and confidence >= activation_threshold
+        ):
+            self.model = primary_model
+            self.model_selection_source = "model_candidate"
+        elif primary_model:
+            self.model_selection_source = "model_candidate_shadow"
 
     def _duration_ms(self, start: str | int | None, end: str | int | None) -> int | None:
         if not start or not end:
@@ -933,7 +1129,10 @@ class RunTaskRunner:
         self.run_contract_version = settings["run_contract_version"]
         self.execution_profile = settings["execution_profile"]
         self.policy_path = settings["policy_path"]
-        self.policy = load_policy(settings["policy_path"], repo_root=self.repo_root)
+        self._load_runtime_candidates()
+        self._apply_policy_candidate()
+        self.policy = load_policy(self.policy_path, repo_root=self.repo_root)
+        self._apply_model_candidate()
         self.context_enabled = "1" if settings["retrieval_enabled"] else "0"
         self.context_manifest_rel = settings["context_manifest_path"]
         self.context_summary_rel = settings["context_summary_path"]
@@ -1063,6 +1262,15 @@ class RunTaskRunner:
         self._log_event(self.phase, "preparing retrieval context")
 
         env = self._with_pythonpath()
+        env["HARNESS_EXECUTION_PROFILE"] = self.execution_profile
+        if self.context_budget_overrides.get("max_source_runs"):
+            env["HARNESS_CONTEXT_MAX_SOURCE_RUNS"] = str(
+                self.context_budget_overrides["max_source_runs"]
+            )
+        if self.context_budget_overrides.get("max_candidates"):
+            env["HARNESS_CONTEXT_MAX_CANDIDATES"] = str(
+                self.context_budget_overrides["max_candidates"]
+            )
         completed = self._run_command(
             [
                 sys.executable,
@@ -1207,10 +1415,6 @@ class RunTaskRunner:
                 break
             self._truncate_file(self.run_dir / "transcript.jsonl", self.max_transcript_bytes_int)
             self._truncate_file(self.run_dir / "pi.stderr.log", self.max_pi_stderr_bytes_int)
-            with (self.run_dir / "transcript.jsonl").open("ab") as raw_handle:
-                raw_handle.write(f"attempt={attempt}\n".encode())
-            with (self.run_dir / "pi.stderr.log").open("ab") as raw_handle:
-                raw_handle.write(f"attempt={attempt}\n".encode())
             self.pi_started_epoch_ms = now_ms()
             self._log_event(
                 self.phase,
@@ -1231,7 +1435,8 @@ class RunTaskRunner:
                 break
 
             transcript = self.run_dir / "transcript.jsonl"
-            if transcript.stat().st_size == 0 and attempt < self.retry_limit:
+            transcript_empty = not transcript.exists() or transcript.stat().st_size == 0
+            if transcript_empty and attempt < self.retry_limit:
                 self._log_event(
                     self.phase,
                     "retrying pi startup failure",
@@ -1279,6 +1484,26 @@ class RunTaskRunner:
         env["HARNESS_CONTEXT_ENABLED"] = self.context_enabled
         env["HARNESS_CONTEXT_MANIFEST_PATH"] = self.context_manifest_rel
         env["HARNESS_CONTEXT_SOURCE_RUN_IDS"] = self.context_source_run_ids
+        env["HARNESS_RETRIEVAL_CANDIDATE_ID"] = str(
+            self.retrieval_candidate_summary.get("candidate_id") or ""
+        )
+        env["HARNESS_RETRIEVAL_CANDIDATE_MODE"] = str(
+            self.retrieval_candidate_summary.get("mode") or "off"
+        )
+        env["HARNESS_POLICY_CANDIDATE_ID"] = str(
+            self.policy_candidate_summary.get("candidate_id") or ""
+        )
+        env["HARNESS_POLICY_CANDIDATE_MODE"] = str(
+            self.policy_candidate_summary.get("mode") or "off"
+        )
+        env["HARNESS_MODEL_CANDIDATE_ID"] = str(
+            self.model_candidate_summary.get("candidate_id") or ""
+        )
+        env["HARNESS_MODEL_CANDIDATE_MODE"] = str(
+            self.model_candidate_summary.get("mode") or "off"
+        )
+        env["HARNESS_MODEL_SELECTED_MODEL"] = self.model or ""
+        env["HARNESS_MODEL_FALLBACK_MODEL"] = self.model_fallback or ""
         if self.max_eval_commands_int > 0:
             env["HARNESS_MAX_EVAL_COMMANDS"] = str(self.max_eval_commands_int)
         if self.eval_timeout_seconds:

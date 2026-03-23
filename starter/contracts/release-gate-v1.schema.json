@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/release-gate-v1.schema.json",
+  "title": "Bitterless Harness Release Gate v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "release_gate_version",
+    "generated_at",
+    "overall_pass",
+    "checks"
+  ],
+  "properties": {
+    "release_gate_version": {
+      "const": "v1"
+    },
+    "generated_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "overall_pass": {
+      "type": "boolean"
+    },
+    "checks": {
+      "type": "object",
+      "required": [
+        "canary",
+        "benchmark",
+        "provenance",
+        "runtime"
+      ],
+      "additionalProperties": true
+    },
+    "artifacts": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "object"
+    }
+  }
+}

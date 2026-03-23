@@ -22,5 +22,10 @@
     "summary_bonus": 1,
     "evidence_backed_claim_bonus": 2,
     "descriptive_artifact_bonus": 1
+  },
+  "abstention": {
+    "enabled": true,
+    "min_top_score": 6,
+    "min_score_margin": 2
   }
 }

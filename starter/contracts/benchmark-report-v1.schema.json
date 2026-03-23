@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitterless-harness.dev/contracts/benchmark-report-v1.schema.json",
+  "title": "Bitterless Harness Benchmark Report v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "benchmark_report_version",
+    "generated_at",
+    "overall_pass"
+  ],
+  "properties": {
+    "benchmark_report_version": {
+      "const": "v1"
+    },
+    "generated_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "overall_pass": {
+      "type": "boolean"
+    },
+    "thresholds": {
+      "type": "object"
+    },
+    "promotion_summary": {
+      "type": "object"
+    },
+    "candidate_bundle_id": {
+      "type": "string"
+    },
+    "candidates": {
+      "type": "object"
+    },
+    "retrieval": {
+      "type": "object"
+    },
+    "replay": {
+      "type": "object"
+    },
+    "fault_injection": {
+      "type": "object"
+    },
+    "run_task": {
+      "type": "object"
+    }
+  }
+}

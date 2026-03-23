@@ -12,6 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
+if not hasattr(pathlib.Path, "utime"):
+    setattr(
+        pathlib.Path,
+        "utime",
+        lambda self, times=None: os.utime(self, times=times),
+    )
+
 # Contract constants and defaults
 RUNNER_VERSION = "1.0.0"
 RUN_CONTRACT_VERSION_V1 = "v1"
