@@ -24,6 +24,7 @@ def test_sidecar_contract_schemas_are_valid_json_schema() -> None:
         "starter/contracts/candidate-manifest-v1.schema.json",
         "starter/contracts/candidate-report-v1.schema.json",
         "starter/contracts/run-event-v1.schema.json",
+        "starter/contracts/runtime-governance-v1.schema.json",
     ]:
         schema = load_json(repo_root / rel_path)
         jsonschema.Draft202012Validator.check_schema(schema)

@@ -27,6 +27,7 @@ RUN_CONTRACT_VERSION = RUN_CONTRACT_VERSION_V2
 RESULT_INTERFACE_VERSION = "v1"
 EXECUTION_PROFILES = {"strict", "offline", "networked", "heavy_tools", "capability"}
 RUN_EVENT_SCHEMA_VERSION = "run-event-v1"
+RUNTIME_GOVERNANCE_REGISTRY_VERSION = "v1"
 
 TASK_REQUIRED_SECTIONS = [
     "Goal",
@@ -261,6 +262,18 @@ def write_json(path: pathlib.Path, payload: Any, *, sort_keys: bool = True) -> N
 
 def script_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
+
+
+def governance_registry_path(repo_root: pathlib.Path | None = None) -> pathlib.Path:
+    return (repo_root or script_root()) / "governance" / "runtime-governance-v1.json"
+
+
+def load_governance_registry(repo_root: pathlib.Path | None = None) -> dict[str, Any]:
+    path = governance_registry_path(repo_root=repo_root)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("runtime governance registry must be a JSON object")
+    return payload
 
 
 def compute_dependencies_hash(dependencies: dict[str, Any]) -> str:

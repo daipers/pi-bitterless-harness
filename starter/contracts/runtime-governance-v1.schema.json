@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bitterless Harness Runtime Governance Registry v1",
+  "type": "object",
+  "required": [
+    "governance_registry_version",
+    "execution_profiles",
+    "guardrail_hooks",
+    "failure_taxonomy",
+    "primary_error_code_precedence"
+  ],
+  "properties": {
+    "governance_registry_version": {
+      "const": "v1"
+    },
+    "execution_profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/governed_entry"
+      }
+    },
+    "guardrail_hooks": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/governed_entry"
+      }
+    },
+    "failure_taxonomy": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/failure_entry"
+      }
+    },
+    "primary_error_code_precedence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "governed_entry": {
+      "type": "object",
+      "required": [
+        "owner",
+        "rationale",
+        "evidence_required",
+        "temporary"
+      ],
+      "properties": {
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_required": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "temporary": {
+          "type": "boolean"
+        },
+        "added_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "remove_when": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_check": {
+          "type": "string",
+          "minLength": 1
+        },
+        "review_rule": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "temporary": {
+                "const": true
+              }
+            },
+            "required": ["temporary"]
+          },
+          "then": {
+            "required": ["added_at", "remove_when", "evidence_check"]
+          }
+        }
+      ]
+    },
+    "failure_entry": {
+      "type": "object",
+      "required": [
+        "owner",
+        "rationale",
+        "evidence_required",
+        "temporary",
+        "operator_action",
+        "promotion_impact"
+      ],
+      "properties": {
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_required": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "temporary": {
+          "type": "boolean"
+        },
+        "added_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "remove_when": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_check": {
+          "type": "string",
+          "minLength": 1
+        },
+        "review_rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operator_action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "promotion_impact": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "temporary": {
+                "const": true
+              }
+            },
+            "required": ["temporary"]
+          },
+          "then": {
+            "required": ["added_at", "remove_when", "evidence_check"]
+          }
+        }
+      ]
+    }
+  }
+}

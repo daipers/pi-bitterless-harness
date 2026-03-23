@@ -40,6 +40,16 @@ SECRET_SCAN_DIRS = ("outputs", "score", "recovery")
 SECRET_SCAN_CONTEXT_FILES = ("context/retrieval-manifest.json", "context/retrieval-summary.md")
 SECRET_SCAN_SKIP_DIRS = ("home", "session", "context/source-runs")
 ENV_FALSE_VALUES = {"", "0", "false", "False"}
+SCORE_FAILURE_CLASSIFICATIONS = frozenset(
+    {
+        "contract_invalid",
+        "eval_command_limit_exceeded",
+        "guardrail_policy_violation",
+        "eval_failed",
+        "model_invocation_failed",
+        "result_invalid",
+    }
+)
 
 
 def _to_positive_int(value: str, *, default: int) -> int:

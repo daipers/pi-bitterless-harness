@@ -33,6 +33,22 @@ STATE_DONE = STATE_COMPLETE
 STATE_FAILED = "failed"
 STATE_CANCELLED = "cancelled"
 TERMINAL_STATES = {STATE_COMPLETE, STATE_FAILED, STATE_CANCELLED}
+ORCHESTRATOR_FAILURE_CLASSIFICATIONS = frozenset(
+    {
+        "orchestrator_queue_timeout",
+        "orchestrator_worker_unavailable",
+        "resource_cap_exceeded",
+        "score_backpressure",
+        "orchestrator_worker_retry",
+        "orchestrator_worker_exhausted",
+        "orchestrator_score_retry",
+        "deadline_exceeded",
+        "orchestrator_cancelled",
+        "model_invocation_failed",
+        "eval_failed",
+        "result_invalid",
+    }
+)
 
 HEARTBEAT_INTERVAL_MS = 2000
 PENDING_STATES = {"running", STATE_MODEL_RUNNING, STATE_SCORING, STATE_CLAIMED}

@@ -38,9 +38,21 @@ for rel_path in [
     "starter/contracts/candidate-manifest-v1.schema.json",
     "starter/contracts/candidate-report-v1.schema.json",
     "starter/contracts/run-event-v1.schema.json",
+    "starter/contracts/runtime-governance-v1.schema.json",
 ]:
     schema = json.loads((repo_root / rel_path).read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator.check_schema(schema)
+registry = json.loads(
+    (repo_root / "starter" / "governance" / "runtime-governance-v1.json").read_text(
+        encoding="utf-8"
+    )
+)
+registry_schema = json.loads(
+    (repo_root / "starter" / "contracts" / "runtime-governance-v1.schema.json").read_text(
+        encoding="utf-8"
+    )
+)
+jsonschema.validate(registry, registry_schema)
 PY
 bandit -q --ini "$repo_root/.bandit" -r "$repo_root/starter/bin"
 pip-audit -r "$repo_root/requirements-dev.txt"

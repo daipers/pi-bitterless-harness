@@ -50,6 +50,16 @@ The harness keeps the runtime path thin and moves most new capability into typed
 - Learning plane: retrieval indexing, profile sweeps, hard-negative mining, and benchmark reports
 - Promotion plane: runtime verification, benchmark thresholds, canary freshness, and release gates
 
+## Runtime Governance
+
+Runtime governance is codified, not implied:
+
+- `governance/runtime-governance-v1.json` is the canonical registry for execution profiles, guardrail hooks, and the failure taxonomy.
+- `contracts/runtime-governance-v1.schema.json` defines the typed contract for that registry.
+- New profiles or hooks must come with benchmark, replay, or canary evidence showing a material effect.
+- New failure codes must map to a distinct operator action or promotion impact; otherwise they should fold into an existing code.
+- Temporary special cases must carry an owner, removal condition, and evidence check in the governance registry and PR template.
+
 ## Supported runtime policy
 
 - Supported Python runtime for release candidates: `3.12.x` (`.python-version` pins CI to `3.12.9`)
@@ -78,6 +88,8 @@ The harness keeps the runtime path thin and moves most new capability into typed
 - `contracts/model-example-v1.schema.json`
 - `contracts/candidate-manifest-v1.schema.json`
 - `contracts/candidate-report-v1.schema.json`
+- `contracts/runtime-governance-v1.schema.json`
+- `governance/runtime-governance-v1.json`
 - `policies/strict.json`
 - `policies/capability.json`
 - `bin/check-run-contract.sh` (must be executable)

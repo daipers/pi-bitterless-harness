@@ -1,0 +1,253 @@
+{
+  "governance_registry_version": "v1",
+  "execution_profiles": {
+    "capability": {
+      "owner": "runtime-plane",
+      "rationale": "Enables retrieval-assisted context from prior successful runs.",
+      "evidence_required": ["retrieval-benchmark", "replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Only add or change when benchmarks or canaries show a material outcome delta."
+    },
+    "heavy_tools": {
+      "owner": "runtime-plane",
+      "rationale": "Raises resource caps for heavier local tool use while preserving the same typed contracts.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Prefer policy or cap changes before introducing a new profile branch."
+    },
+    "networked": {
+      "owner": "runtime-plane",
+      "rationale": "Raises limits for explicitly network-enabled tasks without changing the evidence model.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Treat as an execution-surface change that requires measured benefit."
+    },
+    "offline": {
+      "owner": "runtime-plane",
+      "rationale": "Constrains runs intended to stay local while preserving the same scoring and evidence contracts.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Do not fork behavior beyond caps and typed policy unless evidence forces it."
+    },
+    "strict": {
+      "owner": "runtime-plane",
+      "rationale": "Baseline default profile for the thin runtime path.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Keep this as the control profile; changes should preserve a simple default path."
+    }
+  },
+  "guardrail_hooks": {
+    "pre_context_build": {
+      "owner": "runtime-plane",
+      "rationale": "Allows policy to block context materialization before the harness copies prior-run evidence.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "New hooks must change promotion-relevant outcomes, not just add more branching."
+    },
+    "pre_retrieval": {
+      "owner": "runtime-plane",
+      "rationale": "Allows policy to block retrieval before the index or ranking flow runs.",
+      "evidence_required": ["retrieval-benchmark", "replay-benchmark"],
+      "temporary": false,
+      "review_rule": "Prefer policy data changes over adding more hook points."
+    },
+    "pre_run": {
+      "owner": "runtime-plane",
+      "rationale": "Allows policy to block the overall run before model execution starts.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Only add comparable hook surfaces when operator action or promotion logic changes materially."
+    },
+    "pre_score_dispatch": {
+      "owner": "runtime-plane",
+      "rationale": "Allows policy to block score dispatch when post-run evaluation should not proceed.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Use this only for measured gating changes, not convenience branching."
+    },
+    "pre_tool_use": {
+      "owner": "runtime-plane",
+      "rationale": "Allows policy to gate individual eval tool invocations.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Prefer typed policy limits before adding additional per-tool lifecycle hooks."
+    }
+  },
+  "failure_taxonomy": {
+    "cancelled": {
+      "owner": "runtime-plane",
+      "rationale": "Run was cancelled intentionally by signal or orchestrator request.",
+      "evidence_required": ["canary"],
+      "temporary": false,
+      "review_rule": "Only keep as a distinct code while operators treat cancellation differently from other failures.",
+      "operator_action": "Inspect cancellation source and determine whether to resume or requeue the run.",
+      "promotion_impact": "exclude-from-pass-rate-and-block-release-review"
+    },
+    "contract_invalid": {
+      "owner": "runtime-plane",
+      "rationale": "Task contract, artifact declarations, or runtime prerequisites are invalid.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because operator action is to fix inputs or contracts rather than retry runtime capacity.",
+      "operator_action": "Fix the run contract, task, or required runtime before rerunning.",
+      "promotion_impact": "block-release"
+    },
+    "deadline_exceeded": {
+      "owner": "runtime-plane",
+      "rationale": "Run or score work exceeded the configured wall-clock budget.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Only keep distinct while timeout handling changes retry or capacity decisions.",
+      "operator_action": "Inspect time budgets, workload shape, and worker capacity before retrying.",
+      "promotion_impact": "block-release"
+    },
+    "eval_command_limit_exceeded": {
+      "owner": "runtime-plane",
+      "rationale": "A task exceeded the configured evaluation command limit.",
+      "evidence_required": ["replay-benchmark"],
+      "temporary": false,
+      "review_rule": "Distinct because the operator action is to reduce eval surface or change explicit limits.",
+      "operator_action": "Reduce eval commands or intentionally raise the configured limit with evidence.",
+      "promotion_impact": "block-release"
+    },
+    "eval_failed": {
+      "owner": "runtime-plane",
+      "rationale": "Evaluation commands, required artifacts, secret scans, or interrupted scoring failed.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Use as the default evaluation failure bucket unless operator response differs materially.",
+      "operator_action": "Inspect eval logs, artifact checks, or secret scan findings and rerun after fixing evidence.",
+      "promotion_impact": "block-release"
+    },
+    "guardrail_policy_violation": {
+      "owner": "runtime-plane",
+      "rationale": "An eval command violated the active guardrail policy.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because the operator action is policy review, not task or infrastructure retry.",
+      "operator_action": "Review and adjust the active policy or task expectations before rerunning.",
+      "promotion_impact": "block-release"
+    },
+    "guardrail_pre_run_denied": {
+      "owner": "runtime-plane",
+      "rationale": "A pre-run guardrail explicitly denied execution.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because it changes operator response from debugging the run to reviewing policy.",
+      "operator_action": "Review the guardrail decision and policy configuration before rerunning.",
+      "promotion_impact": "block-release"
+    },
+    "guardrail_pre_score_dispatch_denied": {
+      "owner": "runtime-plane",
+      "rationale": "A pre-score guardrail denied score dispatch.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because score suppression changes promotion evidence handling.",
+      "operator_action": "Review policy and decide whether scoring should remain blocked for this class of run.",
+      "promotion_impact": "block-release"
+    },
+    "model_invocation_failed": {
+      "owner": "runtime-plane",
+      "rationale": "The model process exited non-zero or never started successfully.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because operator action is to inspect model or runtime startup rather than eval output.",
+      "operator_action": "Inspect transcript, stderr, auth, and startup environment before rerunning.",
+      "promotion_impact": "block-release"
+    },
+    "orchestrator_cancelled": {
+      "owner": "runtime-plane",
+      "rationale": "The orchestrator terminated a run after an explicit cancel request.",
+      "evidence_required": ["canary"],
+      "temporary": false,
+      "review_rule": "Keep distinct while operator handling differs from generic cancellation.",
+      "operator_action": "Confirm the cancel request source and whether the run should be requeued manually.",
+      "promotion_impact": "exclude-from-pass-rate-and-block-release-review"
+    },
+    "orchestrator_queue_timeout": {
+      "owner": "runtime-plane",
+      "rationale": "A run or score item waited too long in queue.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because it drives queue or capacity remediation, not task edits.",
+      "operator_action": "Inspect queue depth, worker limits, and backoff policy before retrying.",
+      "promotion_impact": "block-release"
+    },
+    "orchestrator_score_retry": {
+      "owner": "runtime-plane",
+      "rationale": "The orchestrator scheduled a retry after score-worker failure.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark"],
+      "temporary": false,
+      "review_rule": "Distinct because it is an infrastructure recovery signal used in replay metrics.",
+      "operator_action": "Inspect score worker stability and whether retries are recovering expected failures.",
+      "promotion_impact": "requires-review"
+    },
+    "orchestrator_worker_exhausted": {
+      "owner": "runtime-plane",
+      "rationale": "Worker retries were exhausted without a more specific failure code.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Use only when operator action is still worker-capacity remediation rather than task repair.",
+      "operator_action": "Inspect worker launch, retries, and orchestration health before rerunning.",
+      "promotion_impact": "block-release"
+    },
+    "orchestrator_worker_retry": {
+      "owner": "runtime-plane",
+      "rationale": "The orchestrator scheduled a retry after model-worker failure.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark"],
+      "temporary": false,
+      "review_rule": "Distinct because retry recovery is a tracked workload metric.",
+      "operator_action": "Inspect worker stability and whether retries are masking a deeper runtime issue.",
+      "promotion_impact": "requires-review"
+    },
+    "orchestrator_worker_unavailable": {
+      "owner": "runtime-plane",
+      "rationale": "The orchestrator could not start a worker process successfully.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because it changes operator action from task edits to worker or runtime remediation.",
+      "operator_action": "Inspect worker launch environment, dependencies, and orchestrator health.",
+      "promotion_impact": "block-release"
+    },
+    "resource_cap_exceeded": {
+      "owner": "runtime-plane",
+      "rationale": "A profile-specific concurrency or resource cap blocked dispatch.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark"],
+      "temporary": false,
+      "review_rule": "Distinct because it informs capacity tuning and saturation metrics.",
+      "operator_action": "Inspect profile caps and workload shape before widening concurrency.",
+      "promotion_impact": "requires-review"
+    },
+    "result_invalid": {
+      "owner": "runtime-plane",
+      "rationale": "The model output failed result contract validation.",
+      "evidence_required": ["replay-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Distinct because operator action is to inspect result contract compliance, not runtime infrastructure.",
+      "operator_action": "Inspect result.json generation and schema compliance before rerunning.",
+      "promotion_impact": "block-release"
+    },
+    "score_backpressure": {
+      "owner": "runtime-plane",
+      "rationale": "Score dispatch was blocked by global score-worker saturation.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark"],
+      "temporary": false,
+      "review_rule": "Distinct because it drives score-queue capacity decisions and saturation trending.",
+      "operator_action": "Inspect score-worker concurrency and backlog before increasing capacity.",
+      "promotion_impact": "requires-review"
+    }
+  },
+  "primary_error_code_precedence": [
+    "cancelled",
+    "guardrail_pre_run_denied",
+    "guardrail_pre_score_dispatch_denied",
+    "contract_invalid",
+    "orchestrator_queue_timeout",
+    "orchestrator_worker_unavailable",
+    "deadline_exceeded",
+    "model_invocation_failed",
+    "result_invalid",
+    "eval_failed"
+  ]
+}

@@ -23,3 +23,9 @@ You are operating in a repository with a minimal pi-based harness.
 - Do not introduce dangerous eval commands, network access, or wider HOME copies unless the task explicitly opts in.
 - Do not change public contracts unless the task explicitly requires it.
 - Prefer direct edits and external verification.
+
+## Runtime Governance
+- Treat new execution profiles and guardrail hooks as expensive; add them only when replay, benchmark, or canary evidence shows a material behavior change.
+- Prefer typed policy or config changes over new runtime branching when a change is only a limit, threshold, or cap.
+- Keep failure taxonomy entries aligned with `starter/governance/runtime-governance-v1.json`; do not add a new code unless operator action or promotion logic changes materially.
+- Temporary runtime special cases must include an owner, removal condition, and evidence check in the governance registry and PR description.
