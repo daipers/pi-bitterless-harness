@@ -109,6 +109,8 @@ Automation should read:
 
 The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` when diagnosis needs richer context.
 
+`run-events.jsonl` records follow `starter/contracts/run-event-v1.schema.json`. For newly emitted telemetry, `trace_id` is the stable per-run correlation key and is equal to `run_id`; `failure_class` remains a compatibility alias when `failure_classification` is present.
+
 ## Evidence retention and recovery
 
 - Keep run evidence in `starter/runs/<run-id>/`

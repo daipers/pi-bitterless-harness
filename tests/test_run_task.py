@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 
 import pytest
 import run_task
+import score_run
 
 
 def make_run_dir(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -116,6 +117,55 @@ def test_pi_retry_boundary_stops_when_transcript_is_not_empty(tmp_path: pathlib.
     runner._run_pi_loop()
     assert attempts == [1]
     assert (run_dir / "pi.exit_code.txt").read_text(encoding="utf-8").strip() == "75"
+
+
+def test_retrying_runner_and_score_events_share_trace_id(tmp_path: pathlib.Path) -> None:
+    run_dir = make_run_dir(tmp_path)
+    (run_dir / "task.md").write_text("task", encoding="utf-8")
+    (run_dir / "RUN.md").write_text("run", encoding="utf-8")
+    runner = run_task.RunTaskRunner(
+        [str(run_dir)],
+        config_env={
+            "HARNESS_PI_RETRY_COUNT": "2",
+            "PYTHONPATH": str(tmp_path),
+        },
+    )
+
+    attempts: list[int] = []
+
+    def fake_invoke_pi() -> int:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return 75
+        return 0
+
+    runner._invoke_pi = fake_invoke_pi
+    runner._sleep = lambda _: None
+
+    runner._run_pi_loop()
+
+    context = score_run.ScoreContext(
+        task_path=run_dir / "task.md",
+        run_dir=run_dir,
+        exit_code_path=run_dir / "pi.exit_code.txt",
+        out_path=run_dir / "score.json",
+        schema_path=run_dir / "result.schema.json",
+        event_log_path=run_dir / "run-events.jsonl",
+        repo_root=tmp_path,
+        worker_id="score-worker-1",
+        attempt=runner.attempt,
+    )
+    score_run.append_event(context, "score", "starting score generation")
+
+    events = [
+        json.loads(line)
+        for line in (run_dir / "run-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert attempts == [1, 1]
+    assert any(event["message"] == "retrying pi startup failure" for event in events)
+    assert any(event["message"] == "starting score generation" for event in events)
+    assert {event["trace_id"] for event in events} == {run_dir.name}
 
 
 def test_score_retry_boundary_executes_two_attempts(tmp_path: pathlib.Path) -> None:

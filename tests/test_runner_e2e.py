@@ -154,6 +154,7 @@ def test_runner_happy_path_records_manifest(isolated_repo: pathlib.Path) -> None
     manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
     score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
     assert manifest["state"] == "complete"
+    assert manifest["trace_id"] == run_dir.name
     assert manifest["execution"]["profile"] == "strict"
     assert manifest["primary_error_code"] is None
     assert manifest["failure_classifications"] == []
@@ -168,6 +169,25 @@ def test_new_task_defaults_to_v2_strict_contract(isolated_repo: pathlib.Path) ->
 
     assert contract["run_contract_version"] == "v2"
     assert contract["execution_profile"] == "strict"
+
+
+def test_runner_and_score_events_share_trace_id(isolated_repo: pathlib.Path) -> None:
+    run_dir = create_run(isolated_repo, "telemetry trace")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+
+    completed = run_harness(isolated_repo, run_dir, "happy_path")
+
+    assert completed.returncode == 0
+    manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
+    events = [
+        json.loads(line)
+        for line in (run_dir / "run-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert manifest["trace_id"] == run_dir.name
+    assert {event["trace_id"] for event in events} == {run_dir.name}
+    assert any(event["message"] == "starting model attempt" for event in events)
+    assert any(event["message"] == "starting score generation" for event in events)
 
 
 def test_runner_v1_contract_still_executes(isolated_repo: pathlib.Path) -> None:

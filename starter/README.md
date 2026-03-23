@@ -130,7 +130,7 @@ Each run creates:
 - `run.contract.json` (versioned run contract snapshot with `run_contract_version: "v1"`)
 - `result.json` (model-authored final result)
 - `score.json` (harness-authored score)
-- `run-events.jsonl` (structured lifecycle events)
+- `run-events.jsonl` (structured lifecycle events conforming to `contracts/run-event-v1.schema.json`)
 - `transcript.jsonl` (pi JSON event stream)
 - `pi.stderr.log`
 - `git.status.txt`
@@ -187,6 +187,7 @@ Profile precedence at runtime:
 - Materializes retrieval context for V2 capability runs under `context/`
   - Reuses a derived retrieval index under `runs/.index/retrieval-v4/` when available
 - Emits structured lifecycle events to `run-events.jsonl`
+- Uses `trace_id == run_id` for every new event and `outputs/run_manifest.json.trace_id`
 - Captures `transcript.jsonl` and `pi.stderr.log`
 - Writes `pi.exit_code.txt`
 - Captures `git.status.txt` and `patch.diff`
@@ -198,6 +199,10 @@ Profile precedence at runtime:
 - Emits `outputs/run_manifest.json` with timings, dependency hashes, git SHA, invariants, audit flags, and failure classifications
 - Writes `score.json` with `overall_pass`
 - Records execution profile, policy path, and retrieval provenance in `score.json` and `outputs/run_manifest.json`
+
+`run-events.jsonl` is append-only JSONL. Each line follows `contracts/run-event-v1.schema.json`; the required correlation fields are `ts`, `trace_id`, `run_id`, `phase`, and `message`.
+
+`trace_id` is the stable per-run correlation key and is equal to the run directory name (`run_id`) for newly emitted telemetry. When `failure_classification` is present, emitters also preserve the legacy `failure_class` alias for compatibility.
 
 Failure classifications currently emitted in `score.json`:
 

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bitterless Harness Run Event v1",
+  "type": "object",
+  "required": [
+    "ts",
+    "trace_id",
+    "run_id",
+    "phase",
+    "message"
+  ],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phase": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "duration_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state_before": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state_after": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "worker_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "timeout_deadline": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "queue_wait_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "model_wait_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "score_wait_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "heartbeat_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "failure_classification": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "failure_class": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

@@ -26,6 +26,7 @@ RUN_CONTRACT_VERSION_V2 = "v2"
 RUN_CONTRACT_VERSION = RUN_CONTRACT_VERSION_V2
 RESULT_INTERFACE_VERSION = "v1"
 EXECUTION_PROFILES = {"strict", "offline", "networked", "heavy_tools", "capability"}
+RUN_EVENT_SCHEMA_VERSION = "run-event-v1"
 
 TASK_REQUIRED_SECTIONS = [
     "Goal",
@@ -213,6 +214,30 @@ SECRET_PATTERNS = [
 # Generic JSON, hash, and environment helpers
 def now_utc() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def build_run_event(
+    run_id: str,
+    phase: str,
+    message: str,
+    *,
+    error_code: str = "",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ts": now_utc(),
+        "trace_id": str(run_id),
+        "run_id": str(run_id),
+        "phase": phase,
+        "duration_ms": None,
+        "error_code": error_code or None,
+        "message": message,
+    }
+    if extra:
+        payload.update(extra)
+    if payload.get("failure_classification") and "failure_class" not in payload:
+        payload["failure_class"] = payload["failure_classification"]
+    return payload
 
 
 def sha256_text(text: str) -> str:

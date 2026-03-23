@@ -11,13 +11,13 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from harnesslib import (
     EXECUTION_PROFILES,
     RUNNER_VERSION,
+    build_run_event,
     compute_dependencies_hash,
     default_policy_path,
     default_run_contract,
@@ -320,7 +320,7 @@ class RunTaskRunner:
         self.event_log_path = self.run_dir / "run-events.jsonl"
         self.state_file = self.run_dir / "run.state"
         self.lock_dir = self.run_dir / ".run-lock"
-        self.trace_id = uuid.uuid4().hex
+        self.trace_id = self.run_id
 
         self.phase = "resolve"
         self.error_code = ""
@@ -675,26 +675,24 @@ class RunTaskRunner:
         state_after: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        payload = {
-            "ts": now_utc(),
-            "trace_id": self.trace_id,
-            "run_id": self.run_id,
-            "phase": phase_name,
-            "duration_ms": None,
-            "error_code": error or None,
-            "message": message,
-            "state_before": state_before,
-            "state_after": state_after,
-            "worker_id": self.worker_id,
-            "attempt": self.attempt,
-            "timeout_deadline": self.run_deadline_ms,
-            "queue_wait_ms": self.queue_wait_ms_int,
-            "model_wait_ms": 0,
-            "score_wait_ms": self.score_wait_ms_int,
-            "heartbeat_reason": None,
-        }
-        if extra:
-            payload.update(extra)
+        payload = build_run_event(
+            self.run_id,
+            phase_name,
+            message,
+            error_code=error,
+            extra={
+                "state_before": state_before,
+                "state_after": state_after,
+                "worker_id": self.worker_id,
+                "attempt": self.attempt,
+                "timeout_deadline": self.run_deadline_ms,
+                "queue_wait_ms": self.queue_wait_ms_int,
+                "model_wait_ms": 0,
+                "score_wait_ms": self.score_wait_ms_int,
+                "heartbeat_reason": None,
+                **(extra or {}),
+            },
+        )
         self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.event_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")

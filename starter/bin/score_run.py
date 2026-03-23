@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from harnesslib import (
+    build_run_event,
     canonicalize_json_file,
     env_flag,
     evaluate_policy_guardrail,
@@ -61,6 +62,8 @@ class ScoreContext:
     event_log_path: pathlib.Path
     repo_root: pathlib.Path
     contract_path: pathlib.Path | None = None
+    worker_id: str | None = None
+    attempt: int | None = None
 
 
 @dataclass(frozen=True)
@@ -131,7 +134,16 @@ def build_context(argv: list[str]) -> ScoreContext:
         event_log_path=pathlib.Path(argv[5] if len(argv) == 6 else event_default).resolve(),
         repo_root=resolve_repo_root(run_dir),
         contract_path=(run_dir / "run.contract.json").resolve(),
+        worker_id=os.environ.get("HARNESS_WORKER_ID") or None,
+        attempt=_read_optional_int(os.environ.get("HARNESS_ATTEMPT")),
     )
+
+
+def _read_optional_int(value: str | None) -> int | None:
+    try:
+        return int(value) if value not in {None, ""} else None
+    except (TypeError, ValueError):
+        return None
 
 
 def append_event(
@@ -142,17 +154,20 @@ def append_event(
     error_code: str = "",
     extra: dict[str, Any] | None = None,
 ) -> None:
-    payload = {
-        "ts": now_utc(),
-        "trace_id": context.run_dir.name,
-        "run_id": context.run_dir.name,
-        "phase": phase,
-        "duration_ms": None,
-        "error_code": error_code or None,
-        "message": message,
-    }
+    payload_extra: dict[str, Any] = {}
+    if context.worker_id:
+        payload_extra["worker_id"] = context.worker_id
+    if context.attempt is not None:
+        payload_extra["attempt"] = context.attempt
     if extra:
-        payload.update(extra)
+        payload_extra.update(extra)
+    payload = build_run_event(
+        context.run_dir.name,
+        phase,
+        message,
+        error_code=error_code,
+        extra=payload_extra or None,
+    )
     context.event_log_path.parent.mkdir(parents=True, exist_ok=True)
     with context.event_log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")

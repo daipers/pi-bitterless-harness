@@ -37,6 +37,7 @@ for rel_path in [
     "starter/contracts/model-example-v1.schema.json",
     "starter/contracts/candidate-manifest-v1.schema.json",
     "starter/contracts/candidate-report-v1.schema.json",
+    "starter/contracts/run-event-v1.schema.json",
 ]:
     schema = json.loads((repo_root / rel_path).read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator.check_schema(schema)

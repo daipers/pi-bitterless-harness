@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from harnesslib import (
+    build_run_event,
     default_policy_path,
     load_policy,
     load_run_contract,
@@ -280,26 +281,24 @@ def _append_run_event(
     error_code: str = "",
     failure_classification: str | None = None,
 ) -> None:
-    payload = {
-        "run_id": run_dir.name,
-        "trace_id": run_dir.name,
-        "phase": phase,
-        "duration_ms": None,
-        "error_code": error_code,
-        "message": message,
-        "state_before": state_before,
-        "state_after": state_after,
-        "worker_id": worker_id,
-        "attempt": attempt,
-        "timeout_deadline": timeout_deadline,
-        "queue_wait_ms": queue_wait_ms,
-        "model_wait_ms": model_wait_ms,
-        "score_wait_ms": score_wait_ms,
-        "heartbeat_reason": heartbeat_reason,
-    }
-    if failure_classification:
-        payload["failure_classification"] = failure_classification
-        payload["failure_class"] = failure_classification
+    payload = build_run_event(
+        run_dir.name,
+        phase,
+        message,
+        error_code=error_code,
+        extra={
+            "state_before": state_before,
+            "state_after": state_after,
+            "worker_id": worker_id,
+            "attempt": attempt,
+            "timeout_deadline": timeout_deadline,
+            "queue_wait_ms": queue_wait_ms,
+            "model_wait_ms": model_wait_ms,
+            "score_wait_ms": score_wait_ms,
+            "heartbeat_reason": heartbeat_reason,
+            "failure_classification": failure_classification,
+        },
+    )
     _append_jsonl(run_dir / "run-events.jsonl", payload)
 
 
