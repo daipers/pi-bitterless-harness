@@ -2,6 +2,7 @@
 /.ruff_cache/
 /.coverage
 /.venv/
+/.venv-py314-backup/
 /dist/
 /starter/runs/
 /.hypothesis/

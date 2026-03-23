@@ -1,35 +1,37 @@
 # pi-bitterless-harness
 
-`pi-bitterless-harness` is a deterministic, file-based harness for running model-assisted tasks through the `pi` CLI while keeping the control plane simple and auditable.
+Run `pi` like an engineer, not like a black box.
 
-It is built around a "keep the harness stupid" idea:
+`pi-bitterless-harness` is a deterministic, file-based execution harness for teams who want agent runs to be inspectable, benchmarkable, and releaseable.
+
+Instead of burying everything inside an orchestration layer, it keeps the workflow simple:
 
 - the model does the reasoning
-- the harness manages contracts, artifacts, scoring, and evidence
-- every important run artifact lives on disk as plain files
+- the harness enforces contracts and captures evidence
+- every important artifact stays on disk in plain files
 
-## What This Repo Is
+## Why People Use It
+
+Most agent wrappers get complicated fast. This repo is for teams who want:
+
+- repeatable runs with versioned contracts
+- transcripts, manifests, scores, and diffs they can actually inspect
+- external evaluation instead of self-grading
+- retrieval, replay, and fault-injection benchmarks
+- release gates based on fresh evidence, not intuition
+
+In short: it helps turn raw agent execution into something you can test, audit, compare, and ship.
+
+## What It Includes
 
 This repo provides a thin execution wrapper around `pi` with:
 
-- versioned run contracts
 - isolated per-run workspaces
 - structured transcripts, manifests, and score artifacts
-- external evaluation commands
 - retrieval-assisted context for capability runs
-- replay, fault-injection, and retrieval benchmarks
+- learning datasets and candidate manifests for retrieval improvements
+- replay, fault-injection, and retrieval benchmark tooling
 - typed release-gate evidence for production readiness
-
-The goal is to make model runs easier to inspect, test, benchmark, and ship without hiding the workflow behind a large orchestration system.
-
-## Why It Exists
-
-Most agent harnesses grow into complicated controller layers. This repo takes the opposite approach:
-
-- keep the runtime path thin
-- store state in files instead of hidden services
-- evaluate outcomes with external checks
-- promote releases using evidence, not vibes
 
 If you want the fuller design rationale, start with [pi-bitterless_harness_spec.md](./pi-bitterless_harness_spec.md).
 
