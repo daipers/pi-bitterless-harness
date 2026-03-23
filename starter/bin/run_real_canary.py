@@ -44,16 +44,57 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("HARNESS_REAL_CANARY_SUMMARY_PATH"),
         help="optional explicit output path for the canary summary JSON",
     )
+    parser.add_argument(
+        "--label",
+        default=os.environ.get("HARNESS_REAL_CANARY_LABEL", "default"),
+        help="optional label recorded in the canary summary",
+    )
+    parser.add_argument(
+        "--policy-candidate",
+        default=os.environ.get("HARNESS_POLICY_CANDIDATE_PATH"),
+        help="optional policy candidate manifest to activate during the canary",
+    )
     return parser.parse_args(argv)
 
 
-def base_env() -> dict[str, str]:
+def base_env(*, policy_candidate: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     auth_path = env.get("HARNESS_PI_AUTH_JSON")
     if not auth_path:
         raise SystemExit("HARNESS_PI_AUTH_JSON is required for the real pi canary")
     env["PYTHONPATH"] = str(BIN_DIR)
+    if policy_candidate:
+        env["HARNESS_POLICY_CANDIDATE_PATH"] = str(pathlib.Path(policy_candidate).resolve())
     return env
+
+
+def policy_candidate_metadata(candidate_path: str | None) -> dict[str, Any] | None:
+    if not candidate_path:
+        return None
+    path = pathlib.Path(candidate_path).resolve()
+    if not path.exists():
+        return {
+            "path": str(path),
+            "configured": False,
+            "error": "candidate manifest not found",
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "path": str(path),
+            "configured": False,
+            "error": f"failed to parse candidate manifest: {exc}",
+        }
+    promotion = payload.get("promotion", {}) if isinstance(payload.get("promotion"), dict) else {}
+    return {
+        "path": str(path),
+        "configured": True,
+        "candidate_id": payload.get("candidate_id"),
+        "candidate_type": payload.get("candidate_type"),
+        "mode": payload.get("mode"),
+        "activation_approved": promotion.get("activation_approved"),
+    }
 
 
 def create_run(title: str, env: dict[str, str]) -> pathlib.Path:
@@ -272,9 +313,13 @@ def scenario_partial_recovery(env: dict[str, str], model: str) -> dict[str, Any]
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    env = base_env()
+    env = base_env(policy_candidate=args.policy_candidate)
     model = env.get("HARNESS_REAL_PI_MODEL", "")
-    summary_name = f"real-canary-{time.strftime('%Y%m%d-%H%M%S')}.summary.json"
+    label_slug = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in str(args.label or "default").strip().lower()
+    ).strip("-") or "default"
+    summary_name = f"real-canary-{label_slug}-{time.strftime('%Y%m%d-%H%M%S')}.summary.json"
     summary_path = (
         pathlib.Path(args.summary_path).resolve()
         if args.summary_path
@@ -332,6 +377,8 @@ def main(argv: list[str] | None = None) -> int:
         "duration_ms": round((time.perf_counter() - started_monotonic) * 1000.0, 2),
         "supported_pi_version": (REPO_ROOT / "PI_VERSION").read_text(encoding="utf-8").strip(),
         "model": model or None,
+        "canary_label": args.label,
+        "policy_candidate": policy_candidate_metadata(args.policy_candidate),
         "git_sha": git_sha() or os.environ.get("GITHUB_SHA", ""),
         "git_ref": os.environ.get("GITHUB_REF", ""),
         "git_ref_name": os.environ.get("GITHUB_REF_NAME", ""),

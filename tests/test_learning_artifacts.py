@@ -699,3 +699,359 @@ def test_evaluate_retrieval_candidate_blocks_dense_active_promotion_without_repl
     )
     assert promoted_manifest["promotion"]["activation_approved"] is False
     assert promoted_manifest["mode"] == "shadow"
+
+
+def test_train_policy_candidate_emits_shadow_candidate_with_learned_recommendations(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    examples_path = starter / "learning" / "latest" / "policy-examples.jsonl"
+    examples_path.parent.mkdir(parents=True, exist_ok=True)
+    examples_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "policy_example_version": "v1",
+                        "example_id": "policy-1",
+                        "features": {
+                            "execution_profile": "capability",
+                            "selected_source_count": 2,
+                            "candidate_run_count": 6,
+                        },
+                        "labels": {
+                            "overall_pass": True,
+                            "execution_profile": "capability",
+                            "retry_recommended": True,
+                            "benchmark_eligible": True,
+                            "context_budget": {
+                                "selected_source_count": 2,
+                                "candidate_run_count": 6,
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "policy_example_version": "v1",
+                        "example_id": "policy-2",
+                        "features": {
+                            "execution_profile": "capability",
+                            "selected_source_count": 3,
+                            "candidate_run_count": 8,
+                        },
+                        "labels": {
+                            "overall_pass": True,
+                            "execution_profile": "capability",
+                            "retry_recommended": False,
+                            "benchmark_eligible": True,
+                            "context_budget": {
+                                "selected_source_count": 3,
+                                "candidate_run_count": 8,
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "policy_example_version": "v1",
+                        "example_id": "policy-3",
+                        "features": {
+                            "execution_profile": "strict",
+                            "selected_source_count": 1,
+                            "candidate_run_count": 2,
+                        },
+                        "labels": {
+                            "overall_pass": False,
+                            "execution_profile": "strict",
+                            "retry_recommended": False,
+                            "benchmark_eligible": False,
+                            "context_budget": {
+                                "selected_source_count": 1,
+                                "candidate_run_count": 2,
+                            },
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out_path = starter / "candidates" / "policy" / "trained.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(starter / "bin" / "train_policy_candidate.py"),
+            "--examples",
+            str(examples_path),
+            "--out",
+            str(out_path),
+            "--candidate-id",
+            "policy-trained-1",
+        ],
+        cwd=starter,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"PYTHONPATH": str(starter / "bin")},
+    )
+
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert payload["candidate_manifest_version"] == "v1"
+    assert payload["candidate_id"] == "policy-trained-1"
+    assert payload["mode"] == "shadow"
+    assert payload["runtime"]["policy_model_version"] == "aggregate-policy-v1"
+    assert payload["runtime"]["recommendations"]["execution_profile"]["value"] == "capability"
+    assert payload["runtime"]["recommendations"]["retry_limit"]["value"] == 3
+    assert (
+        payload["runtime"]["recommendations"]["context_budget"]["value"]["max_source_runs"] >= 2
+    )
+    assert payload["runtime"]["recommendations"]["benchmark_eligible"]["value"] is True
+    assert payload["promotion"]["activation_approved"] is False
+
+
+def test_evaluate_policy_candidate_can_promote_manifest_from_replay_and_canaries(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    candidate_path = starter / "candidates" / "policy" / "trained.json"
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    write_candidate_manifest(
+        candidate_path,
+        build_candidate_manifest(
+            candidate_type="policy",
+            candidate_id="policy-trained-1",
+            mode="shadow",
+            runtime={
+                "policy_model_version": "aggregate-policy-v1",
+                "activation_threshold": 0.6,
+                "recommendations": {
+                    "execution_profile": {"value": "capability", "confidence": 0.8},
+                    "retry_limit": {"value": 3, "confidence": 0.7},
+                    "context_budget": {
+                        "value": {"max_source_runs": 2, "max_candidates": 6},
+                        "confidence": 0.75,
+                    },
+                    "benchmark_eligible": {"value": True, "confidence": 0.8},
+                },
+            },
+            promotion={
+                "activation_approved": False,
+                "approved_at": None,
+                "approval_reason": "pending replay/canary benchmark",
+            },
+        ),
+    )
+    baseline_replay_path = starter / "runs" / "baseline-replay.json"
+    baseline_replay_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_replay_path.write_text(
+        json.dumps(
+            {
+                "benchmark_report_version": "v1",
+                "generated_at": "2026-03-22T10:00:00Z",
+                "overall_pass": True,
+                "replay": {
+                    "workload_metrics": [
+                        {"concurrency": 1, "pass_rate_percent": 66.7, "retry_recovery_rate": 0.5}
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    candidate_replay_path = starter / "runs" / "candidate-replay.json"
+    candidate_replay_path.write_text(
+        json.dumps(
+            {
+                "benchmark_report_version": "v1",
+                "generated_at": "2026-03-22T11:00:00Z",
+                "overall_pass": True,
+                "replay": {
+                    "workload_metrics": [
+                        {"concurrency": 1, "pass_rate_percent": 100.0, "retry_recovery_rate": 1.0}
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    baseline_canary_dir = starter / "runs" / "baseline-canaries"
+    candidate_canary_dir = starter / "runs" / "candidate-canaries"
+    baseline_canary_dir.mkdir(parents=True, exist_ok=True)
+    candidate_canary_dir.mkdir(parents=True, exist_ok=True)
+    for path, timestamp in [
+        (baseline_canary_dir / "one.summary.json", "2026-03-22T10:00:00Z"),
+        (baseline_canary_dir / "two.summary.json", "2026-03-22T09:00:00Z"),
+        (candidate_canary_dir / "one.summary.json", "2026-03-22T10:30:00Z"),
+        (candidate_canary_dir / "two.summary.json", "2026-03-22T09:30:00Z"),
+    ]:
+        path.write_text(
+            json.dumps(
+                {
+                    "generated_at": timestamp,
+                    "overall_ok": True,
+                    "supported_pi_version": "0.61.1",
+                    "git_sha": "abc123",
+                    "scenario_totals": {"total": 6, "passed": 6, "failed": 0},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    report_path = starter / "runs" / "policy-candidate-report.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(starter / "bin" / "evaluate_policy_candidate.py"),
+            "--candidate",
+            str(candidate_path),
+            "--baseline-replay-report",
+            str(baseline_replay_path),
+            "--candidate-replay-report",
+            str(candidate_replay_path),
+            "--baseline-canary-summary-glob",
+            str(baseline_canary_dir / "*.summary.json"),
+            "--candidate-canary-summary-glob",
+            str(candidate_canary_dir / "*.summary.json"),
+            "--out",
+            str(report_path),
+            "--promote-if-passed",
+        ],
+        cwd=starter,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"PYTHONPATH": str(starter / "bin")},
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    promoted_manifest = json.loads(candidate_path.read_text(encoding="utf-8"))
+    assert report["candidate_report_version"] == "v1"
+    assert report["comparison"]["activation_approved"] is True
+    assert report["promotion_summary"]["candidate_types"]["policy"] == "policy-trained-1"
+    assert promoted_manifest["promotion"]["activation_approved"] is True
+    assert promoted_manifest["mode"] == "active"
+
+
+def test_evaluate_policy_candidate_blocks_promotion_when_candidate_canaries_regress(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    candidate_path = starter / "candidates" / "policy" / "trained.json"
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    write_candidate_manifest(
+        candidate_path,
+        build_candidate_manifest(
+            candidate_type="policy",
+            candidate_id="policy-trained-1",
+            mode="shadow",
+            runtime={"policy_model_version": "aggregate-policy-v1", "recommendations": {}},
+            promotion={
+                "activation_approved": False,
+                "approved_at": None,
+                "approval_reason": "pending replay/canary benchmark",
+            },
+        ),
+    )
+    baseline_replay_path = starter / "runs" / "baseline-replay.json"
+    baseline_replay_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_replay_path.write_text(
+        json.dumps(
+            {
+                "benchmark_report_version": "v1",
+                "generated_at": "2026-03-22T10:00:00Z",
+                "overall_pass": True,
+                "replay": {
+                    "workload_metrics": [
+                        {"concurrency": 1, "pass_rate_percent": 80.0, "retry_recovery_rate": 1.0}
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    candidate_replay_path = starter / "runs" / "candidate-replay.json"
+    candidate_replay_path.write_text(
+        json.dumps(
+            {
+                "benchmark_report_version": "v1",
+                "generated_at": "2026-03-22T11:00:00Z",
+                "overall_pass": True,
+                "replay": {
+                    "workload_metrics": [
+                        {"concurrency": 1, "pass_rate_percent": 90.0, "retry_recovery_rate": 1.0}
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    baseline_canary_dir = starter / "runs" / "baseline-canaries"
+    candidate_canary_dir = starter / "runs" / "candidate-canaries"
+    baseline_canary_dir.mkdir(parents=True, exist_ok=True)
+    candidate_canary_dir.mkdir(parents=True, exist_ok=True)
+    for path, ok in [
+        (baseline_canary_dir / "one.summary.json", True),
+        (baseline_canary_dir / "two.summary.json", True),
+        (candidate_canary_dir / "one.summary.json", True),
+        (candidate_canary_dir / "two.summary.json", False),
+    ]:
+        path.write_text(
+            json.dumps(
+                {
+                    "generated_at": "2026-03-22T10:00:00Z",
+                    "overall_ok": ok,
+                    "supported_pi_version": "0.61.1",
+                    "git_sha": "abc123",
+                    "scenario_totals": {"total": 6, "passed": 6 if ok else 5, "failed": 0 if ok else 1},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    report_path = starter / "runs" / "policy-candidate-report.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(starter / "bin" / "evaluate_policy_candidate.py"),
+            "--candidate",
+            str(candidate_path),
+            "--baseline-replay-report",
+            str(baseline_replay_path),
+            "--candidate-replay-report",
+            str(candidate_replay_path),
+            "--baseline-canary-summary-glob",
+            str(baseline_canary_dir / "*.summary.json"),
+            "--candidate-canary-summary-glob",
+            str(candidate_canary_dir / "*.summary.json"),
+            "--out",
+            str(report_path),
+            "--promote-if-passed",
+        ],
+        cwd=starter,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"PYTHONPATH": str(starter / "bin")},
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    promoted_manifest = json.loads(candidate_path.read_text(encoding="utf-8"))
+    assert report["comparison"]["activation_approved"] is False
+    assert report["comparison"]["threshold_results"]["candidate_canary_pass"] is False
+    assert promoted_manifest["promotion"]["activation_approved"] is False
+    assert promoted_manifest["mode"] == "shadow"

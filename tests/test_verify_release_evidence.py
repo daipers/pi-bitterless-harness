@@ -53,6 +53,21 @@ def make_provenance(*, supported_pi_version: str = "0.61.1") -> dict[str, object
     }
 
 
+def make_policy_candidate_report(*, overall_pass: bool = True) -> dict[str, object]:
+    return {
+        "candidate_report_version": "v1",
+        "generated_at": "2026-03-22T11:15:00Z",
+        "candidate_type": "policy",
+        "candidate_id": "policy-candidate-1",
+        "overall_pass": overall_pass,
+        "promotion_summary": {
+            "bundle_id": "bundle-1",
+            "candidate_types": {"policy": "policy-candidate-1"},
+            "threshold_results": {"candidate_canary_pass": overall_pass},
+        },
+    }
+
+
 def test_validate_summaries_accepts_fresh_matching_history(monkeypatch) -> None:
     monkeypatch.setattr(
         verify_release_evidence,
@@ -121,6 +136,7 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
 ) -> None:
     summary_path = tmp_path / "canary.summary.json"
     benchmark_path = tmp_path / "benchmark.json"
+    policy_candidate_path = tmp_path / "policy-candidate.json"
     provenance_path = tmp_path / "provenance.json"
     summary_path.write_text(
         json.dumps(make_summary(generated_at="2026-03-22T10:00:00Z"), indent=2) + "\n",
@@ -133,6 +149,10 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
     )
     benchmark_path.write_text(
         json.dumps(make_benchmark_report(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    policy_candidate_path.write_text(
+        json.dumps(make_policy_candidate_report(), indent=2) + "\n",
         encoding="utf-8",
     )
     provenance_path.write_text(
@@ -150,6 +170,8 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
             str(summary_path.parent / "*.summary.json"),
             "--benchmark-report",
             str(benchmark_path),
+            "--policy-candidate-report",
+            str(policy_candidate_path),
             "--provenance-file",
             str(provenance_path),
         ]
@@ -163,9 +185,25 @@ def test_build_release_gate_report_accepts_benchmark_and_provenance(
     assert report["checks"]["benchmark"]["passed"] is True
     assert report["checks"]["benchmark"]["bundle_id"] == "bundle-1"
     assert report["checks"]["benchmark"]["candidate_types"]["retrieval"] == "retrieval-candidate-1"
+    assert report["checks"]["policy_candidate"]["passed"] is True
+    assert report["checks"]["policy_candidate"]["candidate_id"] == "policy-candidate-1"
     assert report["checks"]["provenance"]["passed"] is True
     assert report["checks"]["runtime"]["passed"] is True
     assert report["checks"]["runtime"]["expected_python_policy"] == "3.12.x"
+
+
+def test_validate_candidate_report_rejects_failed_thresholds(tmp_path) -> None:
+    candidate_report_path = tmp_path / "policy-candidate.json"
+    candidate_report_path.write_text(
+        json.dumps(make_policy_candidate_report(overall_pass=False), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="candidate report did not pass promotion thresholds"):
+        verify_release_evidence.validate_candidate_report(
+            candidate_report_path,
+            expected_candidate_type="policy",
+        )
 
 
 def test_build_release_gate_report_allows_canary_only_verification(

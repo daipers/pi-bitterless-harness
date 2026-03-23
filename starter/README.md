@@ -324,6 +324,27 @@ python3 starter/bin/evaluate_retrieval_candidate.py \
   --promote-if-passed
 ```
 
+Train a policy candidate from learning examples:
+
+```bash
+python3 starter/bin/train_policy_candidate.py \
+  --examples starter/learning/latest/policy-examples.jsonl \
+  --out starter/candidates/policy/active.json
+```
+
+Evaluate the policy candidate against replay and canary evidence and optionally promote it:
+
+```bash
+python3 starter/bin/evaluate_policy_candidate.py \
+  --candidate starter/candidates/policy/active.json \
+  --baseline-replay-report starter/runs/replay-baseline.json \
+  --candidate-replay-report starter/runs/replay-candidate.json \
+  --baseline-canary-summary-glob "starter/runs/real-canary-baseline-*.summary.json" \
+  --candidate-canary-summary-glob "starter/runs/real-canary-policy-*.summary.json" \
+  --out starter/runs/policy-candidate-report.json \
+  --promote-if-passed
+```
+
 Build immutable learning datasets from run evidence:
 
 ```bash
@@ -371,6 +392,8 @@ python3 starter/bin/run_real_canary.py
 
 The canary covers success, forced invalid `result.json`, timeout, interruption, retry, and partial-run recovery. Evidence is written under `starter/runs/`, and each canary summary now includes scenario rollups, `PI_VERSION`, model, commit SHA, and referenced run directories.
 
+For a real policy-candidate promotion check, use [`.github/workflows/real-policy-candidate-canary.yml`](../../.github/workflows/real-policy-candidate-canary.yml). It runs a baseline real-`pi` canary, captures a replay corpus, reruns the canary and replay benchmark with a temporarily activated policy candidate manifest, and emits a typed `policy-candidate-report.json`.
+
 Build a sanitized replay corpus from real run evidence:
 
 ```bash
@@ -408,6 +431,7 @@ If `HARNESS_BENCHMARK_REPORT` and `HARNESS_CANARY_SUMMARY_GLOB` are set, `starte
 - `dist/<artifact>.promotion-bundle.json`
 
 Set `HARNESS_REPLAY_REPORT` and `HARNESS_FAULT_REPORT` as well when building a promotion-ready bundle so replay and fault-injection evidence are attached to the same release package.
+Set `HARNESS_POLICY_CANDIDATE_REPORT` as well when an active policy candidate is part of the promotion proof.
 
 For automation-facing failure handling, use `outputs/run_manifest.json.primary_error_code` and `outputs/run_manifest.json.failure_classifications`. The legacy aggregate `error_code` remains for compatibility, and the raw evidence in `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` remains the richer source of truth.
 
@@ -423,6 +447,7 @@ starter/bin/preflight.sh
 HARNESS_BENCHMARK_REPORT=starter/runs/retrieval-latest.json \
 HARNESS_REPLAY_REPORT=starter/runs/replay-latest.json \
 HARNESS_FAULT_REPORT=starter/runs/fault-latest.json \
+HARNESS_POLICY_CANDIDATE_REPORT=starter/runs/policy-candidate-report.json \
 HARNESS_CANARY_SUMMARY_GLOB="starter/runs/real-canary-*.summary.json" \
 starter/bin/build-release-artifacts.sh
 ```

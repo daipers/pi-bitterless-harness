@@ -1,0 +1,163 @@
+name: real-policy-candidate-canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      policy_candidate_path:
+        description: "Repo-relative path to the policy candidate manifest"
+        required: false
+        default: "starter/candidates/policy/active.json"
+  schedule:
+    - cron: "0 15 * * 1"
+
+jobs:
+  policy-canary:
+    runs-on: ubuntu-latest
+    env:
+      POLICY_CANDIDATE_PATH: ${{ github.event.inputs.policy_candidate_path || 'starter/candidates/policy/active.json' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pi
+        run: npm install -g @mariozechner/pi-coding-agent@$(cat PI_VERSION)
+
+      - name: Install Python tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-dev.txt
+
+      - name: Materialize pi auth
+        env:
+          PI_AUTH_JSON: ${{ secrets.PI_AUTH_JSON }}
+        run: |
+          if [[ -z "${PI_AUTH_JSON}" ]]; then
+            echo "missing required PI_AUTH_JSON secret" >&2
+            exit 1
+          fi
+          auth_path="$RUNNER_TEMP/pi-auth.json"
+          printf '%s' "${PI_AUTH_JSON}" > "$auth_path"
+          chmod 600 "$auth_path"
+          echo "HARNESS_PI_AUTH_JSON=$auth_path" >> "$GITHUB_ENV"
+
+      - name: Verify policy candidate manifest exists
+        run: |
+          if [[ ! -f "${POLICY_CANDIDATE_PATH}" ]]; then
+            echo "missing policy candidate manifest: ${POLICY_CANDIDATE_PATH}" >&2
+            exit 1
+          fi
+
+      - name: Verify supported runtimes
+        run: starter/bin/check-supported-runtime.sh
+
+      - name: Materialize active policy candidate for canary evaluation
+        env:
+          OUTPUT_PATH: ${{ runner.temp }}/policy-candidate.active.json
+        run: |
+          python3 - <<'PY' "${POLICY_CANDIDATE_PATH}" "${OUTPUT_PATH}"
+          import json
+          import pathlib
+          import sys
+
+          source = pathlib.Path(sys.argv[1]).resolve()
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          payload = json.loads(source.read_text(encoding="utf-8"))
+          promotion = payload.get("promotion", {}) if isinstance(payload.get("promotion"), dict) else {}
+          promotion.update(
+              {
+                  "activation_approved": True,
+                  "approved_at": "workflow-eval",
+                  "approval_reason": "temporary activation for real policy canary workflow",
+              }
+          )
+          payload["promotion"] = promotion
+          payload["mode"] = "active"
+          destination.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          print(destination)
+          PY
+          echo "HARNESS_ACTIVE_POLICY_CANDIDATE=$OUTPUT_PATH" >> "$GITHUB_ENV"
+
+      - name: Run baseline real pi canary
+        env:
+          HARNESS_REAL_PI_MODEL: ${{ vars.PI_MODEL }}
+          HARNESS_REAL_CANARY_SUMMARY_PATH: ${{ runner.temp }}/real-pi-baseline.summary.json
+          HARNESS_REAL_CANARY_LABEL: baseline
+        run: python3 starter/bin/run_real_canary.py --label baseline
+
+      - name: Build replay corpus from baseline runs
+        run: |
+          python3 starter/bin/build_replay_corpus.py \
+            --runs-root starter/runs \
+            --out "${{ runner.temp }}/policy-replay-corpus.json" \
+            --limit 12
+
+      - name: Run baseline replay benchmark
+        run: |
+          python3 starter/bin/benchmark_harness.py \
+            --mode replay \
+            --replay-corpus "${{ runner.temp }}/policy-replay-corpus.json" \
+            --replay-runs 6 \
+            --history-dir "${{ runner.temp }}/baseline-replay-history" \
+            --out "${{ runner.temp }}/baseline-replay.json"
+
+      - name: Run policy-candidate real pi canary
+        env:
+          HARNESS_REAL_PI_MODEL: ${{ vars.PI_MODEL }}
+          HARNESS_REAL_CANARY_SUMMARY_PATH: ${{ runner.temp }}/real-pi-policy-candidate.summary.json
+          HARNESS_REAL_CANARY_LABEL: policy-candidate
+        run: |
+          python3 starter/bin/run_real_canary.py \
+            --label policy-candidate \
+            --policy-candidate "${HARNESS_ACTIVE_POLICY_CANDIDATE}"
+
+      - name: Run policy-candidate replay benchmark
+        run: |
+          python3 starter/bin/benchmark_harness.py \
+            --mode replay \
+            --replay-corpus "${{ runner.temp }}/policy-replay-corpus.json" \
+            --replay-runs 6 \
+            --history-dir "${{ runner.temp }}/candidate-replay-history" \
+            --policy-candidate "${HARNESS_ACTIVE_POLICY_CANDIDATE}" \
+            --out "${{ runner.temp }}/candidate-replay.json"
+
+      - name: Evaluate policy candidate canary evidence
+        run: |
+          python3 starter/bin/evaluate_policy_candidate.py \
+            --candidate "${HARNESS_ACTIVE_POLICY_CANDIDATE}" \
+            --baseline-replay-report "${{ runner.temp }}/baseline-replay.json" \
+            --candidate-replay-report "${{ runner.temp }}/candidate-replay.json" \
+            --baseline-canary-summary-glob "${{ runner.temp }}/real-pi-baseline.summary.json" \
+            --candidate-canary-summary-glob "${{ runner.temp }}/real-pi-policy-candidate.summary.json" \
+            --min-runs 1 \
+            --freshness-hours 36 \
+            --out "${{ runner.temp }}/policy-candidate-report.json"
+
+      - name: Verify policy candidate canary summary
+        run: |
+          python3 starter/bin/verify_release_evidence.py \
+            --summary-glob "${{ runner.temp }}/real-pi-policy-candidate.summary.json" \
+            --policy-candidate-report "${{ runner.temp }}/policy-candidate-report.json" \
+            --min-runs 1 \
+            --freshness-hours 36
+
+      - name: Upload policy candidate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-policy-candidate-canary
+          path: |
+            ${{ runner.temp }}/policy-candidate.active.json
+            ${{ runner.temp }}/real-pi-baseline.summary.json
+            ${{ runner.temp }}/real-pi-policy-candidate.summary.json
+            ${{ runner.temp }}/policy-replay-corpus.json
+            ${{ runner.temp }}/baseline-replay.json
+            ${{ runner.temp }}/candidate-replay.json
+            ${{ runner.temp }}/baseline-replay-history
+            ${{ runner.temp }}/candidate-replay-history
+            ${{ runner.temp }}/policy-candidate-report.json

@@ -43,6 +43,15 @@ export HARNESS_REAL_PI_MODEL=anthropic/claude-sonnet-4
 python3 starter/bin/run_real_canary.py
 ```
 
+For a real policy-candidate promotion check, run a paired baseline and candidate canary before calling the policy candidate production-stable. The repository includes a dedicated GitHub workflow for this at [`.github/workflows/real-policy-candidate-canary.yml`](../../.github/workflows/real-policy-candidate-canary.yml). It:
+
+- runs a baseline real-`pi` canary
+- builds a replay corpus from those fresh runs
+- reruns the canary and replay benchmark with a temporarily activated policy candidate manifest
+- emits `policy-candidate-report.json` through `starter/bin/evaluate_policy_candidate.py`
+
+The workflow uploads both canary summaries, both replay reports, the replay corpus, and the policy candidate report as one evidence bundle.
+
 Treat the recent canary history as the primary promotion signal. Before tagging a release, verify recent successful canary artifacts from `main`:
 
 ```bash
@@ -112,6 +121,8 @@ The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use
 - Build learning datasets with `python3 starter/bin/build_learning_datasets.py`
 - Train retrieval candidates with `python3 starter/bin/train_retrieval_candidate.py`
 - Evaluate and promote retrieval candidates with `python3 starter/bin/evaluate_retrieval_candidate.py`
+- Train policy candidates with `python3 starter/bin/train_policy_candidate.py`
+- Evaluate policy candidates with `python3 starter/bin/evaluate_policy_candidate.py`
 - Build candidate reports with `python3 starter/bin/build_candidate_report.py`
 - Restore an archived run with `starter/bin/restore-run-evidence.sh`
 - Partial reruns are automatically moved into `runs/<run-id>/recovery/<timestamp>/`
@@ -134,6 +145,8 @@ The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use
 - partial-run recovery
 
 It writes a summary JSON file under `starter/runs/real-canary-*.summary.json`.
+
+When `--label` is provided, the summary file name and payload record that label. When `--policy-candidate` is provided, the summary also records the candidate manifest metadata used for that canary run.
 
 Each summary includes:
 

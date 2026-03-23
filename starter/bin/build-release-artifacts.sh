@@ -15,6 +15,7 @@ benchmark_report_input="${HARNESS_BENCHMARK_REPORT:-}"
 canary_summary_glob="${HARNESS_CANARY_SUMMARY_GLOB:-}"
 replay_report_input="${HARNESS_REPLAY_REPORT:-}"
 fault_report_input="${HARNESS_FAULT_REPORT:-}"
+policy_candidate_report_input="${HARNESS_POLICY_CANDIDATE_REPORT:-}"
 
 "$script_dir/check-supported-runtime.sh"
 
@@ -77,6 +78,9 @@ if [[ -n "$benchmark_report_input" && -n "$canary_summary_glob" ]]; then
   if [[ -n "$fault_report_input" ]]; then
     release_gate_args+=(--fault-report "$fault_report_input")
   fi
+  if [[ -n "$policy_candidate_report_input" ]]; then
+    release_gate_args+=(--policy-candidate-report "$policy_candidate_report_input")
+  fi
   python3 "$script_dir/verify_release_evidence.py" "${release_gate_args[@]}"
 fi
 
@@ -89,7 +93,8 @@ python3 - <<'PY' \
   "$benchmark_report_input" \
   "$replay_report_input" \
   "$fault_report_input" \
-  "$release_gate_file"
+  "$release_gate_file" \
+  "$policy_candidate_report_input"
 import json
 import pathlib
 import sys
@@ -104,6 +109,7 @@ benchmark_report = pathlib.Path(sys.argv[6]) if sys.argv[6] else None
 replay_report = pathlib.Path(sys.argv[7]) if sys.argv[7] else None
 fault_report = pathlib.Path(sys.argv[8]) if sys.argv[8] else None
 release_gate = pathlib.Path(sys.argv[9]) if sys.argv[9] else None
+policy_candidate_report = pathlib.Path(sys.argv[10]) if sys.argv[10] else None
 
 payload = {
     "bundle_version": "v1",
@@ -117,6 +123,11 @@ payload = {
         "replay_report": replay_report.name if replay_report and replay_report.exists() else None,
         "fault_report": fault_report.name if fault_report and fault_report.exists() else None,
         "release_gate": release_gate.name if release_gate and release_gate.exists() else None,
+        "policy_candidate_report": (
+            policy_candidate_report.name
+            if policy_candidate_report and policy_candidate_report.exists()
+            else None
+        ),
     },
 }
 bundle_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

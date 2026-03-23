@@ -71,6 +71,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="optional release provenance JSON produced by build-release-artifacts.sh",
     )
     parser.add_argument(
+        "--policy-candidate-report",
+        default=None,
+        help="optional policy candidate report JSON produced by evaluate_policy_candidate.py",
+    )
+    parser.add_argument(
         "--expected-python-version",
         default=None,
         help="required Python version prefix; defaults to repo .python-version",
@@ -289,6 +294,31 @@ def validate_benchmark_report(path: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def validate_candidate_report(
+    path: pathlib.Path,
+    *,
+    expected_candidate_type: str,
+) -> dict[str, Any]:
+    payload = read_json(path)
+    if payload.get("candidate_report_version") != "v1":
+        raise SystemExit("candidate report is missing candidate_report_version=v1")
+    if payload.get("candidate_type") != expected_candidate_type:
+        raise SystemExit(f"candidate report type mismatch: expected {expected_candidate_type}")
+    if payload.get("overall_pass") is not True:
+        raise SystemExit("candidate report did not pass promotion thresholds")
+    promotion_summary = payload.get("promotion_summary", {})
+    return {
+        "passed": True,
+        "path": str(path),
+        "candidate_report_version": payload.get("candidate_report_version"),
+        "candidate_type": payload.get("candidate_type"),
+        "candidate_id": payload.get("candidate_id"),
+        "bundle_id": promotion_summary.get("bundle_id"),
+        "threshold_results": dict(promotion_summary.get("threshold_results", {})),
+        "candidate_types": dict(promotion_summary.get("candidate_types", {})),
+    }
+
+
 def validate_provenance(
     path: pathlib.Path,
     *,
@@ -393,6 +423,14 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
     else:
         provenance_report = skipped_check("release provenance not provided")
 
+    if args.policy_candidate_report:
+        policy_candidate_report = validate_candidate_report(
+            pathlib.Path(args.policy_candidate_report).resolve(),
+            expected_candidate_type="policy",
+        )
+    else:
+        policy_candidate_report = skipped_check("policy candidate report not provided")
+
     runtime_report = validate_runtime_evidence(
         expected_python=expected_python,
         expected_pi=expected_pi,
@@ -403,6 +441,7 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark": benchmark_report,
         "replay_benchmark": replay_report,
         "fault_injection_benchmark": fault_report,
+        "policy_candidate": policy_candidate_report,
         "provenance": provenance_report,
         "runtime": runtime_report,
     }
@@ -416,6 +455,7 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
             "benchmark_report": benchmark_report.get("path"),
             "replay_report": replay_report.get("path"),
             "fault_report": fault_report.get("path"),
+            "policy_candidate_report": policy_candidate_report.get("path"),
             "provenance_file": provenance_report.get("path"),
         },
         "summary": {
