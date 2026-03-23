@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 from collections import Counter
 from datetime import UTC, datetime
@@ -73,6 +74,24 @@ def _read_state(run_dir: pathlib.Path) -> str:
     return _to_state(manifest.get("state", ""))
 
 
+def _is_locked(run_dir: pathlib.Path) -> bool:
+    lock_dir = run_dir / ".run-lock"
+    if not lock_dir.is_dir():
+        return False
+    pid_file = lock_dir / "pid"
+    if not pid_file.is_file():
+        return False
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _parse_ts_ms(value: Any) -> int | None:
     if value is None:
         return None
@@ -132,6 +151,122 @@ def _split_codes(value: Any) -> list[str]:
     if not raw:
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def read_queue_entries(path: pathlib.Path) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in _read_jsonl(path):
+        run_id = str(entry.get("run_id", "")).strip()
+        if not run_id:
+            continue
+        entries[run_id] = dict(entry)
+    return entries
+
+
+def _effective_state(run_dir: pathlib.Path, manifest: dict[str, Any] | None = None) -> str:
+    state = _read_state(run_dir)
+    manifest = manifest or _read_manifest(run_dir)
+    manifest_state = _to_state(manifest.get("state", ""))
+
+    if state == "complete" and manifest_state == "complete":
+        return "complete"
+    if state == "running":
+        return "running" if _is_locked(run_dir) else "partial"
+    if state in {"claimed", "model_running", "scoring"} and not _is_locked(run_dir):
+        return "partial"
+    return state or manifest_state
+
+
+def _artifact_paths(run_dir: pathlib.Path) -> dict[str, str]:
+    return {
+        "events": str((run_dir / "run-events.jsonl").resolve()),
+        "transcript": str((run_dir / "transcript.jsonl").resolve()),
+        "manifest": str((run_dir / "outputs" / "run_manifest.json").resolve()),
+        "score": str((run_dir / "score.json").resolve()),
+        "patch": str((run_dir / "patch.diff").resolve()),
+        "result": str((run_dir / "result.json").resolve()),
+    }
+
+
+def _execution_profile(
+    run_dir: pathlib.Path,
+    manifest: dict[str, Any],
+    score: dict[str, Any],
+) -> str:
+    profile = str(manifest.get("execution", {}).get("profile", "")).strip()
+    if profile:
+        return profile
+    profile = str(score.get("execution_profile", "")).strip()
+    if profile:
+        return profile
+    contract = _read_json(run_dir / "run.contract.json")
+    return str(contract.get("execution_profile", "")).strip()
+
+
+def collect_run_rows(root: pathlib.Path, *, window_days: int = 30) -> list[dict[str, Any]]:
+    entries = _collect_runs(root, window_days=window_days)
+    queue_root = root / ".orchestrator"
+    run_queue = read_queue_entries(queue_root / "run_queue.jsonl")
+    score_queue = read_queue_entries(queue_root / "score_queue.jsonl")
+    rows: list[dict[str, Any]] = []
+
+    for entry in entries:
+        run_dir = entry["run_dir"]
+        manifest = entry["manifest"]
+        score = entry["score"]
+        effective_state = _effective_state(run_dir, manifest)
+        run_queue_entry = run_queue.get(run_dir.name, {})
+        score_queue_entry = score_queue.get(run_dir.name, {})
+        failure_classifications = sorted(
+            set(
+                _split_codes(manifest.get("failure_classifications"))
+                + _split_codes(score.get("failure_classifications"))
+            )
+        )
+        primary_error_code = str(manifest.get("primary_error_code") or "").strip()
+        if not primary_error_code:
+            primary_error_code = str(score.get("overall_error_code") or "").strip()
+
+        rows.append(
+            {
+                "run_id": run_dir.name,
+                "run_dir": str(run_dir.resolve()),
+                "state": effective_state,
+                "overall_pass": score.get("overall_pass")
+                if isinstance(score.get("overall_pass"), bool)
+                else None,
+                "primary_error_code": primary_error_code,
+                "failure_classifications": failure_classifications,
+                "execution_profile": _execution_profile(run_dir, manifest, score),
+                "duration_ms": entry["duration_ms"],
+                "queue_wait_ms": int(
+                    manifest.get("orchestration", {}).get("queue_wait_ms", 0) or 0
+                ),
+                "score_wait_ms": int(
+                    manifest.get("orchestration", {}).get("score_wait_ms", 0) or 0
+                ),
+                "worker_id": str(
+                    manifest.get("orchestration", {}).get("worker_id")
+                    or run_queue_entry.get("worker_id")
+                    or score_queue_entry.get("worker_id")
+                    or ""
+                ),
+                "run_queue_state": _to_state(run_queue_entry.get("state")),
+                "score_queue_state": _to_state(score_queue_entry.get("state")),
+                "artifact_paths": _artifact_paths(run_dir),
+                "updated_epoch_ms": int(run_dir.stat().st_mtime * 1000),
+            }
+        )
+
+    rows.sort(key=lambda item: (item["updated_epoch_ms"], item["run_id"]), reverse=True)
+    return rows
+
+
+def harvest_repo(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
+    return {
+        "summary": harvest(root, window_days=window_days),
+        "runs": collect_run_rows(root, window_days=window_days),
+    }
 
 
 def _collect_runs(root: pathlib.Path, *, window_days: int) -> list[dict[str, Any]]:

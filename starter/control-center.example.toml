@@ -1,0 +1,18 @@
+[ui]
+refresh_interval_seconds = 1.0
+window_days = 30
+
+[[repo]]
+id = "main"
+name = "Primary Harness"
+root = "/absolute/path/to/pi-bitterless-harness"
+auto_start = true
+max_model_workers = 2
+max_score_workers = 2
+
+[[repo]]
+id = "secondary"
+name = "Secondary Harness"
+root = "/absolute/path/to/another-pi-bitterless-harness"
+auto_start = false
+default_profile = "capability"
