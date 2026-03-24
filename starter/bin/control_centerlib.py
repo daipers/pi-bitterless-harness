@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -145,6 +147,69 @@ def _supported_python_minor(repo_root: pathlib.Path) -> str:
     return ".".join(expected.split(".")[:2])
 
 
+def _severity_rank(severity: str) -> int:
+    return {
+        "critical": 0,
+        "warning": 1,
+        "info": 2,
+        "success": 3,
+    }.get(severity, 4)
+
+
+def _render_relative_age(epoch_ms: int | None) -> str:
+    if not epoch_ms:
+        return "-"
+    delta_seconds = max(0, int((_now_ms() - epoch_ms) / 1000))
+    if delta_seconds < 60:
+        return f"{delta_seconds}s ago"
+    if delta_seconds < 3600:
+        return f"{delta_seconds // 60}m ago"
+    if delta_seconds < 86400:
+        return f"{delta_seconds // 3600}h ago"
+    return f"{delta_seconds // 86400}d ago"
+
+
+def _serialize_ui_action(action: UIAction) -> dict[str, Any]:
+    return {
+        "id": action.id,
+        "label": action.label,
+        "kind": action.kind,
+        "scope": action.scope,
+        "command_text": action.command_text,
+        "requires_confirmation": action.requires_confirmation,
+        "enabled": action.enabled,
+        "disabled_reason": action.disabled_reason,
+        "open_tab": action.open_tab,
+        "aliases": list(action.aliases),
+    }
+
+
+def _deserialize_ui_action(payload: dict[str, Any]) -> UIAction:
+    return UIAction(
+        id=str(payload.get("id", "")),
+        label=str(payload.get("label", "")),
+        kind=str(payload.get("kind", "")),
+        scope=str(payload.get("scope", "")),
+        command_text=str(payload.get("command_text", "")),
+        requires_confirmation=bool(payload.get("requires_confirmation", False)),
+        enabled=bool(payload.get("enabled", True)),
+        disabled_reason=str(payload.get("disabled_reason", "")),
+        open_tab=str(payload.get("open_tab", "")),
+        aliases=tuple(str(item) for item in payload.get("aliases", []) if str(item).strip()),
+    )
+
+
+def _read_jsonl_events(path: pathlib.Path) -> list[dict[str, Any]]:
+    try:
+        return [
+            payload
+            for payload in harvester._read_jsonl(path)  # type: ignore[attr-defined]
+            if isinstance(payload, dict)
+        ]
+    except Exception:
+        return []
+
+
 @dataclass(frozen=True)
 class UIConfig:
     refresh_interval_seconds: float = 1.0
@@ -159,6 +224,7 @@ class RepoConfig:
     runs_root: pathlib.Path
     auto_start: bool = True
     default_profile: str = ""
+    default_model: str = ""
     max_model_workers: int | None = None
     max_score_workers: int | None = None
     orchestrator_poll_seconds: float | None = None
@@ -175,6 +241,64 @@ class ControlCenterConfig:
 class SortState:
     key: str
     reverse: bool = False
+
+
+@dataclass(frozen=True)
+class RunFilterState:
+    failed_only: bool = False
+    queued_only: bool = False
+    capability_only: bool = False
+    last_24h_only: bool = False
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class AlertBadge:
+    severity: str
+    label: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class TimelineStep:
+    key: str
+    label: str
+    status: str
+
+
+@dataclass(frozen=True)
+class UIAction:
+    id: str
+    label: str
+    kind: str
+    scope: str
+    command_text: str
+    requires_confirmation: bool = False
+    enabled: bool = True
+    disabled_reason: str = ""
+    open_tab: str = ""
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TargetSummary:
+    repo_id: str
+    repo_name: str
+    run_id: str
+    run_state: str
+    pass_label: str
+    profile: str
+    age_text: str
+    alerts: tuple[AlertBadge, ...]
+    recommended_actions: tuple[UIAction, ...]
+    recommended_tab: str
+
+
+@dataclass(frozen=True)
+class RepoViewState:
+    active_tab: str = "tab-chat"
+    overview_preview: str = "manifest"
+    follow_streams: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -278,6 +402,35 @@ class StartupPreflightReport:
         return not self.app_issues and all(report.ok for report in self.repo_reports)
 
 
+@dataclass(frozen=True)
+class ChatMessage:
+    ts_ms: int
+    repo_id: str
+    role: str
+    message_type: str
+    content: str
+    run_id: str = ""
+    action_name: str = ""
+    resulting_run_id: str = ""
+    follow_up_actions: tuple[UIAction, ...] = ()
+
+
+@dataclass(frozen=True)
+class ChatPendingAction:
+    action_type: str
+    label: str
+    prompt: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ChatSubmissionResult:
+    reply: str
+    focus_run_id: str = ""
+    open_tab: str = "tab-chat"
+    follow_up_actions: tuple[UIAction, ...] = ()
+
+
 @dataclass
 class _ManagedCommand:
     command_id: str
@@ -324,6 +477,77 @@ def _read_supervisor_status(path: pathlib.Path) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _read_json_dict(path: pathlib.Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _slugify_title(value: str) -> str:
+    title = re.sub(r"\s+", " ", value.strip())
+    return title[:120].strip() or "operator-request"
+
+
+def _derive_run_title(prompt: str) -> str:
+    cleaned = re.sub(r"\s+", " ", prompt.strip())
+    cleaned = re.sub(r"^(create|start|run|launch|ask)\s+(a\s+)?(new\s+)?(run|task)\s+(to\s+)?", "", cleaned, flags=re.IGNORECASE)
+    words = cleaned.split()
+    if not words:
+        return "operator-request"
+    return _slugify_title(" ".join(words[:10]))
+
+
+def _task_schema_section(task_text: str) -> str:
+    match = re.search(
+        r"^## Result JSON schema \(source of truth\)\n(?:.*\n)*?(?=^## |\Z)",
+        task_text,
+        flags=re.MULTILINE,
+    )
+    return match.group(0).rstrip() if match else ""
+
+
+def _build_chat_task_text(existing_task: str, *, title: str, prompt: str) -> str:
+    schema_section = _task_schema_section(existing_task)
+    body = "\n".join(
+        [
+            "# Task",
+            title,
+            "",
+            "## Goal",
+            prompt,
+            "",
+            "## Constraints",
+            "- Stay within the repository and harness guardrails.",
+            "- Save durable outputs under `outputs/`.",
+            "- Keep `result.json` schema-compliant.",
+            "",
+            "## Done",
+            "- The operator request is completed.",
+            "- Durable artifacts are written under `outputs/` when needed.",
+            "- `result.json` describes the outcome and remaining risks.",
+            "",
+            "## Eval",
+            "```bash",
+            "# Add or refine verification commands before launch if needed.",
+            "```",
+            "",
+            "## Required Artifacts",
+            "- result.json",
+            "",
+            "## Notes",
+            "- Requested through the command-center chat panel.",
+            f"- Original operator request: {prompt}",
+        ]
+    )
+    if schema_section:
+        body = f"{body}\n\n{schema_section}"
+    return body.rstrip() + "\n"
 
 
 def _preflight_python_issue(repo_root: pathlib.Path) -> PreflightIssue | None:
@@ -476,6 +700,7 @@ def _repo_config_from_payload(payload: dict[str, Any]) -> RepoConfig:
         runs_root=runs_root,
         auto_start=bool(payload.get("auto_start", True)),
         default_profile=str(payload.get("default_profile", "")).strip(),
+        default_model=str(payload.get("default_model", "")).strip(),
         max_model_workers=_to_positive_int(payload.get("max_model_workers"), default=None),
         max_score_workers=_to_positive_int(payload.get("max_score_workers"), default=None),
         orchestrator_poll_seconds=(
@@ -521,6 +746,7 @@ def load_control_center_config(path: pathlib.Path | None = None) -> ControlCente
                 root=repo_root,
                 runs_root=(repo_root / "starter" / "runs").resolve(),
                 auto_start=True,
+                default_model="",
             ),
         ),
         source_path=None,
@@ -856,6 +1082,19 @@ class RepoSupervisor:
             },
         )
 
+    def launch_run(self, run_dir: pathlib.Path, *, model: str = "") -> str:
+        command_id = f"run:{run_dir.name}"
+        command = [str(self.repo.root / "starter" / "bin" / "run-task.sh"), str(run_dir)]
+        if model:
+            command.append(model)
+        return self._launch_managed_command(
+            command_id,
+            f"run {run_dir.name}",
+            command,
+            cwd=self.repo.root / "starter",
+            env={"PYTHONPATH": str(self.repo.root / "starter" / "bin")},
+        )
+
     def launch_archive(self, run_dir: pathlib.Path, archive_path: pathlib.Path) -> str:
         command_id = f"archive:{run_dir.name}"
         return self._launch_managed_command(
@@ -987,7 +1226,24 @@ class ControlCenterService:
         for supervisor in self.supervisors.values():
             supervisor.shutdown()
 
-    def filter_runs(self, runs: tuple[RunRow, ...], filter_text: str) -> list[RunRow]:
+    def build_filter_state(
+        self,
+        *,
+        failed_only: bool = False,
+        queued_only: bool = False,
+        capability_only: bool = False,
+        last_24h_only: bool = False,
+        text: str = "",
+    ) -> RunFilterState:
+        return RunFilterState(
+            failed_only=failed_only,
+            queued_only=queued_only,
+            capability_only=capability_only,
+            last_24h_only=last_24h_only,
+            text=text.strip(),
+        )
+
+    def _filter_runs_legacy(self, runs: tuple[RunRow, ...], filter_text: str) -> list[RunRow]:
         filtered = list(runs)
         tokens = [token for token in filter_text.split() if token.strip()]
         cutoff_ms = None
@@ -1019,6 +1275,56 @@ class ControlCenterService:
                 filtered = [run for run in filtered if run.execution_profile == value]
 
         plain_terms = [token.lower() for token in tokens if ":" not in token]
+        if plain_terms:
+            filtered = [
+                run
+                for run in filtered
+                if all(
+                    term
+                    in " ".join(
+                        [
+                            run.run_id.lower(),
+                            run.state.lower(),
+                            run.primary_error_code.lower(),
+                            run.execution_profile.lower(),
+                            " ".join(run.failure_classifications).lower(),
+                        ]
+                    )
+                    for term in plain_terms
+                )
+            ]
+        return filtered
+
+    def filter_runs(
+        self,
+        runs: tuple[RunRow, ...],
+        filter_state: RunFilterState | str,
+    ) -> list[RunRow]:
+        if isinstance(filter_state, str):
+            return self._filter_runs_legacy(runs, filter_state)
+
+        filtered = list(runs)
+        if filter_state.failed_only:
+            filtered = [
+                run
+                for run in filtered
+                if run.state in {"failed", "cancelled"} or run.overall_pass is False
+            ]
+        if filter_state.queued_only:
+            filtered = [
+                run
+                for run in filtered
+                if run.state in {"queued", "claimed", "model_running", "scoring", "score_pending"}
+                or run.run_queue_state in {"queued", "claimed", "model_running"}
+                or run.score_queue_state in {"queued", "claimed", "scoring"}
+            ]
+        if filter_state.capability_only:
+            filtered = [run for run in filtered if run.execution_profile == "capability"]
+        if filter_state.last_24h_only:
+            cutoff_ms = _now_ms() - (24 * 60 * 60 * 1000)
+            filtered = [run for run in filtered if run.updated_epoch_ms >= cutoff_ms]
+
+        plain_terms = [token.lower() for token in filter_state.text.split() if token.strip()]
         if plain_terms:
             filtered = [
                 run
@@ -1238,6 +1544,1076 @@ class ControlCenterService:
             if row.run_id == run_id:
                 return row
         raise KeyError(f"run not found: {repo_id}/{run_id}")
+
+    def _repo_config(self, repo_id: str) -> RepoConfig:
+        return next(repo for repo in self.config.repos if repo.id == repo_id)
+
+    def newest_failed_run_id(self, repo_id: str) -> str:
+        repo = self._repo_snapshot(repo_id)
+        for row in repo.runs:
+            if row.state in {"failed", "cancelled"} or row.overall_pass is False:
+                return row.run_id
+        return ""
+
+    def _run_events(self, repo_id: str, run_id: str) -> list[dict[str, Any]]:
+        row = self._run_row(repo_id, run_id)
+        return _read_jsonl_events(row.artifact_paths["events"])
+
+    def recommended_artifact_tab(self, repo_id: str, run_id: str) -> str:
+        row = self._run_row(repo_id, run_id)
+        if row.state in {"failed", "cancelled"} or row.overall_pass is False:
+            if row.artifact_paths["score"].exists():
+                return "tab-score"
+            if row.artifact_paths["transcript"].exists():
+                return "tab-transcript"
+            return "tab-events"
+        if row.state == "complete" and row.overall_pass is True:
+            return "tab-patch" if self.run_has_patch(repo_id, run_id) else "tab-overview"
+        if row.state in {"queued", "claimed", "model_running", "scoring", "score_pending"}:
+            return "tab-events"
+        return "tab-overview"
+
+    def _repo_alerts(self, repo: RepoSnapshot) -> list[AlertBadge]:
+        alerts: list[AlertBadge] = []
+        queue_wait_p95 = int(repo.summary.get("queue_wait_ms", {}).get("p95", 0) or 0)
+        saturation_last_24h = int(
+            repo.summary.get("queue_saturation", {}).get("events_last_24h", 0) or 0
+        )
+        if repo.runtime_check_ok is False:
+            alerts.append(
+                AlertBadge("critical", "Runtime check failed", repo.runtime_check_message or "")
+            )
+        elif repo.runtime_check_ok is True:
+            alerts.append(AlertBadge("success", "Runtime OK"))
+        if repo.canary_failing:
+            alerts.append(AlertBadge("critical", "Canary failed"))
+        elif repo.canary_stale:
+            alerts.append(AlertBadge("warning", "Canary stale"))
+        if queue_wait_p95 >= 300_000 or saturation_last_24h > 0:
+            alerts.append(
+                AlertBadge(
+                    "critical",
+                    "Queue backing up",
+                    f"queue wait p95 {render_duration_ms(queue_wait_p95)}",
+                )
+            )
+        elif repo.queued_count >= 3 or queue_wait_p95 >= 60_000:
+            alerts.append(
+                AlertBadge(
+                    "warning",
+                    "Queue pressure rising",
+                    f"queued {repo.queued_count}, p95 {render_duration_ms(queue_wait_p95)}",
+                )
+            )
+        if repo.stale_run_count > 0:
+            alerts.append(
+                AlertBadge(
+                    "warning",
+                    "Stale runs need attention",
+                    f"{repo.stale_run_count} stale non-terminal",
+                )
+            )
+        if repo.in_flight_count > 0:
+            alerts.append(
+                AlertBadge("info", "Runs in flight", f"{repo.in_flight_count} active")
+            )
+        alerts.sort(key=lambda item: (_severity_rank(item.severity), item.label.lower()))
+        return alerts
+
+    def build_repo_alerts(self, repo_id: str) -> tuple[AlertBadge, ...]:
+        return tuple(self._repo_alerts(self._repo_snapshot(repo_id)))
+
+    def _run_retry_alerts(self, events: list[dict[str, Any]]) -> list[AlertBadge]:
+        alerts: list[AlertBadge] = []
+        retry_event: dict[str, Any] | None = None
+        retry_ceiling_event: dict[str, Any] | None = None
+        for event in events:
+            phase = str(event.get("phase", "")).lower()
+            message = str(event.get("message", "")).lower()
+            failure = str(event.get("failure_classification") or event.get("failure_class") or "")
+            heartbeat = str(event.get("heartbeat_reason", ""))
+            if phase in {"model_retry", "score_retry"} or failure in {
+                "orchestrator_worker_retry",
+                "orchestrator_score_retry",
+                "score_backpressure",
+            }:
+                retry_event = event
+            if heartbeat == "resource_cap_exceeded":
+                retry_event = event
+            if phase in {"model_failed", "score_failed"} and (
+                "retry ceiling" in message
+                or "exhaust" in message
+                or failure in {"model_runtime_failure", "orchestrator_worker_exhausted"}
+            ):
+                retry_ceiling_event = event
+        if retry_ceiling_event is not None:
+            alerts.append(
+                AlertBadge(
+                    "critical",
+                    "Retry ceiling hit",
+                    str(retry_ceiling_event.get("message", "")).strip(),
+                )
+            )
+        elif retry_event is not None:
+            alerts.append(
+                AlertBadge(
+                    "warning",
+                    "Retry or backpressure in progress",
+                    str(retry_event.get("message", "")).strip(),
+                )
+            )
+        return alerts
+
+    def build_run_alerts(self, repo_id: str, run_id: str) -> tuple[AlertBadge, ...]:
+        row = self._run_row(repo_id, run_id)
+        alerts: list[AlertBadge] = []
+        if row.state in {"failed", "cancelled"}:
+            alerts.append(AlertBadge("critical", row.state.title(), row.primary_error_code or ""))
+        elif row.overall_pass is False:
+            alerts.append(AlertBadge("critical", "Evaluation failed", row.primary_error_code or ""))
+        elif row.state == "complete" and row.overall_pass is True:
+            alerts.append(AlertBadge("success", "Passing complete run"))
+        elif row.state in {"queued", "claimed", "model_running", "scoring", "score_pending"}:
+            alerts.append(AlertBadge("info", "Run in progress", row.state))
+        alerts.extend(self._run_retry_alerts(self._run_events(repo_id, run_id)))
+        alerts.sort(key=lambda item: (_severity_rank(item.severity), item.label.lower()))
+        return tuple(alerts)
+
+    def build_run_timeline(self, repo_id: str, run_id: str) -> tuple[TimelineStep, ...]:
+        row = self._run_row(repo_id, run_id)
+        events = self._run_events(repo_id, run_id)
+        seen_claimed = row.run_queue_state == "claimed"
+        seen_model_running = row.run_queue_state == "model_running" or row.state == "model_running"
+        seen_scoring = row.score_queue_state in {"claimed", "scoring"} or row.state in {
+            "scoring",
+            "score_pending",
+            "model_complete",
+        }
+        for event in events:
+            state_after = str(event.get("state_after", ""))
+            phase = str(event.get("phase", ""))
+            if state_after == "claimed":
+                seen_claimed = True
+            if state_after == "model_running" or phase == "model_dispatch":
+                seen_model_running = True
+            if state_after == "scoring" or phase.startswith("score_"):
+                seen_scoring = True
+
+        final_label = "Complete"
+        final_status = "upcoming"
+        if row.state == "failed" or row.overall_pass is False:
+            final_label = "Failed"
+            final_status = "problem"
+        elif row.state == "cancelled":
+            final_label = "Cancelled"
+            final_status = "problem"
+        elif row.state == "complete":
+            final_status = "done"
+
+        if row.state in {"failed", "cancelled", "complete"}:
+            current_index = 4
+        elif row.state in {"scoring", "score_pending", "model_complete"} or seen_scoring:
+            current_index = 3
+        elif row.state == "model_running" or seen_model_running:
+            current_index = 2
+        elif row.run_queue_state == "claimed" or seen_claimed:
+            current_index = 1
+        else:
+            current_index = 0
+
+        labels = [
+            ("queued", "Queued"),
+            ("claimed", "Claimed"),
+            ("model_running", "Model Running"),
+            ("scoring", "Scoring"),
+            ("complete", final_label),
+        ]
+        steps: list[TimelineStep] = []
+        for index, (key, label) in enumerate(labels):
+            if index < current_index:
+                status = "done"
+            elif index == current_index:
+                status = final_status if index == 4 else "current"
+            else:
+                status = "upcoming"
+            if index == 4 and final_status == "problem":
+                status = "problem"
+            steps.append(TimelineStep(key=key, label=label, status=status))
+        return tuple(steps)
+
+    def build_context_actions(self, repo_id: str, run_id: str) -> tuple[UIAction, ...]:
+        repo = self._repo_snapshot(repo_id)
+        row = self._run_row(repo_id, run_id)
+        repo_state = repo.orchestrator.state
+        actions = [
+            UIAction(
+                id="open-best-artifact",
+                label="Open Best Artifact",
+                kind="open",
+                scope="run",
+                command_text="open-best-artifact",
+                open_tab=self.recommended_artifact_tab(repo_id, run_id),
+                aliases=("best", "recommended", "artifact"),
+            ),
+            UIAction(
+                id="open-transcript",
+                label="Open Transcript",
+                kind="open",
+                scope="run",
+                command_text="open transcript",
+                open_tab="tab-transcript",
+                aliases=("transcript", "logs"),
+            ),
+            UIAction(
+                id="open-score",
+                label="Open Score",
+                kind="open",
+                scope="run",
+                command_text="open score",
+                enabled=row.artifact_paths["score"].exists(),
+                disabled_reason="score artifact missing",
+                open_tab="tab-score",
+                aliases=("score", "evaluation"),
+            ),
+            UIAction(
+                id="runtime-check",
+                label="Runtime Check",
+                kind="service",
+                scope="repo",
+                command_text=f"runtime-check {repo_id}",
+                aliases=("runtime", "python"),
+            ),
+            UIAction(
+                id="archive-run",
+                label="Archive",
+                kind="service",
+                scope="run",
+                command_text=f"archive-run {run_id}",
+                aliases=("archive", "evidence"),
+            ),
+            UIAction(
+                id="cancel-run",
+                label="Cancel",
+                kind="service",
+                scope="run",
+                command_text=f"run cancel {run_id}",
+                requires_confirmation=True,
+                enabled=not _is_terminal_state(row.state),
+                disabled_reason="run already terminal" if _is_terminal_state(row.state) else "",
+                aliases=("cancel", "stop run"),
+            ),
+            UIAction(
+                id="enqueue-run",
+                label="Enqueue",
+                kind="service",
+                scope="run",
+                command_text=f"run enqueue {run_id}",
+                enabled=(
+                    not _is_terminal_state(row.state)
+                    and not _run_is_locked(row.run_dir)
+                    and row.run_queue_state not in {"queued", "claimed", "model_running"}
+                ),
+                disabled_reason=(
+                    "run not eligible"
+                    if _is_terminal_state(row.state)
+                    or _run_is_locked(row.run_dir)
+                    or row.run_queue_state in {"queued", "claimed", "model_running"}
+                    else ""
+                ),
+                aliases=("enqueue", "queue"),
+            ),
+            UIAction(
+                id="rerun-run",
+                label="Rerun",
+                kind="service",
+                scope="run",
+                command_text=f"run rerun {run_id}",
+                requires_confirmation=True,
+                enabled=_is_terminal_state(row.state),
+                disabled_reason="run is not terminal" if not _is_terminal_state(row.state) else "",
+                aliases=("rerun", "retry"),
+            ),
+            UIAction(
+                id="repo-start",
+                label="Start Repo",
+                kind="service",
+                scope="repo",
+                command_text=f"repo start {repo_id}",
+                enabled=repo_state != "running",
+                disabled_reason="repo already running" if repo_state == "running" else "",
+                aliases=("start repo",),
+            ),
+            UIAction(
+                id="repo-stop",
+                label="Stop Repo",
+                kind="service",
+                scope="repo",
+                command_text=f"repo stop {repo_id}",
+                requires_confirmation=True,
+                enabled=repo_state != "stopped",
+                disabled_reason="repo already stopped" if repo_state == "stopped" else "",
+                aliases=("stop repo",),
+            ),
+            UIAction(
+                id="repo-restart",
+                label="Restart Repo",
+                kind="service",
+                scope="repo",
+                command_text=f"repo restart {repo_id}",
+                requires_confirmation=True,
+                enabled=repo_state != "stopped",
+                disabled_reason="repo is stopped" if repo_state == "stopped" else "",
+                aliases=("restart repo",),
+            ),
+            UIAction(
+                id="repo-canary",
+                label="Run Canary",
+                kind="service",
+                scope="repo",
+                command_text=f"repo canary {repo_id}",
+                aliases=("canary",),
+            ),
+        ]
+        return tuple(actions)
+
+    def build_target_summary(self, repo_id: str, run_id: str) -> TargetSummary:
+        repo = self._repo_snapshot(repo_id)
+        row = self._run_row(repo_id, run_id)
+        actions = self.build_context_actions(repo_id, run_id)
+        safe_actions = tuple(
+            action for action in actions if action.enabled and not action.requires_confirmation
+        )[:3]
+        alerts = tuple(self._repo_alerts(repo) + list(self.build_run_alerts(repo_id, run_id)))
+        pass_label = (
+            "pass" if row.overall_pass is True else "fail" if row.overall_pass is False else "pending"
+        )
+        return TargetSummary(
+            repo_id=repo.repo.id,
+            repo_name=repo.repo.name,
+            run_id=row.run_id,
+            run_state=row.state,
+            pass_label=pass_label,
+            profile=row.execution_profile or "-",
+            age_text=_render_relative_age(row.updated_epoch_ms),
+            alerts=alerts,
+            recommended_actions=safe_actions,
+            recommended_tab=self.recommended_artifact_tab(repo_id, run_id),
+        )
+
+    def _chat_log_path(self, repo_id: str) -> pathlib.Path:
+        return self._repo_config(repo_id).runs_root / ".orchestrator" / "chat-log.jsonl"
+
+    def _chat_state_path(self, repo_id: str) -> pathlib.Path:
+        return self._repo_config(repo_id).runs_root / ".orchestrator" / "chat-state.json"
+
+    def _chat_append(
+        self,
+        repo_id: str,
+        *,
+        role: str,
+        message_type: str,
+        content: str,
+        run_id: str = "",
+        action_name: str = "",
+        resulting_run_id: str = "",
+        follow_up_actions: tuple[UIAction, ...] = (),
+    ) -> None:
+        _append_jsonl(
+            self._chat_log_path(repo_id),
+            {
+                "ts_ms": _now_ms(),
+                "repo_id": repo_id,
+                "role": role,
+                "message_type": message_type,
+                "content": content,
+                "run_id": run_id,
+                "action_name": action_name,
+                "resulting_run_id": resulting_run_id,
+                "follow_up_actions": [
+                    _serialize_ui_action(action) for action in follow_up_actions
+                ],
+            },
+        )
+
+    def _load_chat_messages(self, repo_id: str) -> tuple[ChatMessage, ...]:
+        messages: list[ChatMessage] = []
+        for payload in harvester._read_jsonl(self._chat_log_path(repo_id)):  # type: ignore[attr-defined]
+            messages.append(
+                ChatMessage(
+                    ts_ms=int(payload.get("ts_ms", 0) or 0),
+                    repo_id=str(payload.get("repo_id", repo_id)),
+                    role=str(payload.get("role", "assistant")),
+                    message_type=str(payload.get("message_type", "reply")),
+                    content=str(payload.get("content", "")),
+                    run_id=str(payload.get("run_id", "")),
+                    action_name=str(payload.get("action_name", "")),
+                    resulting_run_id=str(payload.get("resulting_run_id", "")),
+                    follow_up_actions=tuple(
+                        _deserialize_ui_action(item)
+                        for item in payload.get("follow_up_actions", [])
+                        if isinstance(item, dict)
+                    ),
+                )
+            )
+        return tuple(messages)
+
+    def _load_pending_action(self, repo_id: str) -> ChatPendingAction | None:
+        payload = _read_json_dict(self._chat_state_path(repo_id))
+        pending = payload.get("pending_action")
+        if not isinstance(pending, dict):
+            return None
+        return ChatPendingAction(
+            action_type=str(pending.get("action_type", "")),
+            label=str(pending.get("label", "")),
+            prompt=str(pending.get("prompt", "")),
+            payload=dict(pending.get("payload", {}))
+            if isinstance(pending.get("payload"), dict)
+            else {},
+        )
+
+    def _save_pending_action(self, repo_id: str, pending: ChatPendingAction | None) -> None:
+        path = self._chat_state_path(repo_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {}
+        if pending is not None:
+            payload["pending_action"] = {
+                "action_type": pending.action_type,
+                "label": pending.label,
+                "prompt": pending.prompt,
+                "payload": pending.payload,
+            }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def chat_history_text(self, repo_id: str) -> str:
+        messages = self._load_chat_messages(repo_id)
+        if not messages:
+            return (
+                "Operator chat is ready.\n\n"
+                "Examples:\n"
+                "- show failed runs\n"
+                "- restart repo\n"
+                "- rerun run-20260324-123456\n"
+                "- /new --profile capability --model openai/gpt-5.4 fix flaky login\n"
+            )
+        lines: list[str] = []
+        for message in messages[-40:]:
+            stamp = format_timestamp_ms(message.ts_ms)
+            label = {
+                "operator": "Operator",
+                "assistant": "Assistant",
+                "system": "System",
+            }.get(message.role, message.role.title())
+            lines.append(f"[{stamp}] {label}:")
+            lines.append(message.content)
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    def chat_follow_up_actions(self, repo_id: str) -> tuple[UIAction, ...]:
+        messages = self._load_chat_messages(repo_id)
+        for message in reversed(messages):
+            if message.role in {"assistant", "system"} and message.follow_up_actions:
+                return message.follow_up_actions
+        return ()
+
+    def chat_banner_text(self, repo_id: str) -> str:
+        pending = self._load_pending_action(repo_id)
+        if pending is None:
+            return "No pending action. Reads execute immediately; mutating actions require confirmation."
+        return f"Pending confirmation: {pending.label}. Type `confirm` to proceed or `cancel` to discard."
+
+    def _failed_runs_summary(self, repo_id: str) -> str:
+        repo = self._repo_snapshot(repo_id)
+        failed = [run for run in repo.runs if run.state in {"failed", "cancelled"} or run.overall_pass is False]
+        if not failed:
+            return "No failed runs are visible in the current window."
+        lines = ["Failed runs:"]
+        for run in failed[:10]:
+            lines.append(
+                f"- {run.run_id} | state={run.state} | error={run.primary_error_code or '-'}"
+            )
+        return "\n".join(lines)
+
+    def _failed_runs_follow_ups(self, repo_id: str) -> tuple[UIAction, ...]:
+        newest_failed = self.newest_failed_run_id(repo_id)
+        return tuple(
+            action
+            for action in (
+                UIAction(
+                    id="focus-newest-failed-run",
+                    label="Focus Newest Failed Run",
+                    kind="chat",
+                    scope="repo",
+                    command_text="focus newest-failed",
+                    enabled=bool(newest_failed),
+                    disabled_reason="no failed run available" if not newest_failed else "",
+                ),
+                UIAction(
+                    id="filter-failed",
+                    label="Filter Failed",
+                    kind="filter",
+                    scope="repo",
+                    command_text="filter failed",
+                ),
+                UIAction(
+                    id="open-score-newest-failed",
+                    label="Open Score for Newest Failed",
+                    kind="chat",
+                    scope="repo",
+                    command_text="open score newest-failed",
+                    enabled=bool(newest_failed),
+                    disabled_reason="no failed run available" if not newest_failed else "",
+                ),
+            )
+        )
+
+    def _run_status_summary(self, repo_id: str, run_id: str) -> str:
+        row = self._run_row(repo_id, run_id)
+        return "\n".join(
+            [
+                f"Selected run: {row.run_id}",
+                f"State: {row.state}",
+                f"Pass: {row.overall_pass}",
+                f"Profile: {row.execution_profile or '-'}",
+                f"Primary error: {row.primary_error_code or '-'}",
+                f"Queue wait: {row.queue_wait_ms} ms",
+                f"Score wait: {row.score_wait_ms} ms",
+            ]
+        )
+
+    def _queue_summary(self, repo_id: str) -> str:
+        repo = self._repo_snapshot(repo_id)
+        return "\n".join(
+            [
+                f"Queue depth: {repo.queue_depth}",
+                f"Queued: {repo.queued_count}",
+                f"In flight: {repo.in_flight_count}",
+                f"Stale runs: {repo.stale_run_count}",
+            ]
+        )
+
+    def _queue_follow_ups(self, repo_id: str) -> tuple[UIAction, ...]:
+        return (
+            UIAction(
+                id="filter-queued",
+                label="Filter Queued",
+                kind="filter",
+                scope="repo",
+                command_text="filter queued",
+            ),
+            UIAction(
+                id="open-health",
+                label="Open Health",
+                kind="open",
+                scope="repo",
+                command_text="open health",
+                open_tab="tab-health",
+            ),
+            UIAction(
+                id="runtime-check-follow-up",
+                label="Runtime Check",
+                kind="service",
+                scope="repo",
+                command_text=f"runtime-check {repo_id}",
+            ),
+        )
+
+    def _canary_summary(self, repo_id: str) -> str:
+        repo = self._repo_snapshot(repo_id)
+        canary = repo.summary.get("canary_status", {})
+        return "\n".join(
+            [
+                f"Canary summary: {canary.get('latest_summary_path') or '-'}",
+                f"Finished: {format_timestamp_ms(canary.get('completed_epoch_ms'))}",
+                f"Freshness hours: {canary.get('freshness_hours', '-')}",
+                f"All passed: {canary.get('all_passed')}",
+                f"Stale: {repo.canary_stale}",
+            ]
+        )
+
+    def _canary_follow_ups(self, repo_id: str) -> tuple[UIAction, ...]:
+        return (
+            UIAction(
+                id="open-health-canary",
+                label="Open Health",
+                kind="open",
+                scope="repo",
+                command_text="open health",
+                open_tab="tab-health",
+            ),
+            UIAction(
+                id="run-canary-follow-up",
+                label="Run Canary",
+                kind="service",
+                scope="repo",
+                command_text=f"repo canary {repo_id}",
+            ),
+        )
+
+    def _current_run_follow_ups(self, repo_id: str, run_id: str) -> tuple[UIAction, ...]:
+        row = self._run_row(repo_id, run_id)
+        actions = [
+            UIAction(
+                id="open-best-artifact-follow-up",
+                label="Open Best Artifact",
+                kind="open",
+                scope="run",
+                command_text="open-best-artifact",
+                open_tab=self.recommended_artifact_tab(repo_id, run_id),
+            ),
+            UIAction(
+                id="open-transcript-follow-up",
+                label="Open Transcript",
+                kind="open",
+                scope="run",
+                command_text="open transcript",
+                open_tab="tab-transcript",
+            ),
+        ]
+        if row.state in {"failed", "cancelled"} or row.overall_pass is False:
+            actions.append(
+                UIAction(
+                    id="rerun-follow-up",
+                    label="Rerun",
+                    kind="service",
+                    scope="run",
+                    command_text=f"run rerun {run_id}",
+                    requires_confirmation=True,
+                    enabled=_is_terminal_state(row.state),
+                )
+            )
+        return tuple(actions)
+
+    def _draft_new_run(
+        self,
+        repo_id: str,
+        prompt: str,
+        *,
+        profile: str = "",
+        model: str = "",
+        launch_mode: str = "launch",
+    ) -> ChatSubmissionResult:
+        repo = self._repo_config(repo_id)
+        title = _derive_run_title(prompt)
+        resolved_profile = profile or repo.default_profile or "strict"
+        resolved_model = model or repo.default_model
+        preview_lines = [
+            "Pending run draft",
+            f"Title: {title}",
+            f"Profile: {resolved_profile}",
+            f"Model: {resolved_model or '(harness default)'}",
+            f"Launch mode: {launch_mode}",
+            "",
+            "Task preview",
+            "=" * 12,
+            _build_chat_task_text("", title=title, prompt=prompt).split("## Result JSON schema")[0].rstrip(),
+            "",
+            "Type `confirm` to proceed or `cancel` to discard.",
+        ]
+        pending = ChatPendingAction(
+            action_type="new_run",
+            label=f"create + {launch_mode} run `{title}`",
+            prompt=prompt,
+            payload={
+                "title": title,
+                "profile": resolved_profile,
+                "model": resolved_model,
+                "launch_mode": launch_mode,
+            },
+        )
+        self._save_pending_action(repo_id, pending)
+        reply = "\n".join(preview_lines)
+        self._chat_append(
+            repo_id,
+            role="assistant",
+            message_type="pending_action",
+            content=reply,
+            action_name="new_run",
+            follow_up_actions=(),
+        )
+        return ChatSubmissionResult(reply=reply, follow_up_actions=())
+
+    def _create_chat_run(self, repo_id: str, pending: ChatPendingAction) -> ChatSubmissionResult:
+        repo = self._repo_config(repo_id)
+        profile = str(pending.payload.get("profile", "")).strip() or repo.default_profile or "strict"
+        model = str(pending.payload.get("model", "")).strip()
+        launch_mode = str(pending.payload.get("launch_mode", "launch")).strip() or "launch"
+        title = str(pending.payload.get("title", "")).strip() or _derive_run_title(pending.prompt)
+        command = [str(repo.root / "starter" / "bin" / "new-task.sh"), "--profile", profile, title]
+        completed = subprocess.run(
+            command,
+            cwd=repo.root / "starter",
+            capture_output=True,
+            text=True,
+            check=False,
+            env=os.environ.copy() | {"PYTHONPATH": str(repo.root / "starter" / "bin")},
+        )
+        if completed.returncode != 0:
+            reply = f"run creation failed: {(completed.stderr or completed.stdout).strip() or completed.returncode}"
+            self._chat_append(repo_id, role="system", message_type="action_result", content=reply, action_name="new_run")
+            return ChatSubmissionResult(reply=reply)
+
+        run_ref = ""
+        for line in completed.stdout.splitlines():
+            candidate = line.strip()
+            if candidate.startswith("runs/"):
+                run_ref = candidate
+        run_dir = (repo.root / "starter" / run_ref).resolve() if run_ref else None
+        if run_dir is None or not run_dir.exists():
+            reply = "run creation failed: could not resolve the created run directory"
+            self._chat_append(repo_id, role="system", message_type="action_result", content=reply, action_name="new_run")
+            return ChatSubmissionResult(reply=reply)
+
+        task_path = run_dir / "task.md"
+        task_text = task_path.read_text(encoding="utf-8")
+        task_path.write_text(
+            _build_chat_task_text(task_text, title=title, prompt=pending.prompt),
+            encoding="utf-8",
+        )
+        self.refresh()
+        run_id = run_dir.name
+        if launch_mode == "queue":
+            action_result = self.enqueue_run(repo_id, run_id)
+        else:
+            action_result = self.supervisors[repo_id].launch_run(run_dir, model=model)
+        reply = (
+            f"Created run `{run_id}`.\n"
+            f"Profile: {profile}\n"
+            f"Model: {model or '(harness default)'}\n"
+            f"Action: {action_result}"
+        )
+        self._chat_append(
+            repo_id,
+            role="system",
+            message_type="action_result",
+            content=reply,
+            action_name="new_run",
+            resulting_run_id=run_id,
+            follow_up_actions=(),
+        )
+        self._save_pending_action(repo_id, None)
+        return ChatSubmissionResult(reply=reply, focus_run_id=run_id, follow_up_actions=())
+
+    def _execute_pending_action(self, repo_id: str, pending: ChatPendingAction) -> ChatSubmissionResult:
+        if pending.action_type == "new_run":
+            return self._create_chat_run(repo_id, pending)
+
+        action_name = str(pending.payload.get("action_name", ""))
+        target_repo_id = str(pending.payload.get("repo_id", repo_id))
+        run_id = str(pending.payload.get("run_id", ""))
+        archive_path = str(pending.payload.get("archive_path", ""))
+        force = bool(pending.payload.get("force", False))
+        if action_name == "repo_restart":
+            reply = self.restart_repo(target_repo_id)
+        elif action_name == "repo_start":
+            reply = self.start_repo(target_repo_id)
+        elif action_name == "repo_stop":
+            reply = self.stop_repo(target_repo_id)
+        elif action_name == "repo_canary":
+            reply = self.run_canary(target_repo_id)
+        elif action_name == "runtime_check":
+            reply = self.runtime_check(target_repo_id)
+        elif action_name == "run_cancel":
+            reply = self.cancel_run(target_repo_id, run_id)
+        elif action_name == "run_enqueue":
+            reply = self.enqueue_run(target_repo_id, run_id)
+        elif action_name == "run_rerun":
+            reply = self.rerun_run(target_repo_id, run_id)
+        elif action_name == "archive_run":
+            reply = self.archive_run(target_repo_id, run_id)
+        elif action_name == "restore_evidence":
+            reply = self.restore_evidence(
+                target_repo_id,
+                run_id,
+                archive_path=archive_path,
+                force=force,
+            )
+        else:
+            reply = f"unsupported pending action: {action_name or pending.action_type}"
+        self._chat_append(
+            repo_id,
+            role="system",
+            message_type="action_result",
+            content=reply,
+            run_id=run_id,
+            action_name=action_name,
+            follow_up_actions=(),
+        )
+        self._save_pending_action(repo_id, None)
+        return ChatSubmissionResult(reply=reply, focus_run_id=run_id, follow_up_actions=())
+
+    def _pending_simple_action(
+        self,
+        repo_id: str,
+        *,
+        action_name: str,
+        label: str,
+        run_id: str = "",
+        archive_path: str = "",
+        force: bool = False,
+    ) -> ChatSubmissionResult:
+        pending = ChatPendingAction(
+            action_type="service_action",
+            label=label,
+            prompt=label,
+            payload={
+                "action_name": action_name,
+                "repo_id": repo_id,
+                "run_id": run_id,
+                "archive_path": archive_path,
+                "force": force,
+            },
+        )
+        self._save_pending_action(repo_id, pending)
+        reply = f"{label}\n\nType `confirm` to proceed or `cancel` to discard."
+        self._chat_append(
+            repo_id,
+            role="assistant",
+            message_type="pending_action",
+            content=reply,
+            run_id=run_id,
+            action_name=action_name,
+            follow_up_actions=(),
+        )
+        return ChatSubmissionResult(reply=reply, focus_run_id=run_id, follow_up_actions=())
+
+    def _command_tokens_to_chat(
+        self,
+        repo_id: str,
+        selected_run_id: str,
+        tokens: list[str],
+    ) -> ChatSubmissionResult:
+        repo = self._repo_snapshot(repo_id)
+        if tokens[0] in {"/new", "new"}:
+            profile = ""
+            model = ""
+            launch_mode = "launch"
+            prompt_parts: list[str] = []
+            index = 1
+            while index < len(tokens):
+                token = tokens[index]
+                if token == "--profile" and index + 1 < len(tokens):
+                    profile = tokens[index + 1]
+                    index += 2
+                    continue
+                if token.startswith("--profile="):
+                    profile = token.split("=", 1)[1]
+                    index += 1
+                    continue
+                if token == "--model" and index + 1 < len(tokens):
+                    model = tokens[index + 1]
+                    index += 2
+                    continue
+                if token.startswith("--model="):
+                    model = token.split("=", 1)[1]
+                    index += 1
+                    continue
+                if token in {"--queue", "--enqueue"}:
+                    launch_mode = "queue"
+                    index += 1
+                    continue
+                prompt_parts.extend(tokens[index:])
+                break
+            prompt = " ".join(prompt_parts).strip()
+            if not prompt:
+                reply = "Usage: /new [--profile PROFILE] [--model MODEL] [--queue] <operator request>"
+                self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
+                return ChatSubmissionResult(reply=reply)
+            return self._draft_new_run(
+                repo_id,
+                prompt,
+                profile=profile,
+                model=model,
+                launch_mode=launch_mode,
+            )
+        if tokens[0] == "repo":
+            action = tokens[1] if len(tokens) > 1 else ""
+            target_repo_id = tokens[2] if len(tokens) > 2 else repo_id
+            if action == "start":
+                return self._pending_simple_action(target_repo_id, action_name="repo_start", label=f"Start repo `{target_repo_id}`")
+            if action == "stop":
+                return self._pending_simple_action(target_repo_id, action_name="repo_stop", label=f"Stop repo `{target_repo_id}`")
+            if action == "restart":
+                return self._pending_simple_action(target_repo_id, action_name="repo_restart", label=f"Restart repo `{target_repo_id}`")
+            if action == "canary":
+                return self._pending_simple_action(target_repo_id, action_name="repo_canary", label=f"Run canary for repo `{target_repo_id}`")
+        if tokens[0] == "run":
+            action = tokens[1] if len(tokens) > 1 else ""
+            run_id = tokens[2] if len(tokens) > 2 else selected_run_id
+            if not run_id:
+                reply = "Select a run or specify a run id."
+                self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
+                return ChatSubmissionResult(reply=reply)
+            if action == "cancel":
+                return self._pending_simple_action(repo_id, action_name="run_cancel", label=f"Cancel run `{run_id}`", run_id=run_id)
+            if action == "enqueue":
+                return self._pending_simple_action(repo_id, action_name="run_enqueue", label=f"Enqueue run `{run_id}`", run_id=run_id)
+            if action == "rerun":
+                return self._pending_simple_action(repo_id, action_name="run_rerun", label=f"Rerun run `{run_id}`", run_id=run_id)
+        if tokens[0] == "runtime-check":
+            return self._pending_simple_action(repo_id, action_name="runtime_check", label=f"Run runtime check for repo `{repo_id}`")
+        if tokens[0] == "archive-run":
+            run_id = tokens[1] if len(tokens) > 1 else selected_run_id
+            return self._pending_simple_action(repo_id, action_name="archive_run", label=f"Archive run `{run_id}`", run_id=run_id)
+        if tokens[0] == "restore-evidence":
+            run_id = tokens[1] if len(tokens) > 1 and not tokens[1].startswith("/") else selected_run_id
+            archive_path = ""
+            if len(tokens) > 1 and tokens[1].startswith("/"):
+                archive_path = tokens[1]
+            elif len(tokens) > 2:
+                archive_path = tokens[2]
+            force = "--force" in tokens[1:]
+            return self._pending_simple_action(
+                repo_id,
+                action_name="restore_evidence",
+                label=f"Restore evidence for run `{run_id}`",
+                run_id=run_id,
+                archive_path=archive_path,
+                force=force,
+            )
+        if tokens[0] == "open":
+            target = tokens[1] if len(tokens) > 1 else "overview"
+            tab_map = {
+                "health": "tab-health",
+                "overview": "tab-overview",
+                "manifest": "tab-overview",
+                "events": "tab-events",
+                "transcript": "tab-transcript",
+                "score": "tab-score",
+                "patch": "tab-patch",
+            }
+            open_tab = tab_map.get(target)
+            if open_tab:
+                reply = f"Opened {target}."
+                self._chat_append(repo_id, role="assistant", message_type="reply", content=reply, run_id=selected_run_id)
+                return ChatSubmissionResult(reply=reply, focus_run_id=selected_run_id, open_tab=open_tab)
+        reply = f"Unsupported chat command: {' '.join(tokens)}"
+        self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
+        return ChatSubmissionResult(reply=reply)
+
+    def submit_chat_message(
+        self,
+        repo_id: str,
+        message: str,
+        *,
+        selected_run_id: str = "",
+    ) -> ChatSubmissionResult:
+        message = message.strip()
+        if not message:
+            reply = "Enter a chat request."
+            return ChatSubmissionResult(reply=reply)
+        self._chat_append(
+            repo_id,
+            role="operator",
+            message_type="query",
+            content=message,
+            run_id=selected_run_id,
+        )
+        pending = self._load_pending_action(repo_id)
+        normalized = message.lower().strip()
+        if pending is not None:
+            if normalized in {"confirm", "yes", "y", "launch"}:
+                return self._execute_pending_action(repo_id, pending)
+            if normalized in {"cancel", "no", "discard"}:
+                self._save_pending_action(repo_id, None)
+                reply = f"Cancelled pending action: {pending.label}"
+                self._chat_append(repo_id, role="system", message_type="action_result", content=reply)
+                return ChatSubmissionResult(reply=reply)
+            reply = "A pending action is waiting. Type `confirm` to proceed or `cancel` to discard."
+            self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
+            return ChatSubmissionResult(reply=reply)
+
+        try:
+            tokens = shlex.split(message)
+        except ValueError as exc:
+            reply = f"Chat parse error: {exc}"
+            self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
+            return ChatSubmissionResult(reply=reply)
+
+        if tokens and (tokens[0].startswith("/") or tokens[0] in {"repo", "run", "runtime-check", "archive-run", "restore-evidence", "open", "new"}):
+            return self._command_tokens_to_chat(repo_id, selected_run_id, tokens)
+
+        if "failed run" in normalized or normalized.startswith("show failed"):
+            reply = self._failed_runs_summary(repo_id)
+            follow_up_actions = self._failed_runs_follow_ups(repo_id)
+            self._chat_append(
+                repo_id,
+                role="assistant",
+                message_type="reply",
+                content=reply,
+                follow_up_actions=follow_up_actions,
+            )
+            return ChatSubmissionResult(reply=reply, follow_up_actions=follow_up_actions)
+        if "queue depth" in normalized or "in flight" in normalized:
+            reply = self._queue_summary(repo_id)
+            follow_up_actions = self._queue_follow_ups(repo_id)
+            self._chat_append(
+                repo_id,
+                role="assistant",
+                message_type="reply",
+                content=reply,
+                follow_up_actions=follow_up_actions,
+            )
+            return ChatSubmissionResult(reply=reply, follow_up_actions=follow_up_actions)
+        if "canary" in normalized:
+            reply = self._canary_summary(repo_id)
+            follow_up_actions = self._canary_follow_ups(repo_id)
+            self._chat_append(
+                repo_id,
+                role="assistant",
+                message_type="reply",
+                content=reply,
+                follow_up_actions=follow_up_actions,
+            )
+            return ChatSubmissionResult(reply=reply, follow_up_actions=follow_up_actions)
+        if ("selected run" in normalized or "current run" in normalized or "run status" in normalized) and selected_run_id:
+            reply = self._run_status_summary(repo_id, selected_run_id)
+            follow_up_actions = self._current_run_follow_ups(repo_id, selected_run_id)
+            self._chat_append(
+                repo_id,
+                role="assistant",
+                message_type="reply",
+                content=reply,
+                run_id=selected_run_id,
+                follow_up_actions=follow_up_actions,
+            )
+            return ChatSubmissionResult(
+                reply=reply,
+                focus_run_id=selected_run_id,
+                open_tab="tab-overview",
+                follow_up_actions=follow_up_actions,
+            )
+        if normalized.startswith("restart repo"):
+            return self._pending_simple_action(repo_id, action_name="repo_restart", label=f"Restart repo `{repo_id}`")
+        if normalized.startswith("start repo"):
+            return self._pending_simple_action(repo_id, action_name="repo_start", label=f"Start repo `{repo_id}`")
+        if normalized.startswith("stop repo"):
+            return self._pending_simple_action(repo_id, action_name="repo_stop", label=f"Stop repo `{repo_id}`")
+        if normalized.startswith("run canary") or normalized.startswith("canary"):
+            return self._pending_simple_action(repo_id, action_name="repo_canary", label=f"Run canary for repo `{repo_id}`")
+        if normalized.startswith("runtime check"):
+            return self._pending_simple_action(repo_id, action_name="runtime_check", label=f"Run runtime check for repo `{repo_id}`")
+        if normalized.startswith("rerun run "):
+            run_id = normalized.split("rerun run ", 1)[1].strip()
+            return self._pending_simple_action(repo_id, action_name="run_rerun", label=f"Rerun run `{run_id}`", run_id=run_id)
+        if normalized.startswith("cancel run "):
+            run_id = normalized.split("cancel run ", 1)[1].strip()
+            return self._pending_simple_action(repo_id, action_name="run_cancel", label=f"Cancel run `{run_id}`", run_id=run_id)
+        if normalized.startswith("enqueue run "):
+            run_id = normalized.split("enqueue run ", 1)[1].strip()
+            return self._pending_simple_action(repo_id, action_name="run_enqueue", label=f"Enqueue run `{run_id}`", run_id=run_id)
+        if normalized.startswith("archive run "):
+            run_id = normalized.split("archive run ", 1)[1].strip()
+            return self._pending_simple_action(repo_id, action_name="archive_run", label=f"Archive run `{run_id}`", run_id=run_id)
+
+        if normalized.endswith("?"):
+            reply = (
+                "Supported chat actions are repo/run control, health/status queries, and "
+                "creating new runs with `/new ...` or an explicit operator request."
+            )
+            self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
+            return ChatSubmissionResult(reply=reply)
+
+        return self._draft_new_run(repo_id, message)
 
     def start_repo(self, repo_id: str) -> str:
         return self.supervisors[repo_id].start()
@@ -1517,6 +2893,7 @@ def build_example_config_text(repo_root: pathlib.Path) -> str:
             f'name = "{repo_root.name}"',
             f'root = "{repo_root}"',
             "auto_start = true",
+            'default_model = "openai/gpt-5.4-mini"',
             "max_model_workers = 2",
             "max_score_workers = 2",
             "",
@@ -1525,5 +2902,6 @@ def build_example_config_text(repo_root: pathlib.Path) -> str:
             'name = "Another Harness"',
             f'root = "{sibling}"',
             "auto_start = false",
+            'default_model = "anthropic/claude-sonnet-4"',
         ]
     ) + "\n"

@@ -47,8 +47,8 @@ Supported keys:
   - `window_days`
 - `[[repo]]`
   - required: `id`, `name`, `root`
-  - optional: `runs_root`, `auto_start`, `default_profile`, `max_model_workers`,
-    `max_score_workers`, `orchestrator_poll_seconds`
+  - optional: `runs_root`, `auto_start`, `default_profile`, `default_model`,
+    `max_model_workers`, `max_score_workers`, `orchestrator_poll_seconds`
 
 If `runs_root` is omitted the command center uses `<root>/starter/runs`.
 
@@ -56,10 +56,13 @@ If `runs_root` is omitted the command center uses `<root>/starter/runs`.
 
 - `j` / `k`: move in the focused table
 - arrows: native table navigation
-- `tab`: rotate focus between repo list, run table, and details
-- `/`: set a run filter
-- `:`: open the command palette
+- `tab`: rotate focus between repo list, filter text, run list, and detail tabs
+- `/`: focus the visible filter bar text field
+- `:`: open the searchable command picker
+- `o`: open the most useful artifact for the selected run
+- `?`: open the in-app help tab with shortcuts, filter examples, and common commands
 - `enter`: focus the detail tabs
+- `Chat` tab: operator chat for repo/run control and review-before-launch new runs
 - `f`: toggle follow mode for `Events`, `Transcript`, or `Patch`
 - `s`: cycle the active repo/run sort key
 - `r`: reverse the active repo/run sort
@@ -70,22 +73,34 @@ If `runs_root` is omitted the command center uses `<root>/starter/runs`.
 
 ## Filters
 
-Plain terms match `run_id`, state, error code, profile, and failure classifications.
+The run pane has a visible guided filter bar with chips for:
 
-Structured filters:
+- `Failed`
+- `Queued`
+- `Capability`
+- `Last 24h`
+- trailing text refinement
 
-- `state:failed`
-- `failure:eval_failed`
-- `profile:capability`
-- `age:7`
+Matching is AND-based across every enabled chip plus the text box.
 
-Example:
+The text refinement matches plain terms against `run_id`, state, error code,
+profile, and failure classifications.
 
-```text
-state:failed profile:capability
-```
+`/` focuses the text field, and `filter clear` still works from the raw command path.
 
 ## Command palette
+
+Press `:` to open a searchable picker that surfaces context-aware run actions first,
+then recommended actions, repo actions, and navigation/filter actions.
+
+The picker includes:
+
+- selected-run actions like `Open Best Artifact`, `Open Transcript`, `Open Score`, `Cancel`, `Rerun`
+- repo actions like `Runtime Check`, `Start Repo`, `Stop Repo`, `Restart Repo`, `Run Canary`
+- navigation and filter helpers like `Open Help`, `Toggle Failed Filter`, and `Focus Newest Failed Run`
+- `Open Raw Command Prompt...` as a fallback into the original command entry flow
+
+The raw command executor remains available for operators who prefer direct commands.
 
 Repo commands:
 
@@ -106,6 +121,7 @@ Run commands:
 Artifact commands:
 
 - `open manifest`
+- `open chat`
 - `open patch`
 - `open events`
 - `open transcript`
@@ -121,11 +137,46 @@ Sorting and follow commands:
 
 If an id is omitted the currently selected repo or run is used.
 
+## Detail Pane
+
+The right pane now keeps the same high-signal structure for every selection:
+
+- current target card with repo, run, state, pass/fail, profile, relative age, and safe next actions
+- alert banner with plain-language health warnings and failures
+- run timeline strip for `Queued -> Claimed -> Model Running -> Scoring -> Complete`
+- inline action rail for common run and repo actions
+- existing tabbed artifacts below that shell
+
+`Open Best Artifact` chooses the most useful tab for the selected run:
+
+- failed or cancelled runs prefer `Score`, then `Transcript`, then `Events`
+- passing complete runs prefer `Patch`, then `Overview`
+- in-flight runs prefer `Events`
+
+Destructive UI actions such as `Stop Repo`, `Restart Repo`, `Cancel Run`,
+`Rerun`, and force restore now use modal `Confirm` / `Cancel` buttons instead
+of typed confirmation.
+
+Repo detail memory is preserved when switching repos, including the active tab,
+overview preview mode, and enabled follow streams.
+
+## Chat Follow-Ups
+
+The latest assistant reply in `Chat` can expose clickable follow-up actions for
+common next steps. Examples:
+
+- failed-run summaries can offer `Focus Newest Failed Run`, `Filter Failed`, and `Open Score for Newest Failed`
+- queue summaries can offer `Filter Queued`, `Open Health`, and `Runtime Check`
+- current-run summaries can offer `Open Best Artifact`, `Open Transcript`, and `Rerun` for terminal failures
+- canary summaries can offer `Open Health` and `Run Canary`
+
 ## Action semantics
 
 - Orchestrator processes are owned by the command center for configured repos.
 - Orchestrator stdout/stderr are captured under `<runs_root>/.orchestrator/`.
 - Supervisor health is persisted under `<runs_root>/.orchestrator/supervisor-status.json`.
+- Chat audit is persisted under `<runs_root>/.orchestrator/chat-log.jsonl`.
+- Pending chat confirmation state is persisted under `<runs_root>/.orchestrator/chat-state.json`.
 - `run cancel` creates `.orchestrator-cancel`.
 - `run enqueue` appends a queued model entry to `.orchestrator/run_queue.jsonl` and
   marks `run.state` as `queued` when the run is eligible.
@@ -138,6 +189,13 @@ If an id is omitted the currently selected repo or run is used.
   `runs_root`. If the extracted run directory already exists, pass `--force` to confirm.
 - `Overview` now shows absolute artifact paths for the selected run.
 - `Patch` is a dedicated detail tab and is hidden when no patch artifact is present.
+- Repo and run panes now show the current selection, visible counts, active sort, and filter state.
+- When a filter hides every run, the detail panes explain that state instead of showing a hidden run.
+- `Help` is a dedicated detail tab with quick-start guidance, shortcut reminders, and command examples.
+- `Chat` is an operator shell over the existing harness actions. It can answer bounded
+  status questions, stage confirmed control actions, and draft new runs before launch.
+- New run drafts use repo `default_profile` and `default_model` when present, and require
+  explicit `confirm` before create+launch or create+enqueue.
 - The summary bar tracks fleet stale runs, failing runtime checks, canary health, and the
   active repo/run sort plus current filter.
 
@@ -145,8 +203,8 @@ If an id is omitted the currently selected repo or run is used.
 
 - Local machine only
 - No SSH or multi-host management
-- No chat panel
 - No policy promotion or release-gate controls
+- Chat does not rewrite tasks behind the operator's back or act as a planner/manager layer
 - Startup preflight blocks launch when the Python runtime, Textual dependency, repo layout,
   or a live prior command-center-managed orchestrator PID is invalid
 - Persistent truth remains the existing run files and queue JSONL logs

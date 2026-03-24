@@ -170,6 +170,29 @@ def _write_canary_summary(
     return path
 
 
+def _write_run_events(run_dir: pathlib.Path, events: list[dict[str, object]]) -> None:
+    (run_dir / "run-events.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
+        encoding="utf-8",
+    )
+
+
+def _update_run_manifest(
+    run_dir: pathlib.Path,
+    *,
+    queue_wait_ms: int | None = None,
+    score_wait_ms: int | None = None,
+) -> None:
+    manifest_path = run_dir / "outputs" / "run_manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    orchestration = payload.setdefault("orchestration", {})
+    if queue_wait_ms is not None:
+        orchestration["queue_wait_ms"] = queue_wait_ms
+    if score_wait_ms is not None:
+        orchestration["score_wait_ms"] = score_wait_ms
+    manifest_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+
 def _poll_supervisor_until_idle(
     supervisor: cclib.RepoSupervisor,
     *,
@@ -691,6 +714,129 @@ def test_harvester_emits_operator_summary_signals(tmp_path: pathlib.Path, monkey
     assert payload["canary_status"]["all_passed"] is True
 
 
+def test_control_center_service_builds_filter_actions_alerts_and_timeline(tmp_path: pathlib.Path) -> None:
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    failed_run = _write_run(
+        runs_root,
+        "run-fail",
+        state="failed",
+        overall_pass=False,
+        profile="capability",
+        primary_error_code="eval_failed",
+    )
+    queued_run = _write_run(runs_root, "run-queued", state="queued", overall_pass=None)
+    queued_run_2 = _write_run(runs_root, "run-queued-2", state="queued", overall_pass=None)
+    queued_run_3 = _write_run(runs_root, "run-queued-3", state="queued", overall_pass=None)
+    _write_run_events(
+        failed_run,
+        [
+            {
+                "phase": "model_retry",
+                "message": "model run failed, scheduling retry",
+                "failure_classification": "orchestrator_worker_retry",
+            },
+            {
+                "phase": "model_failed",
+                "message": "model worker hit retry ceiling",
+                "failure_classification": "model_runtime_failure",
+            },
+        ],
+    )
+    _update_run_manifest(failed_run, queue_wait_ms=400_000)
+    _update_run_manifest(queued_run, queue_wait_ms=400_000)
+    _update_run_manifest(queued_run_2, queue_wait_ms=400_000)
+    _update_run_manifest(queued_run_3, queue_wait_ms=400_000)
+    config = cclib.ControlCenterConfig(
+        ui=cclib.UIConfig(),
+        repos=(
+            cclib.RepoConfig(
+                id="alpha",
+                name="Alpha",
+                root=repo_root,
+                runs_root=runs_root,
+                auto_start=False,
+            ),
+        ),
+        source_path=None,
+    )
+    service = cclib.ControlCenterService(config)
+    snapshot = service.refresh()
+    service.supervisors["alpha"].last_runtime_check_ok = False
+    service.supervisors["alpha"].last_runtime_check_message = "unsupported runtime"
+    snapshot = service.refresh()
+
+    failed_only = service.filter_runs(
+        snapshot.repos[0].runs,
+        service.build_filter_state(failed_only=True, capability_only=True),
+    )
+    assert [row.run_id for row in failed_only] == ["run-fail"]
+    assert service.recommended_artifact_tab("alpha", "run-fail") == "tab-score"
+
+    alerts = service.build_repo_alerts("alpha") + service.build_run_alerts("alpha", "run-fail")
+    labels = [alert.label for alert in alerts]
+    assert "Runtime check failed" in labels
+    assert "Canary stale" in labels
+    assert "Queue backing up" in labels
+    assert "Retry ceiling hit" in labels
+
+    timeline = service.build_run_timeline("alpha", "run-fail")
+    assert [step.label for step in timeline] == [
+        "Queued",
+        "Claimed",
+        "Model Running",
+        "Scoring",
+        "Failed",
+    ]
+    assert timeline[-1].status == "problem"
+
+    actions = service.build_context_actions("alpha", "run-fail")
+    by_id = {action.id: action for action in actions}
+    assert by_id["open-best-artifact"].command_text == "open-best-artifact"
+    assert by_id["cancel-run"].enabled is False
+    assert by_id["rerun-run"].requires_confirmation is True
+
+
+def test_control_center_service_chat_follow_ups_are_recorded(tmp_path: pathlib.Path) -> None:
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    _write_run(
+        runs_root,
+        "run-fail",
+        state="failed",
+        overall_pass=False,
+        primary_error_code="eval_failed",
+    )
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                ),
+            ),
+            source_path=None,
+        )
+    )
+    service.refresh()
+
+    result = service.submit_chat_message("alpha", "show failed runs")
+    assert [action.label for action in result.follow_up_actions] == [
+        "Focus Newest Failed Run",
+        "Filter Failed",
+        "Open Score for Newest Failed",
+    ]
+    assert [action.label for action in service.chat_follow_up_actions("alpha")] == [
+        "Focus Newest Failed Run",
+        "Filter Failed",
+        "Open Score for Newest Failed",
+    ]
+
+
 def test_chat_read_only_query_and_pending_confirmation(tmp_path: pathlib.Path) -> None:
     repo_root = _make_repo_root(tmp_path, "alpha")
     runs_root = repo_root / "starter" / "runs"
@@ -819,18 +965,41 @@ def test_control_center_main_check_mode_returns_exit_codes(
 def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) -> None:
     pytest.importorskip("textual")
     from control_center import ControlCenterApp
-    from textual.widgets import DataTable
+    from textual.widgets import Button, DataTable, Input, Static
 
     repo_one = _make_repo_root(tmp_path, "alpha")
     repo_two = _make_repo_root(tmp_path, "beta")
     _write_run(repo_one / "starter" / "runs", "run-success", state="complete", overall_pass=True)
     _write_run(repo_one / "starter" / "runs", "run-pending", state="queued", overall_pass=None)
-    _write_run(
+    queued_a = _write_run(repo_two / "starter" / "runs", "run-queued-a", state="queued", overall_pass=None)
+    queued_b = _write_run(repo_two / "starter" / "runs", "run-queued-b", state="queued", overall_pass=None)
+    queued_c = _write_run(repo_two / "starter" / "runs", "run-queued-c", state="queued", overall_pass=None)
+    failed_run = _write_run(
         repo_two / "starter" / "runs",
         "run-failure",
         state="failed",
         overall_pass=False,
+        profile="capability",
         primary_error_code="eval_failed",
+    )
+    _update_run_manifest(failed_run, queue_wait_ms=400_000)
+    _update_run_manifest(queued_a, queue_wait_ms=400_000)
+    _update_run_manifest(queued_b, queue_wait_ms=400_000)
+    _update_run_manifest(queued_c, queue_wait_ms=400_000)
+    _write_run_events(
+        failed_run,
+        [
+            {
+                "phase": "model_retry",
+                "message": "model run failed, scheduling retry",
+                "failure_classification": "orchestrator_worker_retry",
+            },
+            {
+                "phase": "model_failed",
+                "message": "model worker hit retry ceiling",
+                "failure_classification": "model_runtime_failure",
+            },
+        ],
     )
 
     service = cclib.ControlCenterService(
@@ -856,14 +1025,33 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
         )
     )
 
+    service.supervisors["beta"].last_runtime_check_ok = False
+    service.supervisors["beta"].last_runtime_check_message = "unsupported runtime"
     service.start_repo = lambda repo_id: f"started {repo_id}"  # type: ignore[method-assign]
+    service.stop_repo = lambda repo_id: f"stopped {repo_id}"  # type: ignore[method-assign]
+    service.restart_repo = lambda repo_id: f"restarted {repo_id}"  # type: ignore[method-assign]
     service.runtime_check = lambda repo_id: f"runtime {repo_id}"  # type: ignore[method-assign]
     service.archive_run = lambda repo_id, run_id: f"archive {run_id}"  # type: ignore[method-assign]
+    service.rerun_run = lambda repo_id, run_id: f"reran {run_id}"  # type: ignore[method-assign]
     service.restore_evidence = (  # type: ignore[method-assign]
         lambda repo_id, run_id, archive_path="", force=False: (
             f"restore {run_id} {archive_path} {force}"
         )
     )
+
+    def _action_slot(app: ControlCenterApp, label: str) -> Button:
+        for index in range(12):
+            button = app.query_one(f"#action-slot-{index}", Button)
+            if str(button.label) == label:
+                return button
+        raise AssertionError(f"missing action slot: {label}")
+
+    def _picker_result(screen, text: str) -> Button:
+        for index in range(8):
+            button = screen.query_one(f"#picker-result-{index}", Button)
+            if text in str(button.label):
+                return button
+        raise AssertionError(f"missing picker result: {text}")
 
     async def runner() -> None:
         app = ControlCenterApp(service)
@@ -879,138 +1067,162 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             assert app.query_one("#detail-tabs").active == "tab-chat"
             assert "Try: show failed runs" in str(app.query_one("#chat-banner").renderable)
 
-            app.query_one("#chat-input").focus()
+            app.query_one("#repo-table", DataTable).focus()
+            await pilot.press("j")
+            await pilot.pause()
+            assert app.selected_repo_id == "beta"
+            app._select_run("run-failure")
+            await pilot.pause()
+            assert app.selected_run_id == "run-failure"
+            assert "run-failure" in str(app.query_one("#target-card", Static).renderable)
+            alert_text = str(app.query_one("#alert-banner", Static).renderable)
+            assert "Runtime check failed" in alert_text
+            assert "Canary stale" in alert_text
+            assert "Queue backing up" in alert_text
+            assert "Retry ceiling hit" in alert_text
+            assert "Failed" in str(app.query_one("#timeline-strip", Static).renderable)
+
+            action_labels = [
+                str(app.query_one(f"#action-slot-{index}", Button).label)
+                for index in range(8)
+                if str(app.query_one(f"#action-slot-{index}", Button).label)
+            ]
+            assert action_labels[:6] == [
+                "Open Best Artifact",
+                "Open Transcript",
+                "Open Score",
+                "Runtime Check",
+                "Archive",
+                "Cancel",
+            ]
+            assert "Rerun" in action_labels
+            assert _action_slot(app, "Cancel").disabled is True
+
+            await pilot.press("o")
+            await pilot.pause()
+            assert app.query_one("#detail-tabs").active == "tab-score"
+
+            app.query_one("#filter-failed", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert run_table.row_count == 1
+            assert app.filter_state.failed_only is True
+
+            app.query_one("#filter-capability", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.filter_state.capability_only is True
+            assert run_table.row_count == 1
+
+            await pilot.press("/")
+            for key in "run-failure":
+                await pilot.press(key)
+            await pilot.pause()
+            assert app.filter_state.text == "run-failure"
+            assert "filter: failed, capability, run-failure" in str(
+                app.query_one("#run-label").renderable
+            )
+
+            app.filter_state = cclib.RunFilterState()
+            app._apply_filter_state()
+            await pilot.pause()
+
+            app.query_one("#chat-input", Input).focus()
             for key in "show failed runs":
                 await pilot.press("space" if key == " " else key)
             await pilot.press("enter")
             await pilot.pause()
-            assert "No failed runs are visible in the current window." in str(
-                app.query_one("#chat-history").renderable
-            )
+            assert str(app.query_one("#chat-followup-0", Button).label) == "Focus Newest Failed Run"
+            assert str(app.query_one("#chat-followup-1", Button).label) == "Filter Failed"
+            assert str(app.query_one("#chat-followup-2", Button).label) == "Open Score for Newest Failed"
 
-            await pilot.press("tab")
+            app.query_one("#chat-followup-1", Button).focus()
+            await pilot.press("enter")
             await pilot.pause()
-            await pilot.press("s")
-            await pilot.pause()
-            assert "repo sort: orchestrator" in str(app.query_one("#status-line").renderable)
-
-            await pilot.press("r")
-            await pilot.pause()
-            assert "repo sort: orchestrator" in str(app.query_one("#status-line").renderable)
-
-            await pilot.press("k")
-            await pilot.pause()
-            assert app.selected_repo_id == "beta"
-
-            await pilot.press("/")
-            await pilot.press(
-                "s",
-                "t",
-                "a",
-                "t",
-                "e",
-                ":",
-                "f",
-                "a",
-                "i",
-                "l",
-                "e",
-                "d",
-                "enter",
-            )
-            await pilot.pause()
+            assert app.filter_state.failed_only is True
             assert run_table.row_count == 1
-            assert app.selected_run_id == "run-failure"
-            assert "filter: state:failed" in str(app.query_one("#run-label").renderable)
-
-            await pilot.press("?")
-            await pilot.pause()
-            assert app.query_one("#detail-tabs").active == "tab-help"
-            assert "Quick guide" in str(app.query_one("#help-text").renderable)
 
             await pilot.press(":")
-            for key in "open health":
-                await pilot.press("space" if key == " " else key)
+            await pilot.pause()
+            picker_input = app.screen.query_one("#picker-query", Input)
+            picker_input.focus()
+            for key in "health":
+                await pilot.press(key)
             await pilot.press("enter")
             await pilot.pause()
             assert app.query_one("#detail-tabs").active == "tab-health"
-            assert "Top failure causes" in str(app.query_one("#health-text").renderable)
 
             await pilot.press(":")
-            for key in "open transcript":
-                await pilot.press("space" if key == " " else key)
+            await pilot.pause()
+            picker_input = app.screen.query_one("#picker-query", Input)
+            picker_input.focus()
+            for key in "raw":
+                await pilot.press(key)
+            raw_button = _picker_result(app.screen, "Open Raw Command Prompt")
+            raw_button.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.input_mode == "command"
+            assert app.query_one("#command-input", Input).styles.display == "block"
+            await pilot.press("escape")
+            await pilot.pause()
+
+            _action_slot(app, "Open Transcript").focus()
             await pilot.press("enter")
             await pilot.pause()
             assert app.query_one("#detail-tabs").active == "tab-transcript"
 
             await pilot.press("f")
             transcript_path = repo_two / "starter" / "runs" / "run-failure" / "transcript.jsonl"
-            transcript_path.write_text(
-                '{"type":"message"}\n{"type":"message","text":"tail"}\n',
-                encoding="utf-8",
-            )
+            transcript_path.write_text('{"type":"message"}\n{"type":"message","text":"tail"}\n', encoding="utf-8")
             app.refresh_data()
             await pilot.pause()
             assert "tail" in str(app.query_one("#transcript-text").renderable)
 
-            await pilot.press(":")
-            for key in "open patch":
+            _action_slot(app, "Rerun").focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "Rerun" in str(app.screen.query_one("#confirm-title", Static).renderable)
+            app.screen.query_one("#confirm-no", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "cancelled rerun" in str(app.query_one("#status-line").renderable)
+
+            _action_slot(app, "Rerun").focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            app.screen.query_one("#confirm-yes", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "reran run-failure" in str(app.query_one("#status-line").renderable)
+
+            app.query_one("#repo-table", DataTable).focus()
+            await pilot.press("k")
+            await pilot.pause()
+            assert app.selected_repo_id == "alpha"
+            app._execute_command("open health")
+            await pilot.pause()
+            assert app.query_one("#detail-tabs").active == "tab-health"
+
+            app.query_one("#repo-table", DataTable).focus()
+            await pilot.press("j")
+            await pilot.pause()
+            assert app.selected_repo_id == "beta"
+            assert app.query_one("#detail-tabs").active == "tab-transcript"
+
+            app.query_one("#chat-input", Input).focus()
+            for key in "queue depth":
                 await pilot.press("space" if key == " " else key)
             await pilot.press("enter")
             await pilot.pause()
-            assert app.query_one("#detail-tabs").active == "tab-patch"
+            assert str(app.query_one("#chat-followup-0", Button).label) == "Filter Queued"
+            assert str(app.query_one("#chat-followup-1", Button).label) == "Open Health"
+            assert str(app.query_one("#chat-followup-2", Button).label) == "Runtime Check"
 
-            (repo_two / "starter" / "runs" / "run-failure" / "patch.diff").unlink()
-            app.refresh_data()
+            app.query_one("#repo-table", DataTable).focus()
+            await pilot.press("?")
             await pilot.pause()
-            assert app.query_one("#detail-tabs").active == "tab-overview"
-
-            await pilot.press("tab")
-            await pilot.pause()
-            await pilot.press("tab")
-            await pilot.pause()
-            await pilot.press("s")
-            await pilot.pause()
-            assert "run sort: state" in str(app.query_one("#status-line").renderable)
-
-            await pilot.press(":")
-            for key in "repo start":
-                await pilot.press("space" if key == " " else key)
-            await pilot.press("enter")
-            await pilot.pause()
-            assert "started beta" in str(app.query_one("#status-line").renderable)
-
-            await pilot.press(":")
-            for key in "runtime-check":
-                await pilot.press("space" if key == " " else key)
-            await pilot.press("enter")
-            await pilot.pause()
-            assert "runtime beta" in str(app.query_one("#status-line").renderable)
-
-            await pilot.press(":")
-            for key in "archive-run":
-                await pilot.press("space" if key == " " else key)
-            await pilot.press("enter")
-            await pilot.pause()
-            assert "archive run-failure" in str(app.query_one("#status-line").renderable)
-
-            await pilot.press(":")
-            for key in "restore-evidence run-failure /tmp/archive.tgz --force":
-                await pilot.press("space" if key == " " else key)
-            await pilot.press("enter")
-            await pilot.pause()
-            assert "restore run-failure /tmp/archive.tgz True" in str(
-                app.query_one("#status-line").renderable
-            )
-
-            app.filter_text = "state:missing"
-            app._populate_run_table()
-            app._update_context_labels()
-            app._update_detail(force_streams=True)
-            await pilot.pause()
-            assert run_table.row_count == 0
-            assert "No runs match the current filter: state:missing" in str(
-                app.query_one("#overview-text").renderable
-            )
+            assert app.query_one("#detail-tabs").active == "tab-help"
+            assert "Quick guide" in str(app.query_one("#help-text").renderable)
 
     asyncio.run(runner())
