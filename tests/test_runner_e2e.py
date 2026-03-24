@@ -402,6 +402,73 @@ def test_runner_v3_rpc_rejects_invalid_subagent_usage(
     assert "subagents.write_not_allowed:focused_reader" in score["capabilities"]["violations"]
 
 
+def test_runner_async_scoring_surfaces_pre_score_capability_audit(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v3 rpc async invalid usage")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v3")
+    contract["transport"] = {"mode": "rpc"}
+    contract["capabilities"]["enabled"] = True
+    contract["capabilities"]["subagents"] = {
+        "allowed": True,
+        "max_agents": 1,
+        "allowed_profiles": ["focused_reader"],
+    }
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    write_fake_pi_scenario(
+        run_dir,
+        {
+            "scenario": "happy_path",
+            "subagent_usage": {
+                "usage_version": "v1",
+                "spawned_agents": [
+                    {
+                        "agent_id": "reader-1",
+                        "profile_id": "focused_reader",
+                        "tool_calls": ["write"],
+                        "read_paths": ["../outside.txt"],
+                        "write_paths": ["starter/README.md"],
+                        "network_access": True,
+                        "prompt_tokens": 5001,
+                        "runtime_seconds": 999,
+                    }
+                ],
+            },
+        },
+    )
+
+    completed = run_harness(
+        isolated_repo,
+        run_dir,
+        "happy_path",
+        extra_env={"HARNESS_ASYNC_SCORING": "1"},
+    )
+
+    assert completed.returncode == 0
+    manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
+    preview = json.loads(
+        (run_dir / "outputs" / "subagent-usage-validation.json").read_text(encoding="utf-8")
+    )
+    events = [
+        json.loads(line)
+        for line in (run_dir / "run-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert manifest["state"] == "score_pending"
+    assert manifest["capabilities"]["usage_validation_path"] == "outputs/subagent-usage-validation.json"
+    assert manifest["capabilities"]["usage_valid"] is False
+    assert "subagents.write_not_allowed:focused_reader" in manifest["capabilities"]["usage_violations"]
+    assert preview["usage_valid"] is False
+    assert "subagents.write_not_allowed:focused_reader" in preview["violations"]
+    assert any(
+        event["message"] == "subagent usage violations detected prior to scoring"
+        for event in events
+    )
+
+
 def test_runner_contract_failure_blocks_launch(isolated_repo: pathlib.Path) -> None:
     run_dir = create_run(isolated_repo, "bad contract")
     task_path = run_dir / "task.md"

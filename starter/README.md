@@ -173,6 +173,7 @@ Each run creates:
 - `result.template.json` (schema-compliant scaffold for copy/paste)
 - `outputs/` (durable artifacts)
   - `outputs/run_manifest.json` (machine-readable manifest and audit trail)
+  - `outputs/subagent-usage-validation.json` (pre-score capability audit for subagent-capable runs)
 - `score/` (eval artifacts)
   - `score/eval-<n>.stdout.log`
   - `score/eval-<n>.stderr.log`

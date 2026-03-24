@@ -33,6 +33,17 @@ Most agent harnesses grow into complicated controller layers. This repo takes th
 
 If you want the fuller design rationale, start with [pi-bitterless_harness_spec.md](./pi-bitterless_harness_spec.md).
 
+## Multi-Agent Hardening Scorecard
+
+- `Green` Opt-in gating: subagents are disabled by default and only allowed through the v3 capability path with explicit allowed profiles and `rpc` transport. See [AGENTS.md](./AGENTS.md), [starter/bin/harnesslib.py](./starter/bin/harnesslib.py), and [tests/test_runner_e2e.py](./tests/test_runner_e2e.py).
+- `Green` Anti-choreography guardrails: the capability library rejects manager-style fields such as `workflow`, `pipeline`, `route`, and `handoff`, so the manifest stays a capability registry rather than a hidden workflow script. See [pi-bitterless_harness_spec.md](./pi-bitterless_harness_spec.md) and [starter/bin/capabilitylib.py](./starter/bin/capabilitylib.py).
+- `Green` Capability containment: allowed tools, read/write scopes, network access, spawn count, token budget, and runtime budget are constrained per profile and validated against recorded usage. See [starter/bin/capabilitylib.py](./starter/bin/capabilitylib.py) and [tests/test_capabilitylib.py](./tests/test_capabilitylib.py).
+- `Green` Auditability and evidence: capability manifests, subagent usage, run manifests, transcripts, and score artifacts keep the control plane file-native and inspectable. See [starter/bin/run_task.py](./starter/bin/run_task.py), [starter/bin/score_run.py](./starter/bin/score_run.py), and [starter/docs/operator-runbook.md](./starter/docs/operator-runbook.md).
+- `Yellow` Runtime enforcement model: the harness now audits subagent usage immediately before scoring and still fails invalid usage at scoring time, but it does not yet live-intercept every subagent action as it happens. See [starter/bin/run_task.py](./starter/bin/run_task.py), [starter/bin/score_run.py](./starter/bin/score_run.py), and [tests/test_runner_e2e.py](./tests/test_runner_e2e.py).
+- `Yellow` Future complexity risk: the command-center and orchestrator layers are still operational wrappers today, but they are the most likely place for workflow creep to re-enter later. See [starter/docs/operator-runbook.md](./starter/docs/operator-runbook.md) and [tests/test_orchestrator_async_retention.py](./tests/test_orchestrator_async_retention.py).
+
+No current `Red` areas were found based on checked repo evidence.
+
 ## Repo Guide
 
 - [starter/README.md](./starter/README.md): full operator and developer guide

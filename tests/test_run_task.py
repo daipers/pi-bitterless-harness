@@ -204,6 +204,85 @@ def test_signal_path_marks_state_as_cancelled(tmp_path: pathlib.Path) -> None:
     assert manifest["error_code"] == "cancelled"
 
 
+def test_audit_capability_usage_writes_preview_artifact_and_event(tmp_path: pathlib.Path) -> None:
+    run_dir = make_run_dir(tmp_path)
+    (run_dir / "context").mkdir()
+    runner = run_task.RunTaskRunner([str(run_dir)], config_env={"PYTHONPATH": str(tmp_path)})
+    runner.repo_root = tmp_path
+    runner.capabilities_enabled = True
+    runner.transport_mode = "rpc"
+    runner.capability_manifest_rel = "context/capability-manifest.json"
+    (run_dir / runner.capability_manifest_rel).write_text(
+        json.dumps(
+            {
+                "capability_manifest_version": "v1",
+                "subagents": {
+                    "allowed": True,
+                    "max_agents": 1,
+                    "allowed_profiles": ["focused_reader"],
+                },
+                "tool_bundles": [{"id": "default_tools", "tools": ["read"]}],
+                "subagent_profiles": [
+                    {
+                        "id": "focused_reader",
+                        "tool_bundles": ["default_tools"],
+                        "allow_network": False,
+                        "allow_write": False,
+                        "read_scopes": ["starter/**"],
+                        "write_scopes": [],
+                        "budgets": {
+                            "max_spawn_count": 1,
+                            "max_tokens": 1000,
+                            "max_runtime_seconds": 60,
+                        },
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "outputs" / "subagent-usage.json").write_text(
+        json.dumps(
+            {
+                "usage_version": "v1",
+                "spawned_agents": [
+                    {
+                        "agent_id": "reader-1",
+                        "profile_id": "focused_reader",
+                        "tool_calls": ["write"],
+                        "read_paths": ["starter/README.md"],
+                        "write_paths": ["starter/README.md"],
+                        "network_access": True,
+                        "prompt_tokens": 25,
+                        "runtime_seconds": 1,
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = runner._audit_capability_usage()
+
+    assert payload["usage_valid"] is False
+    assert "subagents.write_not_allowed:focused_reader" in payload["violations"]
+    preview = json.loads(runner.capability_usage_validation_path.read_text(encoding="utf-8"))
+    assert preview["usage_valid"] is False
+    assert preview["usage_path"] == "outputs/subagent-usage.json"
+    events = [
+        json.loads(line)
+        for line in runner.event_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event["message"] == "subagent usage violations detected prior to scoring"
+        for event in events
+    )
+
+
 def test_apply_policy_candidate_uses_canonical_retrieval_budget(tmp_path: pathlib.Path) -> None:
     run_dir = make_run_dir(tmp_path)
     runner = run_task.RunTaskRunner([str(run_dir)], config_env={"PYTHONPATH": str(tmp_path)})

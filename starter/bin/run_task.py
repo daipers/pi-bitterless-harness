@@ -18,6 +18,7 @@ from capabilitylib import (
     DEFAULT_USAGE_PATH,
     build_capability_manifest,
     load_capability_library,
+    validate_subagent_usage,
 )
 from harnesslib import (
     DEFAULT_RETRIEVAL_CONFIG,
@@ -358,6 +359,8 @@ class RunTaskRunner:
         self.subagent_max_agents = 0
         self.allowed_subagent_profiles: list[str] = []
         self.capability_library: dict[str, Any] | None = None
+        self.capability_usage_validation_path = self.run_dir / "outputs" / "subagent-usage-validation.json"
+        self.capability_usage_validation: dict[str, Any] | None = None
         self.guardrail_decisions: list[dict[str, Any]] = []
         self.guardrails_path = self.run_dir / "outputs" / "guardrails.json"
         self._pre_score_dispatch_decision: dict[str, Any] | None = None
@@ -747,7 +750,9 @@ class RunTaskRunner:
             if self.capabilities_enabled and self.capability_manifest_rel
             else {}
         ) or {}
-        capability_score = score_payload.get("capabilities", {}) or {}
+        capability_score = (
+            score_payload.get("capabilities", {}) or self.capability_usage_validation or {}
+        )
         dependencies = {
             "pi": command_output([self.pi_bin, "--version"]),
             "python3": command_output(["python3", "--version"]),
@@ -923,6 +928,11 @@ class RunTaskRunner:
                 "allowed_profiles": list(self.allowed_subagent_profiles),
                 "selected_profile": self.selected_capability_profile,
                 "usage_path": capability_score.get("usage_path") or DEFAULT_USAGE_PATH,
+                "usage_validation_path": (
+                    "outputs/subagent-usage-validation.json"
+                    if self.capability_usage_validation_path.exists()
+                    else None
+                ),
                 "usage_present": capability_score.get("usage_present"),
                 "usage_valid": capability_score.get("usage_valid"),
                 "usage_violations": list(capability_score.get("violations", [])),
@@ -1586,6 +1596,58 @@ class RunTaskRunner:
         (self.run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         self._write_manifest("running", self.phase, "", "")
 
+    def _audit_capability_usage(self) -> dict[str, Any]:
+        if not self.capabilities_enabled or not self.capability_manifest_rel:
+            self.capability_usage_validation = None
+            return {}
+
+        manifest_path = self.run_dir / self.capability_manifest_rel
+        if not manifest_path.exists():
+            self.capability_usage_validation = None
+            return {}
+
+        usage_path = self.run_dir / DEFAULT_USAGE_PATH
+        usage_payload = read_json(usage_path) if usage_path.exists() else None
+        manifest_payload = read_json(manifest_path) or {}
+        validation = validate_subagent_usage(
+            usage_payload if isinstance(usage_payload, dict) else None,
+            manifest_payload if isinstance(manifest_payload, dict) else {},
+            repo_root=self.repo_root,
+        )
+        payload = {
+            "generated_at": now_utc(),
+            "transport_mode": self.transport_mode,
+            "manifest_path": self.capability_manifest_rel,
+            "usage_path": DEFAULT_USAGE_PATH,
+            "usage_present": validation["usage_present"],
+            "usage_version": validation["usage_version"],
+            "usage_valid": validation["valid"],
+            "violations": list(validation["violations"]),
+            "agent_count": validation["agent_count"],
+            "spawned_profile_ids": list(validation["spawned_profile_ids"]),
+            "total_prompt_tokens": validation["total_prompt_tokens"],
+            "total_runtime_seconds": validation["total_runtime_seconds"],
+        }
+        write_json(self.capability_usage_validation_path, payload)
+        self.capability_usage_validation = payload
+        if payload["usage_valid"]:
+            self._log_event(
+                "capabilities_audit",
+                "validated subagent usage prior to scoring",
+                extra={
+                    "usage_present": payload["usage_present"],
+                    "agent_count": payload["agent_count"],
+                },
+            )
+        else:
+            self._log_event(
+                "capabilities_audit",
+                "subagent usage violations detected prior to scoring",
+                "eval_failed",
+                extra={"violations": payload["violations"]},
+            )
+        return payload
+
     def _invoke_pi(self) -> int:
         timeout_seconds = self.timeout_seconds
         if self.run_deadline_ms > 0:
@@ -1992,6 +2054,7 @@ class RunTaskRunner:
             self._run_pi_loop()
             self._check_cancelled("collect_git_metadata")
             self._collect_git_metadata()
+            self._audit_capability_usage()
             if self.skip_score or self.async_scoring:
                 self._finalize_model_only(queue_score=self.async_scoring and not self.skip_score)
                 return 0
