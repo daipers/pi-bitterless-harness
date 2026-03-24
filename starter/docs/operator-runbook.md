@@ -69,6 +69,8 @@ For a real policy-candidate promotion check, run a paired baseline and candidate
 
 The workflow uploads both canary summaries, both replay reports, the replay corpus, and the policy candidate report as one evidence bundle.
 
+When `HARNESS_PI_AUTH_JSON` is not configured locally, stop after the offline learning, benchmark, and replay steps and use the real-canary workflow above for the paired baseline/candidate canary evidence.
+
 Treat the recent canary history as the primary promotion signal. Before tagging a release, verify recent successful canary artifacts from `main`:
 
 ```bash
@@ -153,6 +155,24 @@ The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use
   are excluded from current-run secret scanning
 - Review `outputs/run_manifest.json`, `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` before signing off a canary
 - Treat missing fresh canary summaries, retrieval benchmark output, replay benchmark output, or fault-injection benchmark output as a release blocker
+
+## Learned candidate runtime fields
+
+Retrieval candidate manifests use these runtime fields as the canonical operator-facing shape:
+
+- `retriever_version`, `reranker_version`, and `abstention_model_version`
+- `selection.max_selected_sources` and `selection.stage1_k`
+- `abstention.probability_threshold`
+- Dense stage-1 artifact references under `runtime.model.artifact_paths` when the candidate uses dense retrieval
+
+Policy candidate manifests use these runtime fields as the canonical operator-facing shape:
+
+- `activation_threshold`
+- `heads`
+- `defaults`
+- `recommendations`
+
+Use `recommendations.retrieval_budget` as the runtime field for learned retrieval-budget advice. The older `context_budget` recommendation key is no longer the canonical policy-candidate shape.
 
 ## Real canary expectations
 

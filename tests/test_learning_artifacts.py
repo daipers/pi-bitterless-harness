@@ -726,7 +726,7 @@ def test_train_policy_candidate_emits_shadow_candidate_with_learned_recommendati
                             "execution_profile": "capability",
                             "retry_recommended": True,
                             "benchmark_eligible": True,
-                            "context_budget": {
+                            "retrieval_budget": {
                                 "selected_source_count": 2,
                                 "candidate_run_count": 6,
                             },
@@ -747,7 +747,7 @@ def test_train_policy_candidate_emits_shadow_candidate_with_learned_recommendati
                             "execution_profile": "capability",
                             "retry_recommended": False,
                             "benchmark_eligible": True,
-                            "context_budget": {
+                            "retrieval_budget": {
                                 "selected_source_count": 3,
                                 "candidate_run_count": 8,
                             },
@@ -768,7 +768,7 @@ def test_train_policy_candidate_emits_shadow_candidate_with_learned_recommendati
                             "execution_profile": "strict",
                             "retry_recommended": False,
                             "benchmark_eligible": False,
-                            "context_budget": {
+                            "retrieval_budget": {
                                 "selected_source_count": 1,
                                 "candidate_run_count": 2,
                             },
@@ -808,6 +808,9 @@ def test_train_policy_candidate_emits_shadow_candidate_with_learned_recommendati
     assert payload["runtime"]["model"]["artifact_paths"]["model_path"]
     assert "execution_profile" in payload["runtime"]["heads"]
     assert payload["runtime"]["defaults"]["execution_profile"] == "strict"
+    assert payload["runtime"]["recommendations"]["retrieval_budget"]["value"] == payload["runtime"][
+        "defaults"
+    ]["retrieval_budget"]
     assert payload["promotion"]["activation_approved"] is False
 
 
@@ -829,7 +832,7 @@ def test_evaluate_policy_candidate_can_promote_manifest_from_replay_and_canaries
                 "recommendations": {
                     "execution_profile": {"value": "capability", "confidence": 0.8},
                     "retry_limit": {"value": 3, "confidence": 0.7},
-                    "context_budget": {
+                    "retrieval_budget": {
                         "value": {"max_source_runs": 2, "max_candidates": 6},
                         "confidence": 0.75,
                     },

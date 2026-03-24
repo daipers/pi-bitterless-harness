@@ -6,7 +6,7 @@ import pathlib
 import run_real_canary
 
 
-def test_policy_candidate_metadata_reads_candidate_manifest(tmp_path: pathlib.Path) -> None:
+def test_candidate_metadata_reads_candidate_manifest(tmp_path: pathlib.Path) -> None:
     candidate_path = tmp_path / "policy.json"
     candidate_path.write_text(
         json.dumps(
@@ -21,7 +21,7 @@ def test_policy_candidate_metadata_reads_candidate_manifest(tmp_path: pathlib.Pa
         encoding="utf-8",
     )
 
-    payload = run_real_canary.policy_candidate_metadata(str(candidate_path))
+    payload = run_real_canary.candidate_metadata(str(candidate_path))
 
     assert payload == {
         "path": str(candidate_path.resolve()),
@@ -33,8 +33,8 @@ def test_policy_candidate_metadata_reads_candidate_manifest(tmp_path: pathlib.Pa
     }
 
 
-def test_policy_candidate_metadata_reports_missing_candidate(tmp_path: pathlib.Path) -> None:
-    payload = run_real_canary.policy_candidate_metadata(str(tmp_path / "missing.json"))
+def test_candidate_metadata_reports_missing_candidate(tmp_path: pathlib.Path) -> None:
+    payload = run_real_canary.candidate_metadata(str(tmp_path / "missing.json"))
 
     assert payload["configured"] is False
     assert payload["error"] == "candidate manifest not found"

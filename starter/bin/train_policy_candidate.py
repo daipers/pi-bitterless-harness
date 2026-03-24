@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             "recommendations": {
                 "execution_profile": {"value": defaults["execution_profile"], "confidence": 0.0},
                 "retry_limit": {"value": defaults["retry_policy"]["retry_limit"], "confidence": 0.0},
-                "context_budget": {"value": defaults["retrieval_budget"], "confidence": 0.0},
+                "retrieval_budget": {"value": defaults["retrieval_budget"], "confidence": 0.0},
                 "benchmark_eligible": {
                     "value": defaults["benchmark_eligibility"],
                     "confidence": 0.0,

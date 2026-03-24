@@ -131,15 +131,17 @@ def train_contextual_policy_model(
             )
             bucket["vectors"].append(vector)
 
-        context_budget = labels.get("context_budget")
-        if isinstance(context_budget, dict):
+        retrieval_budget = labels.get("retrieval_budget")
+        if isinstance(retrieval_budget, dict):
             budget_value = {
-                "max_source_runs": max(1, int(context_budget.get("selected_source_count", 1) or 1)),
+                "max_source_runs": max(
+                    1, int(retrieval_budget.get("selected_source_count", 1) or 1)
+                ),
                 "max_candidates": max(
                     1,
                     int(
-                        context_budget.get("candidate_run_count")
-                        or context_budget.get("selected_source_count")
+                        retrieval_budget.get("candidate_run_count")
+                        or retrieval_budget.get("selected_source_count")
                         or 1
                     ),
                 ),

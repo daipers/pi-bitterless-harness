@@ -372,7 +372,7 @@ class RunTaskRunner:
         self.policy_candidate_recommendations: dict[str, Any] = {}
         self.policy_candidate_applied: list[str] = []
         self.policy_candidate_overrides: list[str] = []
-        self.context_budget_overrides: dict[str, int] = {}
+        self.retrieval_budget_overrides: dict[str, int] = {}
         self.retrieval_budget_envelope = {
             "max_source_runs": int(DEFAULT_RETRIEVAL_CONFIG["max_source_runs"]),
             "max_candidates": int(DEFAULT_RETRIEVAL_CONFIG["max_candidates"]),
@@ -1103,36 +1103,36 @@ class RunTaskRunner:
                 self.retry_count = str(max(1, int(retry_limit)))
                 self.policy_candidate_applied.append("retry_limit")
 
-        context_budget, context_confidence = prediction_payload("retrieval_budget", "context_budget")
-        if isinstance(context_budget, dict):
+        retrieval_budget, retrieval_budget_confidence = prediction_payload("retrieval_budget")
+        if isinstance(retrieval_budget, dict):
             clipped_budget = {
                 "max_source_runs": min(
-                    max(1, int(context_budget.get("max_source_runs", 1))),
+                    max(1, int(retrieval_budget.get("max_source_runs", 1))),
                     max(1, int(self.retrieval_budget_envelope.get("max_source_runs", 1))),
                 ),
                 "max_candidates": min(
-                    max(1, int(context_budget.get("max_candidates", 1))),
+                    max(1, int(retrieval_budget.get("max_candidates", 1))),
                     max(1, int(self.retrieval_budget_envelope.get("max_candidates", 1))),
                 ),
             }
-            self.policy_candidate_recommendations["context_budget"] = {
+            self.policy_candidate_recommendations["retrieval_budget"] = {
                 "value": dict(clipped_budget),
-                "confidence": context_confidence,
+                "confidence": retrieval_budget_confidence,
             }
-            if mode == "active" and context_confidence >= activation_threshold:
-                self.context_budget_overrides["max_source_runs"] = int(
+            if mode == "active" and retrieval_budget_confidence >= activation_threshold:
+                self.retrieval_budget_overrides["max_source_runs"] = int(
                     clipped_budget["max_source_runs"]
                 )
-                self.context_budget_overrides["max_candidates"] = int(
+                self.retrieval_budget_overrides["max_candidates"] = int(
                     clipped_budget["max_candidates"]
                 )
                 if clipped_budget != {
-                    "max_source_runs": int(context_budget.get("max_source_runs", 1)),
-                    "max_candidates": int(context_budget.get("max_candidates", 1)),
+                    "max_source_runs": int(retrieval_budget.get("max_source_runs", 1)),
+                    "max_candidates": int(retrieval_budget.get("max_candidates", 1)),
                 }:
-                    self.policy_candidate_overrides.append("context_budget_clipped")
-                if self.context_budget_overrides:
-                    self.policy_candidate_applied.append("context_budget")
+                    self.policy_candidate_overrides.append("retrieval_budget_clipped")
+                if self.retrieval_budget_overrides:
+                    self.policy_candidate_applied.append("retrieval_budget")
 
         benchmark_eligible, benchmark_confidence = prediction_payload(
             "benchmark_eligibility", "benchmark_eligible"
@@ -1457,13 +1457,13 @@ class RunTaskRunner:
 
         env = self._with_pythonpath()
         env["HARNESS_EXECUTION_PROFILE"] = self.execution_profile
-        if self.context_budget_overrides.get("max_source_runs"):
+        if self.retrieval_budget_overrides.get("max_source_runs"):
             env["HARNESS_CONTEXT_MAX_SOURCE_RUNS"] = str(
-                self.context_budget_overrides["max_source_runs"]
+                self.retrieval_budget_overrides["max_source_runs"]
             )
-        if self.context_budget_overrides.get("max_candidates"):
+        if self.retrieval_budget_overrides.get("max_candidates"):
             env["HARNESS_CONTEXT_MAX_CANDIDATES"] = str(
-                self.context_budget_overrides["max_candidates"]
+                self.retrieval_budget_overrides["max_candidates"]
             )
         completed = self._run_command(
             [

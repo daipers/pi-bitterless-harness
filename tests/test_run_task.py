@@ -10,6 +10,7 @@ from contextlib import redirect_stdout
 import pytest
 import run_task
 import score_run
+from learninglib import build_candidate_manifest
 
 
 def make_run_dir(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -201,3 +202,40 @@ def test_signal_path_marks_state_as_cancelled(tmp_path: pathlib.Path) -> None:
     assert manifest["state"] == "cancelled"
     assert manifest["phase"] == "cancelled"
     assert manifest["error_code"] == "cancelled"
+
+
+def test_apply_policy_candidate_uses_canonical_retrieval_budget(tmp_path: pathlib.Path) -> None:
+    run_dir = make_run_dir(tmp_path)
+    runner = run_task.RunTaskRunner([str(run_dir)], config_env={"PYTHONPATH": str(tmp_path)})
+    runner.allowed_subagent_profiles = ["default"]
+    runner.policy_candidate = build_candidate_manifest(
+        candidate_type="policy",
+        candidate_id="policy-budget-1",
+        mode="active",
+        runtime={
+            "policy_model_version": "contextual-policy-v2",
+            "activation_threshold": 0.6,
+            "recommendations": {
+                "retrieval_budget": {
+                    "value": {"max_source_runs": 2, "max_candidates": 6},
+                    "confidence": 0.9,
+                }
+            },
+            "defaults": {},
+        },
+        promotion={
+            "activation_approved": True,
+            "approved_at": "2026-03-24T00:00:00Z",
+            "approval_reason": "validated",
+        },
+    )
+
+    runner._apply_policy_candidate()
+
+    assert runner.policy_candidate_recommendations["retrieval_budget"] == {
+        "value": {"max_source_runs": 2, "max_candidates": 6},
+        "confidence": 0.9,
+    }
+    assert runner.retrieval_budget_overrides == {"max_source_runs": 2, "max_candidates": 6}
+    assert "retrieval_budget" in runner.policy_candidate_applied
+    assert "context_budget" not in runner.policy_candidate_recommendations

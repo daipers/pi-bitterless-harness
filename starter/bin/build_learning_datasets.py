@@ -296,7 +296,7 @@ def build_policy_example(
             ),
             "attempt_recovery": bool((run_dir / "recovery").exists()),
             "benchmark_eligible": bool((score.get("benchmark_eligibility") or {}).get("eligible")),
-            "context_budget": {
+            "retrieval_budget": {
                 "selected_source_count": retrieval.get("selected_source_count", 0),
                 "candidate_run_count": retrieval.get("candidate_run_count", 0),
             },
