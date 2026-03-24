@@ -15,9 +15,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from capabilitylib import (
+    DEFAULT_INTERCEPTION_ACTION_LOG_PATH,
     DEFAULT_USAGE_PATH,
     build_capability_manifest,
+    evaluate_intercepted_subagent_action,
     load_capability_library,
+    summarize_interception_log,
     validate_subagent_usage,
 )
 from harnesslib import (
@@ -69,6 +72,12 @@ def read_json(path: pathlib.Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def append_jsonl(path: pathlib.Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 USAGE = (
@@ -358,6 +367,10 @@ class RunTaskRunner:
         self.subagents_allowed = False
         self.subagent_max_agents = 0
         self.allowed_subagent_profiles: list[str] = []
+        self.interception_enabled = False
+        self.interception_fail_mode = "fail_closed"
+        self.interception_action_log_rel = DEFAULT_INTERCEPTION_ACTION_LOG_PATH
+        self.interception_summary: dict[str, Any] = {}
         self.capability_library: dict[str, Any] | None = None
         self.capability_usage_validation_path = self.run_dir / "outputs" / "subagent-usage-validation.json"
         self.capability_usage_validation: dict[str, Any] | None = None
@@ -751,7 +764,10 @@ class RunTaskRunner:
             else {}
         ) or {}
         capability_score = (
-            score_payload.get("capabilities", {}) or self.capability_usage_validation or {}
+            score_payload.get("capabilities", {})
+            or self._load_interception_summary()
+            or self.capability_usage_validation
+            or {}
         )
         dependencies = {
             "pi": command_output([self.pi_bin, "--version"]),
@@ -927,6 +943,11 @@ class RunTaskRunner:
                 "max_agents": self.subagent_max_agents,
                 "allowed_profiles": list(self.allowed_subagent_profiles),
                 "selected_profile": self.selected_capability_profile,
+                "interception_enabled": self.interception_enabled,
+                "interception_mode": self.interception_fail_mode if self.interception_enabled else None,
+                "action_log_path": (
+                    self.interception_action_log_rel if self.interception_enabled else None
+                ),
                 "usage_path": capability_score.get("usage_path") or DEFAULT_USAGE_PATH,
                 "usage_validation_path": (
                     "outputs/subagent-usage-validation.json"
@@ -940,6 +961,9 @@ class RunTaskRunner:
                 "agent_count": capability_score.get("agent_count"),
                 "total_prompt_tokens": capability_score.get("total_prompt_tokens"),
                 "total_runtime_seconds": capability_score.get("total_runtime_seconds"),
+                "allowed_action_count": capability_score.get("allowed_action_count"),
+                "denied_action_count": capability_score.get("denied_action_count"),
+                "first_denial": capability_score.get("first_denial"),
             },
             "benchmark_eligibility": score_payload.get("benchmark_eligibility", {}),
             "promotion": score_payload.get("promotion_summary", {}),
@@ -1304,6 +1328,11 @@ class RunTaskRunner:
         self.subagents_allowed = bool(settings.get("subagents_allowed", False))
         self.subagent_max_agents = int(settings.get("subagent_max_agents", 0) or 0)
         self.allowed_subagent_profiles = list(settings.get("allowed_subagent_profiles", []))
+        self.interception_enabled = bool(settings.get("interception_enabled", False))
+        self.interception_fail_mode = str(settings.get("interception_fail_mode") or "fail_closed")
+        self.interception_action_log_rel = str(
+            settings.get("interception_action_log_path") or DEFAULT_INTERCEPTION_ACTION_LOG_PATH
+        )
         self._load_runtime_candidates()
         self._apply_policy_candidate()
         self.policy = load_policy(self.policy_path, repo_root=self.repo_root)
@@ -1334,9 +1363,15 @@ class RunTaskRunner:
                     error_code="contract_invalid",
                     exit_code=2,
                 )
-        if self.subagents_allowed and self.transport_mode != "rpc":
+        if self.subagents_allowed and self.transport_mode not in {"rpc", "managed_rpc"}:
             self._fail_contract_check(
-                "subagent-capable runs require transport.mode to be rpc",
+                "subagent-capable runs require transport.mode to be rpc or managed_rpc",
+                error_code="contract_invalid",
+                exit_code=2,
+            )
+        if self.transport_mode == "managed_rpc" and not self.interception_enabled:
+            self._fail_contract_check(
+                "managed_rpc requires capabilities.interception.enabled=true",
                 error_code="contract_invalid",
                 exit_code=2,
             )
@@ -1373,6 +1408,19 @@ class RunTaskRunner:
                 error_code="contract_invalid",
                 exit_code=127,
             )
+        if self.transport_mode == "managed_rpc":
+            completed = self._run_command(
+                [self.pi_bin, "--managed-rpc-probe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=False,
+            )
+            if completed.returncode != 0:
+                self._fail_contract_check(
+                    "managed_rpc requires a peer that supports pre-execution interception",
+                    error_code="contract_invalid",
+                    exit_code=2,
+                )
 
         write_probe = self.run_dir / ".write-probe"
         write_probe.touch()
@@ -1459,7 +1507,7 @@ class RunTaskRunner:
         return False
 
     def _prepare_context(self) -> None:
-        if self.context_enabled != "1" or self.run_contract_version not in {"v2", "v3"}:
+        if self.context_enabled != "1" or self.run_contract_version not in {"v2", "v3", "v4"}:
             return
 
         self.phase = "context"
@@ -1569,6 +1617,12 @@ class RunTaskRunner:
                 "- Do not invent new subagent roles, workflows, or helper pipelines.\n"
                 f"- Record any spawned subagent usage in {self.run_dir / DEFAULT_USAGE_PATH}.\n"
             )
+            if self.interception_enabled:
+                capability_block += (
+                    f"- Every attempted subagent action is live-intercepted and logged to "
+                    f"{self.run_dir / self.interception_action_log_rel}.\n"
+                    "- Denied subagent actions fail closed.\n"
+                )
 
         prompt = (
             f"Complete the task described in @{self.task_md}.\n\n"
@@ -1597,6 +1651,9 @@ class RunTaskRunner:
         self._write_manifest("running", self.phase, "", "")
 
     def _audit_capability_usage(self) -> dict[str, Any]:
+        if self.transport_mode == "managed_rpc":
+            self.capability_usage_validation = None
+            return {}
         if not self.capabilities_enabled or not self.capability_manifest_rel:
             self.capability_usage_validation = None
             return {}
@@ -1648,7 +1705,150 @@ class RunTaskRunner:
             )
         return payload
 
+    def _read_jsonl(self, path: pathlib.Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        payloads: list[dict[str, Any]] = []
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                payload = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                payloads.append(payload)
+        return payloads
+
+    def _load_interception_summary(self) -> dict[str, Any]:
+        if not self.interception_enabled:
+            self.interception_summary = {}
+            return {}
+        log_path = self.run_dir / self.interception_action_log_rel
+        summary = summarize_interception_log(self._read_jsonl(log_path))
+        summary["action_log_path"] = self.interception_action_log_rel
+        summary["usage_path"] = self.interception_action_log_rel
+        summary["interception_enabled"] = True
+        summary["interception_mode"] = self.interception_fail_mode
+        self.interception_summary = summary
+        return summary
+
+    def _invoke_managed_rpc(self) -> int:
+        if not self.capability_manifest_rel:
+            self._fail_contract_check(
+                "managed_rpc requires a capability manifest",
+                error_code="contract_invalid",
+                exit_code=2,
+            )
+        manifest_path = self.run_dir / self.capability_manifest_rel
+        manifest_payload = read_json(manifest_path) or {}
+        command = [
+            self.pi_bin,
+            "--managed-rpc",
+            "--session-dir",
+            str(self.run_dir / "session"),
+        ]
+        if self.model:
+            command.extend(["--model", self.model])
+        command.extend(
+            [f"@{self.task_md}", (self.run_dir / "prompt.txt").read_text(encoding="utf-8")]
+        )
+        env = self._context()
+        env["HOME"] = str(self.run_dir / "home")
+        env["HARNESS_TRANSPORT_MODE"] = self.transport_mode
+        env["HARNESS_CAPABILITIES_ENABLED"] = "1" if self.capabilities_enabled else "0"
+        env["HARNESS_CAPABILITY_MANIFEST_PATH"] = self.capability_manifest_rel
+        env["HARNESS_ALLOWED_SUBAGENT_PROFILES"] = ",".join(self.allowed_subagent_profiles)
+        env["HARNESS_SUBAGENT_MAX_AGENTS"] = str(self.subagent_max_agents)
+        env["HARNESS_INTERCEPTION_ENABLED"] = "1" if self.interception_enabled else "0"
+        env["HARNESS_INTERCEPTION_FAIL_MODE"] = self.interception_fail_mode
+        env["HARNESS_INTERCEPTION_ACTION_LOG_PATH"] = self.interception_action_log_rel
+        action_log_path = self.run_dir / self.interception_action_log_rel
+        action_log_path.parent.mkdir(parents=True, exist_ok=True)
+        state: dict[str, Any] = {}
+        with (
+            (self.run_dir / "transcript.jsonl").open("a", encoding="utf-8") as stdout_handle,
+            (self.run_dir / "pi.stderr.log").open("ab") as stderr_handle,
+        ):
+            process = subprocess.Popen(
+                command,
+                env=env,
+                cwd=self.repo_root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_handle,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            assert process.stdin is not None
+            for raw_line in process.stdout:
+                stdout_handle.write(raw_line)
+                stdout_handle.flush()
+                try:
+                    payload = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("type") != "intercept_request":
+                    continue
+                request = dict(payload.get("payload", {})) if isinstance(payload.get("payload"), dict) else dict(payload)
+                request.setdefault("request_id", payload.get("request_id"))
+                decision = evaluate_intercepted_subagent_action(
+                    request,
+                    manifest_payload if isinstance(manifest_payload, dict) else {},
+                    repo_root=self.repo_root,
+                    state=state,
+                )
+                state = dict(decision.get("state") or state)
+                log_entry = {
+                    "ts": now_utc(),
+                    "request_id": decision.get("request_id"),
+                    "action": decision.get("action"),
+                    "agent_id": decision.get("agent_id"),
+                    "profile_id": decision.get("profile_id"),
+                    "tool": decision.get("tool"),
+                    "decision": decision.get("decision"),
+                    "violations": list(decision.get("violations", [])),
+                    "normalized_read_paths": list(decision.get("normalized_read_paths", [])),
+                    "normalized_write_paths": list(decision.get("normalized_write_paths", [])),
+                    "network_access": bool(decision.get("network_access", False)),
+                    "prompt_tokens": decision.get("prompt_tokens"),
+                    "runtime_seconds": decision.get("runtime_seconds"),
+                }
+                append_jsonl(action_log_path, log_entry)
+                self._load_interception_summary()
+                action_name = str(decision.get("action") or "")
+                decision_name = "allowed" if decision.get("allowed") else "denied"
+                event_message = f"subagent_{action_name}_{decision_name}"
+                self._log_event(
+                    "managed_rpc",
+                    event_message,
+                    "guardrail_policy_violation" if not decision.get("allowed") else "",
+                    extra={
+                        "agent_id": decision.get("agent_id"),
+                        "profile_id": decision.get("profile_id"),
+                        "tool": decision.get("tool"),
+                        "violations": list(decision.get("violations", [])),
+                    },
+                )
+                response = {
+                    "type": "decision",
+                    "request_id": decision.get("request_id"),
+                    "allow": bool(decision.get("allowed")),
+                    "violations": list(decision.get("violations", [])),
+                }
+                process.stdin.write(json.dumps(response) + "\n")
+                process.stdin.flush()
+                if not decision.get("allowed") and self.interception_fail_mode == "fail_closed":
+                    process.stdin.close()
+            return process.wait(timeout=self.timeout_seconds)
+
     def _invoke_pi(self) -> int:
+        if self.transport_mode == "managed_rpc":
+            return self._invoke_managed_rpc()
         timeout_seconds = self.timeout_seconds
         if self.run_deadline_ms > 0:
             remaining_ms = max(0, self.run_deadline_ms - now_ms())

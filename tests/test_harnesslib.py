@@ -50,6 +50,10 @@ def test_run_contract_and_template_helpers(tmp_path: pathlib.Path) -> None:
     assert validate_run_contract(v3_contract) == []
     assert v3_contract["transport"]["mode"] == "cli_json"
     assert v3_contract["capabilities"]["manifest_path"] == "context/capability-manifest.json"
+    v4_contract = default_run_contract(version="v4")
+    assert validate_run_contract(v4_contract) == []
+    assert v4_contract["transport"]["mode"] == "managed_rpc"
+    assert v4_contract["capabilities"]["interception"]["enabled"] is True
 
     template = make_result_template()
     path = tmp_path / "result.json"
@@ -428,6 +432,23 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
         in v3_errors
     )
     assert "capabilities.enabled must be true when subagents are allowed" in v3_errors
+
+    broken_v4 = default_run_contract(version="v4")
+    broken_v4["transport"] = {"mode": "rpc"}
+    broken_v4["capabilities"]["interception"] = {
+        "enabled": False,
+        "fail_mode": "soft",
+        "action_log_path": "wrong.jsonl",
+    }
+    v4_errors = validate_run_contract(broken_v4)
+    assert "transport.mode must be one of: managed_rpc" in v4_errors
+    assert "capabilities.interception.enabled must be true" in v4_errors
+    assert "capabilities.interception.fail_mode must be 'fail_closed'" in v4_errors
+    assert (
+        "capabilities.interception.action_log_path must be "
+        "'outputs/subagent-action-log.jsonl'"
+        in v4_errors
+    )
 
 
 def test_analyze_eval_command_and_env_unwrap_cover_remaining_edge_cases() -> None:

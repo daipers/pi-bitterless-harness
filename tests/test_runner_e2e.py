@@ -151,6 +151,13 @@ def write_fake_pi_scenario(run_dir: pathlib.Path, payload: dict[str, object]) ->
     )
 
 
+def write_fake_managed_rpc_scenario(run_dir: pathlib.Path, payload: dict[str, object]) -> None:
+    (run_dir / ".fake-managed-rpc-scenario.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_runner_happy_path_records_manifest(isolated_repo: pathlib.Path) -> None:
     run_dir = create_run(isolated_repo, "happy path")
     replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
@@ -467,6 +474,178 @@ def test_runner_async_scoring_surfaces_pre_score_capability_audit(
         event["message"] == "subagent usage violations detected prior to scoring"
         for event in events
     )
+
+
+def test_runner_v4_managed_rpc_happy_path_records_live_interception(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v4 managed rpc happy path")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v4")
+    contract["capabilities"]["enabled"] = True
+    contract["capabilities"]["subagents"] = {
+        "allowed": True,
+        "max_agents": 1,
+        "allowed_profiles": ["focused_reader"],
+    }
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    write_fake_managed_rpc_scenario(run_dir, {})
+
+    completed = run_harness(
+        isolated_repo,
+        run_dir,
+        "happy_path",
+        extra_env={
+            "HARNESS_PI_BIN": str(isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"),
+        },
+    )
+
+    assert completed.returncode == 0
+    score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
+    action_log = [
+        json.loads(line)
+        for line in (run_dir / "outputs" / "subagent-action-log.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert score["overall_pass"] is True
+    assert score["capabilities"]["interception_enabled"] is True
+    assert score["capabilities"]["allowed_action_count"] == 2
+    assert score["capabilities"]["denied_action_count"] == 0
+    assert manifest["capabilities"]["action_log_path"] == "outputs/subagent-action-log.jsonl"
+    assert manifest["capabilities"]["allowed_action_count"] == 2
+    assert len(action_log) == 2
+    assert all(entry["decision"] == "allow" for entry in action_log)
+
+
+def test_runner_v4_managed_rpc_denial_fails_closed(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v4 managed rpc denied action")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v4")
+    contract["capabilities"]["enabled"] = True
+    contract["capabilities"]["subagents"] = {
+        "allowed": True,
+        "max_agents": 1,
+        "allowed_profiles": ["focused_reader"],
+    }
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    write_fake_managed_rpc_scenario(
+        run_dir,
+        {
+            "requests": [
+                {
+                    "request_id": "spawn-1",
+                    "payload": {
+                        "action": "spawn",
+                        "agent_id": "reader-1",
+                        "profile_id": "focused_reader",
+                        "prompt_tokens": 120,
+                    },
+                },
+                {
+                    "request_id": "tool-1",
+                    "payload": {
+                        "action": "tool",
+                        "agent_id": "reader-1",
+                        "profile_id": "focused_reader",
+                        "tool": "write",
+                        "read_paths": [],
+                        "write_paths": ["starter/README.md"],
+                        "network_access": True,
+                        "runtime_seconds": 2,
+                    },
+                },
+            ]
+        },
+    )
+
+    completed = run_harness(
+        isolated_repo,
+        run_dir,
+        "happy_path",
+        extra_env={
+            "HARNESS_PI_BIN": str(isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"),
+        },
+    )
+
+    assert completed.returncode == 0
+    score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_dir / "outputs" / "run_manifest.json").read_text(encoding="utf-8"))
+    events = [
+        json.loads(line)
+        for line in (run_dir / "run-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert score["overall_pass"] is False
+    assert "guardrail_policy_violation" in score["failure_classifications"]
+    assert score["capabilities"]["denied_action_count"] == 1
+    assert "subagents.write_not_allowed:focused_reader" in score["capabilities"]["violations"]
+    assert manifest["capabilities"]["first_denial"]["request_id"] == "tool-1"
+    assert any(event["message"] == "subagent_tool_denied" for event in events)
+    assert not (run_dir / "outputs" / "claim.txt").exists()
+
+
+def test_runner_v4_contract_failure_blocks_launch_without_interception(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v4 invalid contract")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v4")
+    contract["capabilities"]["interception"]["enabled"] = False
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    completed = run_harness(
+        isolated_repo,
+        run_dir,
+        "happy_path",
+        extra_env={
+            "HARNESS_PI_BIN": str(isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"),
+        },
+    )
+
+    assert completed.returncode == 2
+    assert "capabilities.interception.enabled must be true" in completed.stderr
+
+
+def test_runner_v4_requires_managed_rpc_capable_peer(
+    isolated_repo: pathlib.Path,
+) -> None:
+    run_dir = create_run(isolated_repo, "v4 invalid peer")
+    replace_eval_command(run_dir / "task.md", "python3 ../tests/fixtures/pass_eval.py")
+    contract = default_run_contract(version="v4")
+    contract["capabilities"]["enabled"] = True
+    contract["capabilities"]["subagents"] = {
+        "allowed": True,
+        "max_agents": 1,
+        "allowed_profiles": ["focused_reader"],
+    }
+    (run_dir / "run.contract.json").write_text(
+        json.dumps(contract, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    completed = run_harness(
+        isolated_repo,
+        run_dir,
+        "happy_path",
+        extra_env={
+            "HARNESS_PI_BIN": str(isolated_repo / "tests" / "fixtures" / "fake_pi.py"),
+        },
+    )
+
+    assert completed.returncode == 2
+    assert "managed_rpc requires a peer that supports pre-execution interception" in completed.stderr
 
 
 def test_runner_contract_failure_blocks_launch(isolated_repo: pathlib.Path) -> None:

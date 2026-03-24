@@ -11,7 +11,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from capabilitylib import DEFAULT_USAGE_PATH, validate_subagent_usage
+from capabilitylib import (
+    DEFAULT_INTERCEPTION_ACTION_LOG_PATH,
+    DEFAULT_USAGE_PATH,
+    summarize_interception_log,
+    validate_subagent_usage,
+)
 from harnesslib import (
     build_run_event,
     canonicalize_json_file,
@@ -338,6 +343,12 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
         "capabilities_enabled": _env_is_true(os.environ.get("HARNESS_CAPABILITIES_ENABLED"))
         if os.environ.get("HARNESS_CAPABILITIES_ENABLED") is not None
         else bool(settings.get("capabilities_enabled", False)),
+        "interception_enabled": bool(settings.get("interception_enabled", False)),
+        "interception_fail_mode": settings.get("interception_fail_mode"),
+        "interception_action_log_path": (
+            context.run_dir
+            / str(settings.get("interception_action_log_path") or DEFAULT_INTERCEPTION_ACTION_LOG_PATH)
+        ),
         "capability_manifest_path": capability_manifest_path,
         "capability_manifest_payload": capability_manifest_payload
         if isinstance(capability_manifest_payload, dict)
@@ -804,13 +815,31 @@ def _build_capabilities_metadata(
     execution_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     manifest_payload = execution_metadata.get("capability_manifest_payload", {})
-    usage_path = context.run_dir / DEFAULT_USAGE_PATH
-    usage_payload = load_json(usage_path) if usage_path.exists() else None
-    validation = validate_subagent_usage(
-        usage_payload if isinstance(usage_payload, dict) else None,
-        manifest_payload if isinstance(manifest_payload, dict) else {},
-        repo_root=context.repo_root,
-    )
+    interception_enabled = bool(execution_metadata.get("interception_enabled"))
+    action_log_path = execution_metadata.get("interception_action_log_path")
+    if interception_enabled and isinstance(action_log_path, pathlib.Path):
+        action_entries = []
+        if action_log_path.exists():
+            for raw_line in action_log_path.read_text(encoding="utf-8").splitlines():
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    payload = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    action_entries.append(payload)
+        validation = summarize_interception_log(action_entries)
+        usage_path = action_log_path
+    else:
+        usage_path = context.run_dir / DEFAULT_USAGE_PATH
+        usage_payload = load_json(usage_path) if usage_path.exists() else None
+        validation = validate_subagent_usage(
+            usage_payload if isinstance(usage_payload, dict) else None,
+            manifest_payload if isinstance(manifest_payload, dict) else {},
+            repo_root=context.repo_root,
+        )
     return {
         "enabled": bool(execution_metadata.get("capabilities_enabled")),
         "transport_mode": execution_metadata.get("transport_mode"),
@@ -821,6 +850,12 @@ def _build_capabilities_metadata(
         "manifest_version": manifest_payload.get("capability_manifest_version"),
         "library_path": manifest_payload.get("library_path"),
         "library_fingerprint": manifest_payload.get("library_fingerprint"),
+        "interception_enabled": interception_enabled,
+        "interception_mode": execution_metadata.get("interception_fail_mode"),
+        "action_log_path": _relative_to_run_dir(
+            context,
+            action_log_path if isinstance(action_log_path, pathlib.Path) else None,
+        ),
         "subagents_allowed": bool((manifest_payload.get("subagents") or {}).get("allowed", False)),
         "max_agents": (manifest_payload.get("subagents") or {}).get("max_agents"),
         "allowed_profiles": list(
@@ -829,12 +864,15 @@ def _build_capabilities_metadata(
         "usage_path": _relative_to_run_dir(context, usage_path),
         "usage_present": validation["usage_present"],
         "usage_version": validation["usage_version"],
-        "usage_valid": validation["valid"],
+        "usage_valid": validation.get("valid", validation.get("usage_valid")),
         "violations": list(validation["violations"]),
         "agent_count": validation["agent_count"],
         "spawned_profile_ids": list(validation["spawned_profile_ids"]),
         "total_prompt_tokens": validation["total_prompt_tokens"],
         "total_runtime_seconds": validation["total_runtime_seconds"],
+        "allowed_action_count": validation.get("allowed_action_count"),
+        "denied_action_count": validation.get("denied_action_count"),
+        "first_denial": validation.get("first_denial"),
     }
 
 
@@ -959,6 +997,11 @@ def _assemble_score_payload(
     failure_classifications = _collect_failure_classifications(inputs)
     if capabilities_metadata["enabled"] and not capabilities_metadata["usage_valid"]:
         failure_classifications.add("eval_failed")
+    if (
+        capabilities_metadata.get("interception_enabled")
+        and int(capabilities_metadata.get("denied_action_count") or 0) > 0
+    ):
+        failure_classifications.add("guardrail_policy_violation")
     overall_pass = len(failure_classifications) == 0
     overall_error_code = "none" if overall_pass else ",".join(sorted(failure_classifications))
     try:

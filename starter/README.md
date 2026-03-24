@@ -77,6 +77,7 @@ Runtime governance is codified, not implied:
 - `contracts/run-contract-v1.schema.json`
 - `contracts/run-contract-v2.schema.json`
 - `contracts/run-contract-v3.schema.json`
+- `contracts/run-contract-v4.schema.json`
 - `contracts/run-manifest-v1.schema.json`
 - `contracts/score-v1.schema.json`
 - `contracts/context-manifest-v1.schema.json`
@@ -173,6 +174,7 @@ Each run creates:
 - `result.template.json` (schema-compliant scaffold for copy/paste)
 - `outputs/` (durable artifacts)
   - `outputs/run_manifest.json` (machine-readable manifest and audit trail)
+  - `outputs/subagent-action-log.jsonl` (live action-by-action interception log for `managed_rpc` runs)
   - `outputs/subagent-usage-validation.json` (pre-score capability audit for subagent-capable runs)
 - `score/` (eval artifacts)
   - `score/eval-<n>.stdout.log`
@@ -206,6 +208,7 @@ Everything else is for humans and the model.
 - `capability` adds explicit retrieval context under `context/` before launch.
 - Existing V1 and V2 run directories still execute unchanged; the runner detects the contract version from `run.contract.json`.
 - V3 adds an opt-in capability manifest and RPC transport selection for subagent-capable runs.
+- V4 adds opt-in `managed_rpc` transport with fail-closed live interception for every subagent action.
 
 Profile precedence at runtime:
 

@@ -5,7 +5,9 @@ import pathlib
 import pytest
 from capabilitylib import (
     build_capability_manifest,
+    evaluate_intercepted_subagent_action,
     load_capability_library,
+    summarize_interception_log,
     validate_subagent_usage,
 )
 
@@ -224,3 +226,142 @@ def test_validate_subagent_usage_enforces_profiles_tools_budgets_and_scopes(
     assert "subagents.runtime_budget_exceeded:reader" in invalid["violations"]
     assert "subagents.profile_not_allowed:unknown" in invalid["violations"]
     assert "subagents.spawn_budget_exceeded:reader" in invalid["violations"]
+
+
+def test_evaluate_intercepted_subagent_action_enforces_live_rules(
+    tmp_path: pathlib.Path,
+) -> None:
+    manifest = build_capability_manifest(
+        library={
+            "relative_path": "library.yaml",
+            "fingerprint": "abc123",
+            "tool_bundles": {
+                "default_tools": {
+                    "kind": "tool_bundle",
+                    "id": "default_tools",
+                    "description": "base",
+                    "tools": ["read", "write"],
+                }
+            },
+            "subagent_profiles": {
+                "reader": {
+                    "kind": "subagent_profile",
+                    "id": "reader",
+                    "description": "reader",
+                    "tool_bundles": ["default_tools"],
+                    "transports": ["managed_rpc"],
+                    "allow_network": False,
+                    "allow_write": False,
+                    "read_scopes": ["starter/**"],
+                    "write_scopes": [],
+                    "budgets": {
+                        "max_spawn_count": 1,
+                        "max_tokens": 1000,
+                        "max_runtime_seconds": 60,
+                    },
+                    "expected_artifacts": [],
+                }
+            },
+        },
+        transport_mode="managed_rpc",
+        capabilities={
+            "enabled": True,
+            "subagents": {
+                "allowed": True,
+                "max_agents": 1,
+                "allowed_profiles": ["reader"],
+            },
+        },
+    )
+
+    state: dict[str, object] = {}
+    spawn = evaluate_intercepted_subagent_action(
+        {
+            "action": "spawn",
+            "request_id": "spawn-1",
+            "agent_id": "reader-1",
+            "profile_id": "reader",
+            "prompt_tokens": 120,
+        },
+        manifest,
+        repo_root=tmp_path,
+        state=state,
+    )
+    assert spawn["allowed"] is True
+    state = dict(spawn["state"])
+
+    allowed_read = evaluate_intercepted_subagent_action(
+        {
+            "action": "tool",
+            "request_id": "tool-1",
+            "agent_id": "reader-1",
+            "profile_id": "reader",
+            "tool": "read",
+            "read_paths": ["starter/README.md"],
+            "write_paths": [],
+            "network_access": False,
+            "runtime_seconds": 2,
+        },
+        manifest,
+        repo_root=tmp_path,
+        state=state,
+    )
+    assert allowed_read["allowed"] is True
+    state = dict(allowed_read["state"])
+
+    denied_write = evaluate_intercepted_subagent_action(
+        {
+            "action": "tool",
+            "request_id": "tool-2",
+            "agent_id": "reader-1",
+            "profile_id": "reader",
+            "tool": "write",
+            "read_paths": [],
+            "write_paths": ["starter/README.md"],
+            "network_access": True,
+            "runtime_seconds": 2,
+        },
+        manifest,
+        repo_root=tmp_path,
+        state=state,
+    )
+    assert denied_write["allowed"] is False
+    assert "subagents.write_not_allowed:reader" in denied_write["violations"]
+    assert "subagents.network_not_allowed:reader" in denied_write["violations"]
+
+
+def test_summarize_interception_log_reports_denials() -> None:
+    summary = summarize_interception_log(
+        [
+            {
+                "action": "spawn",
+                "agent_id": "reader-1",
+                "profile_id": "reader",
+                "decision": "allow",
+                "prompt_tokens": 100,
+            },
+            {
+                "action": "tool",
+                "agent_id": "reader-1",
+                "profile_id": "reader",
+                "decision": "allow",
+                "runtime_seconds": 3,
+            },
+            {
+                "action": "tool",
+                "agent_id": "reader-1",
+                "profile_id": "reader",
+                "decision": "deny",
+                "violations": ["subagents.write_not_allowed:reader"],
+            },
+        ]
+    )
+
+    assert summary["usage_present"] is True
+    assert summary["usage_valid"] is False
+    assert summary["allowed_action_count"] == 2
+    assert summary["denied_action_count"] == 1
+    assert summary["agent_count"] == 1
+    assert summary["total_prompt_tokens"] == 100
+    assert summary["total_runtime_seconds"] == 3.0
+    assert summary["first_denial"]["violations"] == ["subagents.write_not_allowed:reader"]

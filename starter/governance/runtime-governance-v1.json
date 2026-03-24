@@ -66,6 +66,13 @@
       "temporary": false,
       "review_rule": "Use this only for measured gating changes, not convenience branching."
     },
+    "pre_subagent_action": {
+      "owner": "runtime-plane",
+      "rationale": "Allows managed RPC runs to gate each attempted subagent spawn or tool action before execution.",
+      "evidence_required": ["replay-benchmark", "fault-benchmark", "canary"],
+      "temporary": false,
+      "review_rule": "Only add this live interception surface when capability enforcement must happen before action execution."
+    },
     "pre_tool_use": {
       "owner": "runtime-plane",
       "rationale": "Allows policy to gate individual eval tool invocations.",
@@ -122,11 +129,11 @@
     },
     "guardrail_policy_violation": {
       "owner": "runtime-plane",
-      "rationale": "An eval command violated the active guardrail policy.",
+      "rationale": "An eval command or live-intercepted runtime action violated the active guardrail policy.",
       "evidence_required": ["replay-benchmark", "canary"],
       "temporary": false,
-      "review_rule": "Distinct because the operator action is policy review, not task or infrastructure retry.",
-      "operator_action": "Review and adjust the active policy or task expectations before rerunning.",
+      "review_rule": "Distinct because the operator action is policy or capability review, not task or infrastructure retry.",
+      "operator_action": "Review and adjust the active policy, capability manifest, or task expectations before rerunning.",
       "promotion_impact": "block-release"
     },
     "guardrail_pre_run_denied": {

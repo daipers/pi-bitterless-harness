@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
-from capabilitylib import DEFAULT_CAPABILITIES_CONFIG
+from capabilitylib import DEFAULT_CAPABILITIES_CONFIG, DEFAULT_INTERCEPTION_ACTION_LOG_PATH
 
 if not hasattr(pathlib.Path, "utime"):
     setattr(
@@ -26,6 +26,7 @@ RUNNER_VERSION = "1.0.0"
 RUN_CONTRACT_VERSION_V1 = "v1"
 RUN_CONTRACT_VERSION_V2 = "v2"
 RUN_CONTRACT_VERSION_V3 = "v3"
+RUN_CONTRACT_VERSION_V4 = "v4"
 RUN_CONTRACT_VERSION = RUN_CONTRACT_VERSION_V2
 RESULT_INTERFACE_VERSION = "v1"
 EXECUTION_PROFILES = {"strict", "offline", "networked", "heavy_tools", "capability"}
@@ -159,6 +160,14 @@ _RUN_CONTRACT_REQUIRED_KEYS_V3 = [
     "transport",
     "capabilities",
 ]
+
+_RUN_CONTRACT_REQUIRED_KEYS_V4 = list(_RUN_CONTRACT_REQUIRED_KEYS_V3)
+
+DEFAULT_INTERCEPTION_CONFIG = {
+    "enabled": True,
+    "fail_mode": "fail_closed",
+    "action_log_path": DEFAULT_INTERCEPTION_ACTION_LOG_PATH,
+}
 
 _RUN_CONTRACT_REQUIRED_RETRIEVAL_KEYS = [
     "enabled",
@@ -771,6 +780,16 @@ def default_run_contract(
             "transport": {"mode": "cli_json"},
             "capabilities": copy.deepcopy(DEFAULT_CAPABILITIES_CONFIG),
         }
+    if version == RUN_CONTRACT_VERSION_V4:
+        return {
+            **base_v2,
+            "run_contract_version": RUN_CONTRACT_VERSION_V4,
+            "transport": {"mode": "managed_rpc"},
+            "capabilities": {
+                **copy.deepcopy(DEFAULT_CAPABILITIES_CONFIG),
+                "interception": copy.deepcopy(DEFAULT_INTERCEPTION_CONFIG),
+            },
+        }
     raise ValueError(f"unsupported run contract version: {version}")
 
 
@@ -803,8 +822,8 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
         )
         return errors
 
-    if version not in {RUN_CONTRACT_VERSION_V2, RUN_CONTRACT_VERSION_V3}:
-        errors.append("run_contract_version must be v1, v2, or v3")
+    if version not in {RUN_CONTRACT_VERSION_V2, RUN_CONTRACT_VERSION_V3, RUN_CONTRACT_VERSION_V4}:
+        errors.append("run_contract_version must be v1, v2, v3, or v4")
         return errors
 
     expected = default_run_contract(version=version)
@@ -816,7 +835,11 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
             (
                 _RUN_CONTRACT_REQUIRED_KEYS_V3
                 if version == RUN_CONTRACT_VERSION_V3
-                else _RUN_CONTRACT_REQUIRED_KEYS_V2
+                else (
+                    _RUN_CONTRACT_REQUIRED_KEYS_V4
+                    if version == RUN_CONTRACT_VERSION_V4
+                    else _RUN_CONTRACT_REQUIRED_KEYS_V2
+                )
             ),
             prefix="run contract",
         )
@@ -870,13 +893,17 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
                 errors.append("retrieval.max_candidates must be a positive integer")
         if "enabled" in retrieval and not isinstance(retrieval["enabled"], bool):
             errors.append("retrieval.enabled must be a boolean")
-    if version == RUN_CONTRACT_VERSION_V3:
+    if version in {RUN_CONTRACT_VERSION_V3, RUN_CONTRACT_VERSION_V4}:
         transport = payload.get("transport")
         if not isinstance(transport, dict):
             errors.append("transport must be an object")
         else:
-            if transport.get("mode") not in {"cli_json", "rpc"}:
-                errors.append("transport.mode must be one of: cli_json, rpc")
+            expected_modes = {"cli_json", "rpc"} if version == RUN_CONTRACT_VERSION_V3 else {"managed_rpc"}
+            if transport.get("mode") not in expected_modes:
+                errors.append(
+                    "transport.mode must be one of: "
+                    + ", ".join(sorted(expected_modes))
+                )
         capabilities = payload.get("capabilities")
         if not isinstance(capabilities, dict):
             errors.append("capabilities must be an object")
@@ -918,6 +945,20 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
                         "capabilities.subagents.allowed_profiles must contain at least one profile "
                         "when subagents are allowed"
                     )
+            if version == RUN_CONTRACT_VERSION_V4:
+                interception = capabilities.get("interception")
+                if not isinstance(interception, dict):
+                    errors.append("capabilities.interception must be an object")
+                else:
+                    if interception.get("enabled") is not True:
+                        errors.append("capabilities.interception.enabled must be true")
+                    if interception.get("fail_mode") != "fail_closed":
+                        errors.append("capabilities.interception.fail_mode must be 'fail_closed'")
+                    if interception.get("action_log_path") != DEFAULT_INTERCEPTION_ACTION_LOG_PATH:
+                        errors.append(
+                            "capabilities.interception.action_log_path must be "
+                            f"'{DEFAULT_INTERCEPTION_ACTION_LOG_PATH}'"
+                        )
             if capabilities.get("enabled") is False and bool(
                 (capabilities.get("subagents") or {}).get("allowed")
             ):
@@ -955,7 +996,7 @@ def resolve_execution_settings(
             "retrieval_enabled": profile in {"capability", "heavy_tools"}
             and bool(retrieval.get("enabled") or profile in {"capability", "heavy_tools"}),
         }
-    if version == RUN_CONTRACT_VERSION_V3:
+    if version in {RUN_CONTRACT_VERSION_V3, RUN_CONTRACT_VERSION_V4}:
         profile = profile_override or run_contract.get("execution_profile") or "strict"
         retrieval = dict(DEFAULT_RETRIEVAL_CONFIG)
         retrieval.update(run_contract.get("retrieval", {}))
@@ -966,6 +1007,8 @@ def resolve_execution_settings(
             **dict((run_contract.get("capabilities") or {}).get("subagents", {})),
         }
         transport = {"mode": "cli_json", **dict(run_contract.get("transport", {}))}
+        interception = copy.deepcopy(DEFAULT_INTERCEPTION_CONFIG)
+        interception.update(dict((run_contract.get("capabilities") or {}).get("interception", {})))
         return {
             "run_contract_version": version,
             "execution_profile": profile,
@@ -988,6 +1031,11 @@ def resolve_execution_settings(
             "subagent_max_agents": int(capabilities.get("subagents", {}).get("max_agents", 0) or 0),
             "allowed_subagent_profiles": list(
                 capabilities.get("subagents", {}).get("allowed_profiles", [])
+            ),
+            "interception_enabled": version == RUN_CONTRACT_VERSION_V4,
+            "interception_fail_mode": interception.get("fail_mode", "fail_closed"),
+            "interception_action_log_path": interception.get(
+                "action_log_path", DEFAULT_INTERCEPTION_ACTION_LOG_PATH
             ),
         }
 

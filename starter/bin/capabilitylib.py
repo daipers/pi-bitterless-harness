@@ -17,11 +17,13 @@ except ImportError:  # pragma: no cover - exercised via runtime environments
 CAPABILITY_LIBRARY_VERSION = "v1"
 CAPABILITY_MANIFEST_VERSION = "v1"
 SUBAGENT_USAGE_VERSION = "v1"
+INTERCEPTION_LOG_VERSION = "v1"
 DEFAULT_LIBRARY_PATH = "library.yaml"
 DEFAULT_LIBRARY_DIR = "library.d"
 DEFAULT_MANIFEST_PATH = "context/capability-manifest.json"
 DEFAULT_USAGE_PATH = "outputs/subagent-usage.json"
-SUPPORTED_TRANSPORTS = {"cli_json", "rpc"}
+DEFAULT_INTERCEPTION_ACTION_LOG_PATH = "outputs/subagent-action-log.jsonl"
+SUPPORTED_TRANSPORTS = {"cli_json", "rpc", "managed_rpc"}
 SUPPORTED_TOOLS = {"read", "write", "edit", "bash"}
 ENTRY_KINDS = {"tool_bundle", "subagent_profile"}
 CHOREOGRAPHY_KEYS = {
@@ -474,6 +476,224 @@ def _scope_matches(path_value: str, scopes: list[str]) -> bool:
         if path_value == normalized or path_value.startswith(f"{normalized}/"):
             return True
     return False
+
+
+def _manifest_profiles(manifest_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("id")): item
+        for item in manifest_payload.get("subagent_profiles", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def _manifest_allowed_tools(manifest_payload: dict[str, Any], profile: dict[str, Any]) -> set[str]:
+    allowed_tools: set[str] = set()
+    for bundle_id in profile.get("tool_bundles", []):
+        for bundle in manifest_payload.get("tool_bundles", []):
+            if isinstance(bundle, dict) and bundle.get("id") == bundle_id:
+                allowed_tools.update(bundle.get("tools", []))
+    return allowed_tools
+
+
+def initialize_interception_state() -> dict[str, Any]:
+    return {
+        "active_agents": {},
+        "profile_spawn_counts": {},
+        "allowed_action_count": 0,
+        "denied_action_count": 0,
+        "first_denial": None,
+    }
+
+
+def evaluate_intercepted_subagent_action(
+    request_payload: dict[str, Any],
+    manifest_payload: dict[str, Any] | None,
+    *,
+    repo_root: pathlib.Path,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    manifest_payload = manifest_payload or {}
+    state = state if isinstance(state, dict) else initialize_interception_state()
+    profiles = _manifest_profiles(manifest_payload)
+    allowed_profiles = set((manifest_payload.get("subagents") or {}).get("allowed_profiles", []))
+    max_agents = int((manifest_payload.get("subagents") or {}).get("max_agents", 0) or 0)
+    action = str(request_payload.get("action", "")).strip()
+    request_id = str(request_payload.get("request_id", "")).strip()
+    agent_id = str(request_payload.get("agent_id", "")).strip()
+    profile_id = str(request_payload.get("profile_id", "")).strip()
+    violations: list[str] = []
+    normalized_read_paths: list[str] = []
+    normalized_write_paths: list[str] = []
+
+    if action not in {"spawn", "tool"}:
+        violations.append("subagents.action_invalid")
+    if not agent_id:
+        violations.append("subagents.agent_record_invalid")
+    if not profile_id:
+        violations.append("subagents.profile_id_missing")
+    if profile_id and (profile_id not in allowed_profiles or profile_id not in profiles):
+        violations.append(f"subagents.profile_not_allowed:{profile_id}")
+
+    profile = profiles.get(profile_id, {})
+    budgets = dict(profile.get("budgets", {})) if isinstance(profile, dict) else {}
+    allowed_tools = (
+        _manifest_allowed_tools(manifest_payload, profile) if isinstance(profile, dict) else set()
+    )
+    active_agents = state.setdefault("active_agents", {})
+    profile_spawn_counts = state.setdefault("profile_spawn_counts", {})
+
+    if action == "spawn" and profile_id and profile_id in profiles and agent_id:
+        prompt_tokens = request_payload.get("prompt_tokens", 0)
+        if not isinstance(prompt_tokens, int) or prompt_tokens < 0:
+            violations.append(f"subagents.prompt_tokens_invalid:{profile_id}")
+        elif budgets.get("max_tokens", 0) and prompt_tokens > budgets["max_tokens"]:
+            violations.append(f"subagents.token_budget_exceeded:{profile_id}")
+        if max_agents >= 0 and len(active_agents) >= max_agents and agent_id not in active_agents:
+            violations.append("subagents.agent_count_exceeded")
+        next_count = int(profile_spawn_counts.get(profile_id, 0)) + (
+            0 if agent_id in active_agents else 1
+        )
+        max_spawn_count = int(budgets.get("max_spawn_count", 0) or 0)
+        if max_spawn_count and next_count > max_spawn_count:
+            violations.append(f"subagents.spawn_budget_exceeded:{profile_id}")
+    elif action == "tool" and profile_id and profile_id in profiles:
+        if agent_id not in active_agents:
+            violations.append("subagents.agent_record_invalid")
+        tool = str(request_payload.get("tool", "")).strip()
+        if tool not in allowed_tools:
+            violations.append(f"subagents.tool_not_allowed:{profile_id}:{tool}")
+        if bool(request_payload.get("network_access")) and not bool(
+            profile.get("allow_network", False)
+        ):
+            violations.append(f"subagents.network_not_allowed:{profile_id}")
+        read_paths = _list_of_strings(request_payload.get("read_paths", []), field="read_paths", errors=[])
+        write_paths = _list_of_strings(
+            request_payload.get("write_paths", []), field="write_paths", errors=[]
+        )
+        for path_value in read_paths:
+            normalized = _normalize_repo_relative(path_value, repo_root=repo_root)
+            if normalized is None or not _scope_matches(
+                normalized,
+                list(profile.get("read_scopes", [])),
+            ):
+                violations.append(f"subagents.read_scope_violation:{profile_id}:{path_value}")
+            elif normalized:
+                normalized_read_paths.append(normalized)
+        if write_paths and not bool(profile.get("allow_write", False)):
+            violations.append(f"subagents.write_not_allowed:{profile_id}")
+        for path_value in write_paths:
+            normalized = _normalize_repo_relative(path_value, repo_root=repo_root)
+            if normalized is None or not _scope_matches(
+                normalized, list(profile.get("write_scopes", []))
+            ):
+                violations.append(f"subagents.write_scope_violation:{profile_id}:{path_value}")
+            elif normalized:
+                normalized_write_paths.append(normalized)
+        runtime_seconds = request_payload.get("runtime_seconds")
+        if runtime_seconds is not None:
+            if not isinstance(runtime_seconds, int | float) or float(runtime_seconds) < 0:
+                violations.append(f"subagents.runtime_invalid:{profile_id}")
+            elif budgets.get("max_runtime_seconds", 0) and float(runtime_seconds) > float(
+                budgets["max_runtime_seconds"]
+            ):
+                violations.append(f"subagents.runtime_budget_exceeded:{profile_id}")
+
+    allowed = len(violations) == 0
+    if allowed:
+        if action == "spawn" and agent_id and profile_id:
+            active_agents[agent_id] = {
+                "profile_id": profile_id,
+                "prompt_tokens": int(request_payload.get("prompt_tokens", 0) or 0),
+            }
+            profile_spawn_counts[profile_id] = int(profile_spawn_counts.get(profile_id, 0)) + 1
+        state["allowed_action_count"] = int(state.get("allowed_action_count", 0)) + 1
+    else:
+        state["denied_action_count"] = int(state.get("denied_action_count", 0)) + 1
+        if state.get("first_denial") is None:
+            state["first_denial"] = {
+                "request_id": request_id or None,
+                "agent_id": agent_id or None,
+                "profile_id": profile_id or None,
+                "action": action or None,
+                "violations": list(violations),
+            }
+
+    return {
+        "log_version": INTERCEPTION_LOG_VERSION,
+        "request_id": request_id or None,
+        "action": action or None,
+        "agent_id": agent_id or None,
+        "profile_id": profile_id or None,
+        "tool": str(request_payload.get("tool", "")).strip() or None,
+        "decision": "allow" if allowed else "deny",
+        "allowed": allowed,
+        "violations": list(violations),
+        "normalized_read_paths": normalized_read_paths,
+        "normalized_write_paths": normalized_write_paths,
+        "network_access": bool(request_payload.get("network_access", False)),
+        "prompt_tokens": request_payload.get("prompt_tokens"),
+        "runtime_seconds": request_payload.get("runtime_seconds"),
+        "state": state,
+    }
+
+
+def summarize_interception_log(
+    log_payload: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    entries = [item for item in (log_payload or []) if isinstance(item, dict)]
+    spawned_profile_ids: list[str] = []
+    denied_violations: list[str] = []
+    prompt_tokens = 0
+    runtime_by_agent: dict[str, float] = {}
+    first_denial = None
+    allowed_action_count = 0
+    denied_action_count = 0
+    spawned_agents: set[str] = set()
+    for entry in entries:
+        decision = str(entry.get("decision", "")).strip()
+        if decision == "allow":
+            allowed_action_count += 1
+        elif decision == "deny":
+            denied_action_count += 1
+            for violation in entry.get("violations", []):
+                if isinstance(violation, str):
+                    denied_violations.append(violation)
+            if first_denial is None:
+                first_denial = {
+                    "request_id": entry.get("request_id"),
+                    "agent_id": entry.get("agent_id"),
+                    "profile_id": entry.get("profile_id"),
+                    "action": entry.get("action"),
+                    "violations": list(entry.get("violations", [])),
+                }
+        action = str(entry.get("action", "")).strip()
+        if action == "spawn" and decision == "allow":
+            profile_id = str(entry.get("profile_id", "")).strip()
+            agent_id = str(entry.get("agent_id", "")).strip()
+            if profile_id:
+                spawned_profile_ids.append(profile_id)
+            if agent_id:
+                spawned_agents.add(agent_id)
+            prompt_value = entry.get("prompt_tokens", 0)
+            if isinstance(prompt_value, int) and prompt_value >= 0:
+                prompt_tokens += prompt_value
+        runtime_value = entry.get("runtime_seconds")
+        agent_id = str(entry.get("agent_id", "")).strip()
+        if agent_id and isinstance(runtime_value, int | float) and float(runtime_value) >= 0:
+            runtime_by_agent[agent_id] = max(runtime_by_agent.get(agent_id, 0.0), float(runtime_value))
+    return {
+        "usage_present": bool(entries),
+        "usage_version": INTERCEPTION_LOG_VERSION,
+        "usage_valid": denied_action_count == 0,
+        "violations": sorted(dict.fromkeys(denied_violations)),
+        "agent_count": len(spawned_agents),
+        "spawned_profile_ids": sorted(dict.fromkeys(spawned_profile_ids)),
+        "total_prompt_tokens": prompt_tokens,
+        "total_runtime_seconds": round(sum(runtime_by_agent.values()), 3),
+        "allowed_action_count": allowed_action_count,
+        "denied_action_count": denied_action_count,
+        "first_denial": first_denial,
+    }
 
 
 def validate_subagent_usage(
