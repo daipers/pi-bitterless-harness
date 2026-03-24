@@ -181,6 +181,9 @@ def _serialize_ui_action(action: UIAction) -> dict[str, Any]:
         "disabled_reason": action.disabled_reason,
         "open_tab": action.open_tab,
         "aliases": list(action.aliases),
+        "hint": action.hint,
+        "shortcut_label": action.shortcut_label,
+        "group": action.group,
     }
 
 
@@ -196,6 +199,9 @@ def _deserialize_ui_action(payload: dict[str, Any]) -> UIAction:
         disabled_reason=str(payload.get("disabled_reason", "")),
         open_tab=str(payload.get("open_tab", "")),
         aliases=tuple(str(item) for item in payload.get("aliases", []) if str(item).strip()),
+        hint=str(payload.get("hint", "")),
+        shortcut_label=str(payload.get("shortcut_label", "")),
+        group=str(payload.get("group", "")),
     )
 
 
@@ -253,20 +259,6 @@ class RunFilterState:
 
 
 @dataclass(frozen=True)
-class AlertBadge:
-    severity: str
-    label: str
-    detail: str = ""
-
-
-@dataclass(frozen=True)
-class TimelineStep:
-    key: str
-    label: str
-    status: str
-
-
-@dataclass(frozen=True)
 class UIAction:
     id: str
     label: str
@@ -278,6 +270,40 @@ class UIAction:
     disabled_reason: str = ""
     open_tab: str = ""
     aliases: tuple[str, ...] = ()
+    hint: str = ""
+    shortcut_label: str = ""
+    group: str = ""
+
+
+@dataclass(frozen=True)
+class AlertBadge:
+    severity: str
+    label: str
+    detail: str = ""
+    action: UIAction | None = None
+
+
+@dataclass(frozen=True)
+class TimelineStep:
+    key: str
+    label: str
+    status: str
+
+
+@dataclass(frozen=True)
+class ArtifactRecommendation:
+    tab_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class SavedViewPreset:
+    id: str
+    label: str
+    filter_state: RunFilterState
+    run_sort: SortState
+    preferred_tab: str = ""
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -1559,19 +1585,172 @@ class ControlCenterService:
         row = self._run_row(repo_id, run_id)
         return _read_jsonl_events(row.artifact_paths["events"])
 
-    def recommended_artifact_tab(self, repo_id: str, run_id: str) -> str:
+    def _shortcut_label(self, command_text: str) -> str:
+        return {
+            "open-best-artifact": "o",
+            "archive-run": "a",
+        }.get(command_text.split()[0], "")
+
+    def _annotate_action(
+        self,
+        action: UIAction,
+        *,
+        hint: str = "",
+        shortcut_label: str = "",
+        group: str = "",
+    ) -> UIAction:
+        return UIAction(
+            id=action.id,
+            label=action.label,
+            kind=action.kind,
+            scope=action.scope,
+            command_text=action.command_text,
+            requires_confirmation=action.requires_confirmation,
+            enabled=action.enabled,
+            disabled_reason=action.disabled_reason,
+            open_tab=action.open_tab,
+            aliases=action.aliases,
+            hint=hint,
+            shortcut_label=shortcut_label or self._shortcut_label(action.command_text),
+            group=group,
+        )
+
+    def artifact_recommendation(self, repo_id: str, run_id: str) -> ArtifactRecommendation:
         row = self._run_row(repo_id, run_id)
         if row.state in {"failed", "cancelled"} or row.overall_pass is False:
             if row.artifact_paths["score"].exists():
-                return "tab-score"
+                return ArtifactRecommendation("tab-score", "Opened Score because this run failed.")
             if row.artifact_paths["transcript"].exists():
-                return "tab-transcript"
-            return "tab-events"
+                return ArtifactRecommendation(
+                    "tab-transcript",
+                    "Opened Transcript because score is unavailable.",
+                )
+            return ArtifactRecommendation(
+                "tab-events",
+                "Opened Events because this run failed and no richer artifact is available.",
+            )
         if row.state == "complete" and row.overall_pass is True:
-            return "tab-patch" if self.run_has_patch(repo_id, run_id) else "tab-overview"
+            if self.run_has_patch(repo_id, run_id):
+                return ArtifactRecommendation(
+                    "tab-patch",
+                    "Opened Patch because this run completed successfully.",
+                )
+            return ArtifactRecommendation(
+                "tab-overview",
+                "Opened Overview because no patch artifact is present.",
+            )
         if row.state in {"queued", "claimed", "model_running", "scoring", "score_pending"}:
-            return "tab-events"
-        return "tab-overview"
+            return ArtifactRecommendation(
+                "tab-events",
+                "Opened Events because this run is still in progress.",
+            )
+        return ArtifactRecommendation("tab-overview", "Opened Overview.")
+
+    def recommended_artifact_tab(self, repo_id: str, run_id: str) -> str:
+        return self.artifact_recommendation(repo_id, run_id).tab_id
+
+    def saved_view_presets(self) -> tuple[SavedViewPreset, ...]:
+        return (
+            SavedViewPreset(
+                id="all",
+                label="All",
+                filter_state=self.build_filter_state(),
+                run_sort=SortState(key="updated", reverse=True),
+                description="Show all visible runs with the newest first.",
+            ),
+            SavedViewPreset(
+                id="failures",
+                label="Failures",
+                filter_state=self.build_filter_state(failed_only=True),
+                run_sort=SortState(key="updated", reverse=True),
+                description="Focus failed and cancelled work.",
+            ),
+            SavedViewPreset(
+                id="queued",
+                label="Queued",
+                filter_state=self.build_filter_state(queued_only=True),
+                run_sort=SortState(key="queue_wait", reverse=True),
+                preferred_tab="tab-events",
+                description="Show queued and in-flight work ordered by queue wait.",
+            ),
+            SavedViewPreset(
+                id="capability",
+                label="Capability",
+                filter_state=self.build_filter_state(capability_only=True),
+                run_sort=SortState(key="updated", reverse=True),
+                description="Focus capability profile runs.",
+            ),
+            SavedViewPreset(
+                id="recent24h",
+                label="Recent 24h",
+                filter_state=self.build_filter_state(last_24h_only=True),
+                run_sort=SortState(key="updated", reverse=True),
+                description="Show runs updated in the last day.",
+            ),
+            SavedViewPreset(
+                id="long-running",
+                label="Long-running",
+                filter_state=self.build_filter_state(queued_only=True),
+                run_sort=SortState(key="duration", reverse=True),
+                preferred_tab="tab-events",
+                description="Show active work ordered by duration.",
+            ),
+        )
+
+    def saved_view_preset(self, preset_id: str) -> SavedViewPreset | None:
+        for preset in self.saved_view_presets():
+            if preset.id == preset_id:
+                return preset
+        return None
+
+    def saved_view_matches(
+        self,
+        preset_id: str,
+        filter_state: RunFilterState,
+        run_sort: SortState,
+    ) -> bool:
+        preset = self.saved_view_preset(preset_id)
+        if preset is None:
+            return False
+        return preset.filter_state == filter_state and preset.run_sort == run_sort
+
+    def repo_health_badge(self, repo_id: str) -> str:
+        repo = self._repo_snapshot(repo_id)
+        if repo.runtime_check_ok is False or repo.canary_failing:
+            return "[!]"
+        if repo.canary_stale or repo.stale_run_count > 0:
+            return "[~]"
+        return "[OK]"
+
+    def repo_queue_badge(self, repo_id: str) -> str:
+        repo = self._repo_snapshot(repo_id)
+        queue_wait_p95 = int(repo.summary.get("queue_wait_ms", {}).get("p95", 0) or 0)
+        saturation_last_24h = int(
+            repo.summary.get("queue_saturation", {}).get("events_last_24h", 0) or 0
+        )
+        if queue_wait_p95 >= 300_000 or saturation_last_24h > 0:
+            return "[HOT]"
+        if repo.queued_count >= 3 or queue_wait_p95 >= 60_000:
+            return "[WARM]"
+        return "-"
+
+    def run_state_badge(self, repo_id: str, run_id: str) -> str:
+        row = self._run_row(repo_id, run_id)
+        if row.state in {"failed", "cancelled"} or row.overall_pass is False:
+            return "[FAIL]"
+        if row.state == "complete" and row.overall_pass is True:
+            return "[PASS]"
+        if row.state in {"queued", "claimed", "model_running", "scoring", "score_pending"}:
+            return "[RUN]" if row.state != "queued" else "[Q]"
+        return "-"
+
+    def run_queue_badge(self, repo_id: str, run_id: str) -> str:
+        row = self._run_row(repo_id, run_id)
+        if row.queue_wait_ms >= 300_000 or row.score_wait_ms >= 300_000:
+            return "[HOT]"
+        if row.queue_wait_ms >= 60_000 or row.score_wait_ms >= 60_000:
+            return "[WARM]"
+        return "-"
 
     def _repo_alerts(self, repo: RepoSnapshot) -> list[AlertBadge]:
         alerts: list[AlertBadge] = []
@@ -1581,20 +1760,80 @@ class ControlCenterService:
         )
         if repo.runtime_check_ok is False:
             alerts.append(
-                AlertBadge("critical", "Runtime check failed", repo.runtime_check_message or "")
+                AlertBadge(
+                    "critical",
+                    "Runtime check failed",
+                    repo.runtime_check_message or "",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="runtime-check",
+                            label="Run Runtime Check",
+                            kind="service",
+                            scope="repo",
+                            command_text=f"runtime-check {repo.repo.id}",
+                        ),
+                        hint="Re-run the repo runtime health check.",
+                        group="recommended",
+                    ),
+                )
             )
         elif repo.runtime_check_ok is True:
             alerts.append(AlertBadge("success", "Runtime OK"))
         if repo.canary_failing:
-            alerts.append(AlertBadge("critical", "Canary failed"))
+            alerts.append(
+                AlertBadge(
+                    "critical",
+                    "Canary failed",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="open-health",
+                            label="Open Health",
+                            kind="open",
+                            scope="repo",
+                            command_text="open health",
+                            open_tab="tab-health",
+                        ),
+                        hint="Open the Health tab for repo checks and canary output.",
+                        group="recommended",
+                    ),
+                )
+            )
         elif repo.canary_stale:
-            alerts.append(AlertBadge("warning", "Canary stale"))
+            alerts.append(
+                AlertBadge(
+                    "warning",
+                    "Canary stale",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="open-health",
+                            label="Open Health",
+                            kind="open",
+                            scope="repo",
+                            command_text="open health",
+                            open_tab="tab-health",
+                        ),
+                        hint="Open the Health tab for repo checks and canary output.",
+                        group="recommended",
+                    ),
+                )
+            )
         if queue_wait_p95 >= 300_000 or saturation_last_24h > 0:
             alerts.append(
                 AlertBadge(
                     "critical",
                     "Queue backing up",
                     f"queue wait p95 {render_duration_ms(queue_wait_p95)}",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="filter-queued",
+                            label="Filter Queued",
+                            kind="filter",
+                            scope="repo",
+                            command_text="filter queued",
+                        ),
+                        hint="Filter the run list to queued and in-flight work.",
+                        group="recommended",
+                    ),
                 )
             )
         elif repo.queued_count >= 3 or queue_wait_p95 >= 60_000:
@@ -1603,6 +1842,17 @@ class ControlCenterService:
                     "warning",
                     "Queue pressure rising",
                     f"queued {repo.queued_count}, p95 {render_duration_ms(queue_wait_p95)}",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="filter-queued",
+                            label="Filter Queued",
+                            kind="filter",
+                            scope="repo",
+                            command_text="filter queued",
+                        ),
+                        hint="Filter the run list to queued and in-flight work.",
+                        group="recommended",
+                    ),
                 )
             )
         if repo.stale_run_count > 0:
@@ -1611,6 +1861,17 @@ class ControlCenterService:
                     "warning",
                     "Stale runs need attention",
                     f"{repo.stale_run_count} stale non-terminal",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="filter-queued",
+                            label="Filter Queued",
+                            kind="filter",
+                            scope="repo",
+                            command_text="filter queued",
+                        ),
+                        hint="Filter the run list to queued and in-flight work.",
+                        group="recommended",
+                    ),
                 )
             )
         if repo.in_flight_count > 0:
@@ -1652,6 +1913,18 @@ class ControlCenterService:
                     "critical",
                     "Retry ceiling hit",
                     str(retry_ceiling_event.get("message", "")).strip(),
+                    action=self._annotate_action(
+                        UIAction(
+                            id="open-best-artifact",
+                            label="Open Best Artifact",
+                            kind="open",
+                            scope="run",
+                            command_text="open-best-artifact",
+                        ),
+                        hint="Open the most useful artifact for the selected run.",
+                        shortcut_label="o",
+                        group="recommended",
+                    ),
                 )
             )
         elif retry_event is not None:
@@ -1668,9 +1941,45 @@ class ControlCenterService:
         row = self._run_row(repo_id, run_id)
         alerts: list[AlertBadge] = []
         if row.state in {"failed", "cancelled"}:
-            alerts.append(AlertBadge("critical", row.state.title(), row.primary_error_code or ""))
+            alerts.append(
+                AlertBadge(
+                    "critical",
+                    row.state.title(),
+                    row.primary_error_code or "",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="open-best-artifact",
+                            label="Open Best Artifact",
+                            kind="open",
+                            scope="run",
+                            command_text="open-best-artifact",
+                        ),
+                        hint="Open the most useful artifact for the selected run.",
+                        shortcut_label="o",
+                        group="recommended",
+                    ),
+                )
+            )
         elif row.overall_pass is False:
-            alerts.append(AlertBadge("critical", "Evaluation failed", row.primary_error_code or ""))
+            alerts.append(
+                AlertBadge(
+                    "critical",
+                    "Evaluation failed",
+                    row.primary_error_code or "",
+                    action=self._annotate_action(
+                        UIAction(
+                            id="open-best-artifact",
+                            label="Open Best Artifact",
+                            kind="open",
+                            scope="run",
+                            command_text="open-best-artifact",
+                        ),
+                        hint="Open the most useful artifact for the selected run.",
+                        shortcut_label="o",
+                        group="recommended",
+                    ),
+                )
+            )
         elif row.state == "complete" and row.overall_pass is True:
             alerts.append(AlertBadge("success", "Passing complete run"))
         elif row.state in {"queued", "claimed", "model_running", "scoring", "score_pending"}:
@@ -1746,132 +2055,182 @@ class ControlCenterService:
         row = self._run_row(repo_id, run_id)
         repo_state = repo.orchestrator.state
         actions = [
-            UIAction(
-                id="open-best-artifact",
-                label="Open Best Artifact",
-                kind="open",
-                scope="run",
-                command_text="open-best-artifact",
-                open_tab=self.recommended_artifact_tab(repo_id, run_id),
-                aliases=("best", "recommended", "artifact"),
-            ),
-            UIAction(
-                id="open-transcript",
-                label="Open Transcript",
-                kind="open",
-                scope="run",
-                command_text="open transcript",
-                open_tab="tab-transcript",
-                aliases=("transcript", "logs"),
-            ),
-            UIAction(
-                id="open-score",
-                label="Open Score",
-                kind="open",
-                scope="run",
-                command_text="open score",
-                enabled=row.artifact_paths["score"].exists(),
-                disabled_reason="score artifact missing",
-                open_tab="tab-score",
-                aliases=("score", "evaluation"),
-            ),
-            UIAction(
-                id="runtime-check",
-                label="Runtime Check",
-                kind="service",
-                scope="repo",
-                command_text=f"runtime-check {repo_id}",
-                aliases=("runtime", "python"),
-            ),
-            UIAction(
-                id="archive-run",
-                label="Archive",
-                kind="service",
-                scope="run",
-                command_text=f"archive-run {run_id}",
-                aliases=("archive", "evidence"),
-            ),
-            UIAction(
-                id="cancel-run",
-                label="Cancel",
-                kind="service",
-                scope="run",
-                command_text=f"run cancel {run_id}",
-                requires_confirmation=True,
-                enabled=not _is_terminal_state(row.state),
-                disabled_reason="run already terminal" if _is_terminal_state(row.state) else "",
-                aliases=("cancel", "stop run"),
-            ),
-            UIAction(
-                id="enqueue-run",
-                label="Enqueue",
-                kind="service",
-                scope="run",
-                command_text=f"run enqueue {run_id}",
-                enabled=(
-                    not _is_terminal_state(row.state)
-                    and not _run_is_locked(row.run_dir)
-                    and row.run_queue_state not in {"queued", "claimed", "model_running"}
+            self._annotate_action(
+                UIAction(
+                    id="open-best-artifact",
+                    label="Open Best Artifact",
+                    kind="open",
+                    scope="run",
+                    command_text="open-best-artifact",
+                    open_tab=self.recommended_artifact_tab(repo_id, run_id),
+                    aliases=("best", "recommended", "artifact"),
                 ),
-                disabled_reason=(
-                    "run not eligible"
-                    if _is_terminal_state(row.state)
-                    or _run_is_locked(row.run_dir)
-                    or row.run_queue_state in {"queued", "claimed", "model_running"}
-                    else ""
+                hint="Open the artifact that best explains the current run state.",
+                shortcut_label="o",
+                group="recommended",
+            ),
+            self._annotate_action(
+                UIAction(
+                    id="open-transcript",
+                    label="Open Transcript",
+                    kind="open",
+                    scope="run",
+                    command_text="open transcript",
+                    open_tab="tab-transcript",
+                    aliases=("transcript", "logs"),
                 ),
-                aliases=("enqueue", "queue"),
+                hint="Open the transcript stream for the selected run.",
+                group="all-actions",
             ),
-            UIAction(
-                id="rerun-run",
-                label="Rerun",
-                kind="service",
-                scope="run",
-                command_text=f"run rerun {run_id}",
-                requires_confirmation=True,
-                enabled=_is_terminal_state(row.state),
-                disabled_reason="run is not terminal" if not _is_terminal_state(row.state) else "",
-                aliases=("rerun", "retry"),
+            self._annotate_action(
+                UIAction(
+                    id="open-score",
+                    label="Open Score",
+                    kind="open",
+                    scope="run",
+                    command_text="open score",
+                    enabled=row.artifact_paths["score"].exists(),
+                    disabled_reason="score artifact missing",
+                    open_tab="tab-score",
+                    aliases=("score", "evaluation"),
+                ),
+                hint="Open the evaluation output when a score artifact is available.",
+                group="all-actions",
             ),
-            UIAction(
-                id="repo-start",
-                label="Start Repo",
-                kind="service",
-                scope="repo",
-                command_text=f"repo start {repo_id}",
-                enabled=repo_state != "running",
-                disabled_reason="repo already running" if repo_state == "running" else "",
-                aliases=("start repo",),
+            self._annotate_action(
+                UIAction(
+                    id="runtime-check",
+                    label="Runtime Check",
+                    kind="service",
+                    scope="repo",
+                    command_text=f"runtime-check {repo_id}",
+                    aliases=("runtime", "python"),
+                ),
+                hint="Run the repo runtime compatibility check.",
+                group="all-actions",
             ),
-            UIAction(
-                id="repo-stop",
-                label="Stop Repo",
-                kind="service",
-                scope="repo",
-                command_text=f"repo stop {repo_id}",
-                requires_confirmation=True,
-                enabled=repo_state != "stopped",
-                disabled_reason="repo already stopped" if repo_state == "stopped" else "",
-                aliases=("stop repo",),
+            self._annotate_action(
+                UIAction(
+                    id="archive-run",
+                    label="Archive",
+                    kind="service",
+                    scope="run",
+                    command_text=f"archive-run {run_id}",
+                    aliases=("archive", "evidence"),
+                ),
+                hint="Archive evidence for the selected run.",
+                shortcut_label="a",
+                group="all-actions",
             ),
-            UIAction(
-                id="repo-restart",
-                label="Restart Repo",
-                kind="service",
-                scope="repo",
-                command_text=f"repo restart {repo_id}",
-                requires_confirmation=True,
-                enabled=repo_state != "stopped",
-                disabled_reason="repo is stopped" if repo_state == "stopped" else "",
-                aliases=("restart repo",),
+            self._annotate_action(
+                UIAction(
+                    id="cancel-run",
+                    label="Cancel",
+                    kind="service",
+                    scope="run",
+                    command_text=f"run cancel {run_id}",
+                    requires_confirmation=True,
+                    enabled=not _is_terminal_state(row.state),
+                    disabled_reason="run already terminal" if _is_terminal_state(row.state) else "",
+                    aliases=("cancel", "stop run"),
+                ),
+                hint="Cancel a non-terminal run.",
+                group="all-actions",
             ),
-            UIAction(
-                id="repo-canary",
-                label="Run Canary",
-                kind="service",
-                scope="repo",
-                command_text=f"repo canary {repo_id}",
-                aliases=("canary",),
+            self._annotate_action(
+                UIAction(
+                    id="enqueue-run",
+                    label="Enqueue",
+                    kind="service",
+                    scope="run",
+                    command_text=f"run enqueue {run_id}",
+                    enabled=(
+                        not _is_terminal_state(row.state)
+                        and not _run_is_locked(row.run_dir)
+                        and row.run_queue_state not in {"queued", "claimed", "model_running"}
+                    ),
+                    disabled_reason=(
+                        "run not eligible"
+                        if _is_terminal_state(row.state)
+                        or _run_is_locked(row.run_dir)
+                        or row.run_queue_state in {"queued", "claimed", "model_running"}
+                        else ""
+                    ),
+                    aliases=("enqueue", "queue"),
+                ),
+                hint="Place the selected run back into the queue when eligible.",
+                group="all-actions",
+            ),
+            self._annotate_action(
+                UIAction(
+                    id="rerun-run",
+                    label="Rerun",
+                    kind="service",
+                    scope="run",
+                    command_text=f"run rerun {run_id}",
+                    requires_confirmation=True,
+                    enabled=_is_terminal_state(row.state),
+                    disabled_reason="run is not terminal" if not _is_terminal_state(row.state) else "",
+                    aliases=("rerun", "retry"),
+                ),
+                hint="Create a fresh attempt for a terminal run.",
+                group="all-actions",
+            ),
+            self._annotate_action(
+                UIAction(
+                    id="repo-start",
+                    label="Start Repo",
+                    kind="service",
+                    scope="repo",
+                    command_text=f"repo start {repo_id}",
+                    enabled=repo_state != "running",
+                    disabled_reason="repo already running" if repo_state == "running" else "",
+                    aliases=("start repo",),
+                ),
+                hint="Start the orchestrator for this repo.",
+                group="all-actions",
+            ),
+            self._annotate_action(
+                UIAction(
+                    id="repo-stop",
+                    label="Stop Repo",
+                    kind="service",
+                    scope="repo",
+                    command_text=f"repo stop {repo_id}",
+                    requires_confirmation=True,
+                    enabled=repo_state != "stopped",
+                    disabled_reason="repo already stopped" if repo_state == "stopped" else "",
+                    aliases=("stop repo",),
+                ),
+                hint="Stop the orchestrator for this repo.",
+                group="all-actions",
+            ),
+            self._annotate_action(
+                UIAction(
+                    id="repo-restart",
+                    label="Restart Repo",
+                    kind="service",
+                    scope="repo",
+                    command_text=f"repo restart {repo_id}",
+                    requires_confirmation=True,
+                    enabled=repo_state != "stopped",
+                    disabled_reason="repo is stopped" if repo_state == "stopped" else "",
+                    aliases=("restart repo",),
+                ),
+                hint="Restart the orchestrator for this repo.",
+                group="all-actions",
+            ),
+            self._annotate_action(
+                UIAction(
+                    id="repo-canary",
+                    label="Run Canary",
+                    kind="service",
+                    scope="repo",
+                    command_text=f"repo canary {repo_id}",
+                    aliases=("canary",),
+                ),
+                hint="Run the real canary check for this repo.",
+                group="all-actions",
             ),
         ]
         return tuple(actions)

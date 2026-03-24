@@ -5,18 +5,22 @@ import argparse
 import shlex
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from control_centerlib import (
     REPO_SORT_KEYS,
     RUN_SORT_KEYS,
     AlertBadge,
+    ArtifactRecommendation,
     ControlCenterService,
     FleetSnapshot,
+    format_timestamp_ms,
     RepoSnapshot,
     RepoViewState,
     RunFilterState,
     RunRow,
+    SavedViewPreset,
     SortState,
     TargetSummary,
     TimelineStep,
@@ -31,6 +35,7 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
+    from textual.css.query import NoMatches
     from textual.screen import ModalScreen
     from textual.widgets import (
         Button,
@@ -63,6 +68,23 @@ def _tab_title(tab_id: str) -> str:
         "tab-patch": "patch",
         "tab-help": "help",
     }.get(tab_id, tab_id.removeprefix("tab-"))
+
+
+@dataclass(frozen=True)
+class ActivityEntry:
+    ts_ms: int
+    state: str
+    target: str
+    message: str
+    repo_id: str
+
+
+@dataclass(frozen=True)
+class PickerResult:
+    action: UIAction
+    section: str
+    priority: int
+    row_index: int
 
 
 if TEXTUAL_IMPORT_ERROR is None:
@@ -128,12 +150,18 @@ if TEXTUAL_IMPORT_ERROR is None:
         }
 
         #picker-dialog {
-          width: 86;
-          max-height: 26;
+          width: 90;
+          max-height: 32;
           border: round $accent;
           background: $surface;
           padding: 1 2;
           layout: vertical;
+        }
+
+        .picker-section {
+          height: 1;
+          color: $text-muted;
+          margin-top: 1;
         }
 
         #picker-results {
@@ -150,19 +178,25 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         BINDINGS = [
             Binding("escape", "dismiss_none", show=False),
+            Binding("down", "cursor_down", show=False),
+            Binding("up", "cursor_up", show=False),
+            Binding("enter", "submit_selection", show=False),
         ]
 
-        def __init__(self, actions: tuple[UIAction, ...]):
+        def __init__(self, results: tuple[PickerResult, ...]):
             super().__init__()
-            self.actions = actions
-            self.visible_actions: tuple[UIAction, ...] = ()
+            self.results = results
+            self.visible_results: tuple[PickerResult, ...] = ()
+            self.highlighted_index = 0
 
         def compose(self) -> ComposeResult:
             with Vertical(id="picker-dialog"):
                 yield Static("Command Picker", id="picker-title")
                 yield Input(id="picker-query", placeholder="Search actions or commands")
                 with Vertical(id="picker-results"):
-                    for index in range(8):
+                    for index in range(4):
+                        yield Static("", id=f"picker-section-{index}", classes="picker-section")
+                    for index in range(12):
                         yield Button("", id=f"picker-result-{index}", classes="picker-result")
 
         def on_mount(self) -> None:
@@ -172,61 +206,141 @@ if TEXTUAL_IMPORT_ERROR is None:
         def action_dismiss_none(self) -> None:
             self.dismiss(None)
 
-        def _score(self, action: UIAction, query: str) -> tuple[int, int, str]:
-            haystack = " ".join(
-                [action.label.lower(), action.command_text.lower(), " ".join(action.aliases).lower()]
-            )
-            if not query:
-                return (0, 0, action.label.lower())
-            if query in action.label.lower():
-                return (0, action.label.lower().index(query), action.label.lower())
+        def _display_label(self, action: UIAction) -> str:
+            label = action.label
+            if action.shortcut_label:
+                label += f" ({action.shortcut_label})"
+            if not action.enabled and action.disabled_reason:
+                label += f" ({action.disabled_reason})"
+            return label
+
+        def _match_rank(self, result: PickerResult, query: str) -> tuple[int, int, int, str]:
+            action = result.action
+            label = action.label.lower()
+            command = action.command_text.lower()
+            aliases = [alias.lower() for alias in action.aliases]
+            haystack = " ".join([label, command, " ".join(aliases)])
+            if label == query:
+                return (0, result.priority, result.row_index, label)
+            if label.startswith(query):
+                return (1, result.priority, result.row_index, label)
+            if command.startswith(query):
+                return (2, result.priority, result.row_index, label)
             if query in haystack:
-                return (1, haystack.index(query), action.label.lower())
+                return (3, result.priority, result.row_index, label)
+            if any(query in alias for alias in aliases):
+                return (4, result.priority, result.row_index, label)
             letters = "".join(char for char in haystack if char.isalnum() or char == " ")
             query_letters = "".join(char for char in query if char.isalnum() or char == " ")
             if query_letters and all(char in letters for char in query_letters):
-                return (2, len(haystack), action.label.lower())
-            return (9, len(haystack), action.label.lower())
+                return (5, result.priority, len(haystack), label)
+            return (9, result.priority, len(haystack), label)
+
+        def _blank_query_results(self) -> tuple[PickerResult, ...]:
+            ordered = sorted(self.results, key=lambda item: (item.priority, item.row_index, item.action.label.lower()))
+            return tuple(ordered[:12])
+
+        def _search_results(self, query: str) -> tuple[PickerResult, ...]:
+            ordered = sorted(self.results, key=lambda item: self._match_rank(item, query))
+            return tuple(
+                item for item in ordered if self._match_rank(item, query)[0] < 9
+            )[:12]
+
+        def _apply_highlight(self) -> None:
+            for index in range(12):
+                button = self.query_one(f"#picker-result-{index}", Button)
+                if index >= len(self.visible_results):
+                    continue
+                action = self.visible_results[index].action
+                if index == self.highlighted_index:
+                    button.variant = "primary"
+                elif action.requires_confirmation:
+                    button.variant = "warning"
+                else:
+                    button.variant = "default"
 
         def _refresh_results(self, query: str) -> None:
             normalized = query.lower().strip()
-            ordered = sorted(
-                self.actions,
-                key=lambda action: self._score(action, normalized),
+            self.visible_results = (
+                self._blank_query_results() if not normalized else self._search_results(normalized)
             )
-            self.visible_actions = tuple(action for action in ordered if self._score(action, normalized)[0] < 9)[:8]
-            for index in range(8):
+            self.highlighted_index = 0 if self.visible_results else -1
+
+            if not normalized:
+                grouped: list[tuple[str, list[PickerResult]]] = []
+                for result in self.visible_results:
+                    if not grouped or grouped[-1][0] != result.section:
+                        grouped.append((result.section, [result]))
+                    else:
+                        grouped[-1][1].append(result)
+                for section_index in range(4):
+                    title = self.query_one(f"#picker-section-{section_index}", Static)
+                    if section_index >= len(grouped):
+                        title.update("")
+                        title.styles.display = "none"
+                    else:
+                        title.update(grouped[section_index][0])
+                        title.styles.display = "block"
+            else:
+                self.query_one("#picker-section-0", Static).update("Search Results")
+                self.query_one("#picker-section-0", Static).styles.display = "block"
+                for section_index in range(1, 4):
+                    title = self.query_one(f"#picker-section-{section_index}", Static)
+                    title.update("")
+                    title.styles.display = "none"
+
+            for index in range(12):
                 button = self.query_one(f"#picker-result-{index}", Button)
-                if index >= len(self.visible_actions):
+                if index >= len(self.visible_results):
                     button.label = ""
                     button.disabled = True
                     button.styles.display = "none"
                     continue
-                action = self.visible_actions[index]
-                suffix = f" [{action.scope}]" if action.scope else ""
-                label = f"{action.label}{suffix}"
-                if action.command_text:
-                    label += f" - {action.command_text}"
-                if not action.enabled and action.disabled_reason:
-                    label += f" ({action.disabled_reason})"
-                button.label = label
+                result = self.visible_results[index]
+                button.label = self._display_label(result.action)
                 button.disabled = False
                 button.styles.display = "block"
+            self._apply_highlight()
+
+        def action_cursor_down(self) -> None:
+            if not self.visible_results:
+                return
+            self.highlighted_index = min(len(self.visible_results) - 1, self.highlighted_index + 1)
+            self._apply_highlight()
+
+        def action_cursor_up(self) -> None:
+            if not self.visible_results:
+                return
+            self.highlighted_index = max(0, self.highlighted_index - 1)
+            self._apply_highlight()
+
+        def action_submit_selection(self) -> None:
+            if not self.visible_results or self.highlighted_index < 0:
+                return
+            self.dismiss(self.visible_results[self.highlighted_index].action.id)
 
         def on_input_changed(self, event: Input.Changed) -> None:
             if event.input.id == "picker-query":
                 self._refresh_results(event.value)
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
-            if event.input.id == "picker-query" and self.visible_actions:
-                self.dismiss(self.visible_actions[0].id)
+            if event.input.id == "picker-query":
+                self.action_submit_selection()
+
+        def on_key(self, event) -> None:
+            if event.key == "down":
+                event.stop()
+                self.action_cursor_down()
+            elif event.key == "up":
+                event.stop()
+                self.action_cursor_up()
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if not event.button.id.startswith("picker-result-"):
                 return
             index = int(event.button.id.rsplit("-", 1)[1])
-            if 0 <= index < len(self.visible_actions):
-                self.dismiss(self.visible_actions[index].id)
+            if 0 <= index < len(self.visible_results):
+                self.dismiss(self.visible_results[index].action.id)
 
 
     class ControlCenterApp(App[None]):
@@ -250,11 +364,29 @@ if TEXTUAL_IMPORT_ERROR is None:
         #repo-pane {
           width: 42;
           layout: vertical;
+          border: round $surface-lighten-1;
+          padding: 0 0 1 0;
         }
 
         #run-pane {
           width: 1fr;
           layout: vertical;
+          border: round $surface-lighten-1;
+          padding: 0 0 1 0;
+        }
+
+        #filter-pane {
+          layout: vertical;
+          border: round $surface-lighten-1;
+          margin-bottom: 1;
+        }
+
+        #detail-pane {
+          width: 48%;
+          min-width: 52;
+          layout: vertical;
+          border: round $surface-lighten-1;
+          padding: 0 0 1 0;
         }
 
         #repo-label, #run-label {
@@ -262,6 +394,17 @@ if TEXTUAL_IMPORT_ERROR is None:
           padding: 0 1;
           background: $surface-lighten-1;
           color: $text;
+        }
+
+        #saved-views {
+          height: 3;
+          layout: horizontal;
+          padding: 0 1;
+          background: $surface;
+        }
+
+        .saved-view {
+          margin-right: 1;
         }
 
         #filter-bar {
@@ -283,16 +426,20 @@ if TEXTUAL_IMPORT_ERROR is None:
           height: 1fr;
         }
 
-        #detail-pane {
-          width: 48%;
-          min-width: 52;
-          layout: vertical;
-        }
-
-        #target-card, #alert-banner, #timeline-strip {
+        #intro-card, #target-card, #alert-banner, #timeline-strip, #recent-activity {
           padding: 0 1;
           background: $surface;
           color: $text;
+          margin-bottom: 1;
+        }
+
+        #intro-card {
+          height: auto;
+        }
+
+        #intro-actions {
+          height: 3;
+          layout: horizontal;
           margin-bottom: 1;
         }
 
@@ -308,10 +455,20 @@ if TEXTUAL_IMPORT_ERROR is None:
           height: 3;
         }
 
+        #alert-actions {
+          height: 3;
+          layout: horizontal;
+          margin-bottom: 1;
+        }
+
+        .alert-action {
+          width: 1fr;
+          margin-right: 1;
+        }
+
         #action-rail {
           height: 8;
           layout: vertical;
-          margin-bottom: 1;
         }
 
         .action-row {
@@ -322,6 +479,18 @@ if TEXTUAL_IMPORT_ERROR is None:
         .action-slot {
           width: 1fr;
           margin-right: 1;
+        }
+
+        #action-hint, #artifact-note {
+          height: 2;
+          padding: 0 1;
+          background: $surface-lighten-1;
+          color: $text-muted;
+          margin-bottom: 1;
+        }
+
+        #recent-activity {
+          height: 6;
         }
 
         #detail-tabs {
@@ -370,6 +539,14 @@ if TEXTUAL_IMPORT_ERROR is None:
           dock: bottom;
           display: none;
         }
+
+        .is-focused {
+          border: round $accent;
+        }
+
+        .is-active #repo-label, .is-active #run-label {
+          background: $accent-darken-2;
+        }
         """
 
         BINDINGS = [
@@ -412,7 +589,17 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._repo_views: dict[str, RepoViewState] = {}
             self._current_action_slots: dict[str, UIAction] = {}
             self._current_chat_followups: dict[str, UIAction] = {}
+            self._current_alert_actions: dict[str, UIAction] = {}
             self._picker_actions: dict[str, UIAction] = {}
+            self._saved_view_presets: tuple[SavedViewPreset, ...] = self.service.saved_view_presets()
+            self._dismissed_intro = False
+            self._artifact_note = ""
+            self._action_hint = ""
+            self._suppress_best_artifact_record = False
+            self._session_activity: dict[str, list[ActivityEntry]] = {}
+            self._seen_repo_messages: dict[str, set[str]] = {}
+            self._seen_command_ids: dict[str, set[str]] = {}
+            self._recent_picker_actions: list[UIAction] = []
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
@@ -423,16 +610,36 @@ if TEXTUAL_IMPORT_ERROR is None:
                     yield DataTable(id="repo-table")
                 with Vertical(id="run-pane"):
                     yield Static(id="run-label")
-                    with Horizontal(id="filter-bar"):
-                        yield Button("Failed", id="filter-failed", classes="filter-chip")
-                        yield Button("Queued", id="filter-queued", classes="filter-chip")
-                        yield Button("Capability", id="filter-capability", classes="filter-chip")
-                        yield Button("Last 24h", id="filter-last24h", classes="filter-chip")
-                        yield Input(id="filter-text", placeholder="Refine visible runs")
+                    with Vertical(id="filter-pane"):
+                        with Horizontal(id="saved-views"):
+                            for preset_id, label in (
+                                ("saved-view-all", "All"),
+                                ("saved-view-failures", "Failures"),
+                                ("saved-view-queued", "Queued"),
+                                ("saved-view-capability", "Capability"),
+                                ("saved-view-recent24h", "Recent 24h"),
+                                ("saved-view-long-running", "Long-running"),
+                            ):
+                                yield Button(label, id=preset_id, classes="saved-view")
+                        with Horizontal(id="filter-bar"):
+                            yield Button("Failed", id="filter-failed", classes="filter-chip")
+                            yield Button("Queued", id="filter-queued", classes="filter-chip")
+                            yield Button("Capability", id="filter-capability", classes="filter-chip")
+                            yield Button("Last 24h", id="filter-last24h", classes="filter-chip")
+                            yield Input(id="filter-text", placeholder="Refine visible runs")
                     yield DataTable(id="run-table")
                 with Vertical(id="detail-pane"):
+                    yield Static(id="intro-card")
+                    with Horizontal(id="intro-actions"):
+                        yield Button("Open Help (?)", id="intro-help")
+                        yield Button("Focus Chat", id="intro-chat")
+                        yield Button("Show Failures", id="intro-failures")
+                        yield Button("Dismiss", id="intro-dismiss")
                     yield Static(id="target-card")
                     yield Static(id="alert-banner")
+                    with Horizontal(id="alert-actions"):
+                        for index in range(3):
+                            yield Button("", id=f"alert-action-{index}", classes="alert-action")
                     yield Static(id="timeline-strip")
                     with Vertical(id="action-rail"):
                         for row_index in range(3):
@@ -440,6 +647,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                                 for col_index in range(4):
                                     slot = row_index * 4 + col_index
                                     yield Button("", id=f"action-slot-{slot}", classes="action-slot")
+                    yield Static(id="action-hint")
+                    yield Static(id="artifact-note")
+                    yield Static(id="recent-activity")
                     with TabbedContent(id="detail-tabs"):
                         with TabPane("Chat", id="tab-chat"):
                             with Vertical(id="chat-pane"):
@@ -485,6 +695,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.set_interval(self.service.config.ui.refresh_interval_seconds, self.refresh_data)
             self.refresh_data()
             self.query_one("#repo-table", DataTable).focus()
+            self._update_focus_state()
 
         def on_unmount(self) -> None:
             self.service.close()
@@ -525,6 +736,223 @@ if TEXTUAL_IMPORT_ERROR is None:
             if focused is not None and getattr(focused, "id", "") == "detail-tabs":
                 return "detail tabs"
             return "workspace"
+
+        def _display_action_label(self, action: UIAction) -> str:
+            return (
+                f"{action.label} ({action.shortcut_label})"
+                if action.shortcut_label
+                else action.label
+            )
+
+        def _onboarding_text(self, repo: RepoSnapshot | None, run: RunRow | None) -> str:
+            if repo is None:
+                return (
+                    "Getting Started\n"
+                    "No repos are available yet.\n"
+                    "Add a repo to the control-center config, then relaunch the app."
+                )
+            if not repo.runs:
+                return (
+                    "Getting Started\n"
+                    f"{repo.repo.name} has no runs yet.\n"
+                    "Open Chat to draft a run or wait for the orchestrator to create one."
+                )
+            if run is None or not self._run_keys:
+                return (
+                    "Getting Started\n"
+                    "No visible run is selected.\n"
+                    "Use a saved view or clear filters to bring a run back into view."
+                )
+            return (
+                "Getting Started\n"
+                "1. Pick a repo or saved view.\n"
+                "2. Scan alerts and the timeline.\n"
+                "3. Use Open Best Artifact or Chat for the next step."
+            )
+
+        def _show_intro_card(self, repo: RepoSnapshot | None, run: RunRow | None) -> bool:
+            if repo is None or not repo.runs or run is None or not self._run_keys:
+                return True
+            return not self._dismissed_intro
+
+        def _record_activity(
+            self,
+            repo_id: str,
+            *,
+            state: str,
+            target: str,
+            message: str,
+            ts_ms: int | None = None,
+        ) -> None:
+            entries = self._session_activity.setdefault(repo_id, [])
+            entries.append(
+                ActivityEntry(
+                    ts_ms=ts_ms or int(time.time() * 1000),
+                    state=state,
+                    target=target,
+                    message=message,
+                    repo_id=repo_id,
+                )
+            )
+            self._session_activity[repo_id] = entries[-40:]
+
+        def _sync_recent_activity(self) -> None:
+            for repo in self.snapshot.repos:
+                seen_messages = self._seen_repo_messages.setdefault(repo.repo.id, set())
+                for message in repo.recent_messages:
+                    if message in seen_messages:
+                        continue
+                    seen_messages.add(message)
+                    self._record_activity(
+                        repo.repo.id,
+                        state="INFO",
+                        target=repo.repo.name,
+                        message=message,
+                    )
+
+                seen_commands = self._seen_command_ids.setdefault(repo.repo.id, set())
+                for command in repo.active_commands:
+                    command_key = (
+                        f"{command.command_id}:{command.state}:{command.completed_epoch_ms or 0}"
+                    )
+                    if command_key in seen_commands:
+                        continue
+                    seen_commands.add(command_key)
+                    self._record_activity(
+                        repo.repo.id,
+                        state="RUNNING" if command.state == "running" else command.state.upper(),
+                        target=repo.repo.name,
+                        message=command.label,
+                        ts_ms=command.completed_epoch_ms or command.started_epoch_ms,
+                    )
+
+        def _recent_activity_text(self, repo_id: str) -> str:
+            entries = sorted(
+                self._session_activity.get(repo_id, ()),
+                key=lambda item: item.ts_ms,
+                reverse=True,
+            )
+            deduped: list[ActivityEntry] = []
+            for entry in entries:
+                if deduped and (
+                    deduped[-1].message == entry.message
+                    and deduped[-1].state == entry.state
+                    and deduped[-1].target == entry.target
+                ):
+                    continue
+                deduped.append(entry)
+                if len(deduped) >= 5:
+                    break
+            if not deduped:
+                return "Recent Activity\nNo recent actions in this session."
+            lines = ["Recent Activity"]
+            for entry in deduped:
+                lines.append(
+                    f"{format_timestamp_ms(entry.ts_ms)} | {entry.state} | {entry.target} | {entry.message}"
+                )
+            return "\n".join(lines)
+
+        def _saved_view_action(self, preset: SavedViewPreset) -> UIAction:
+            return UIAction(
+                id=f"saved-view-{preset.id}",
+                label=preset.label,
+                kind="preset",
+                scope="view",
+                command_text=f"saved-view {preset.id}",
+                hint=preset.description,
+                group="saved-views",
+            )
+
+        def _update_saved_views(self) -> None:
+            for preset in self._saved_view_presets:
+                button = self.query_one(f"#saved-view-{preset.id}", Button)
+                button.variant = (
+                    "primary"
+                    if self.service.saved_view_matches(preset.id, self.filter_state, self.run_sort)
+                    else "default"
+                )
+
+        def _update_focus_state(self) -> None:
+            focus_groups = {
+                "repo-pane": False,
+                "filter-pane": False,
+                "run-pane": False,
+                "detail-pane": False,
+            }
+            focused = self.focused
+            focused_id = getattr(focused, "id", "")
+            if focused_id == "repo-table":
+                focus_groups["repo-pane"] = True
+            elif focused_id in {
+                "filter-text",
+                "filter-failed",
+                "filter-queued",
+                "filter-capability",
+                "filter-last24h",
+                "saved-view-all",
+                "saved-view-failures",
+                "saved-view-queued",
+                "saved-view-capability",
+                "saved-view-recent24h",
+                "saved-view-long-running",
+            }:
+                focus_groups["filter-pane"] = True
+            elif focused_id == "run-table":
+                focus_groups["run-pane"] = True
+            elif focused is not None:
+                focus_groups["detail-pane"] = True
+            for container_id, is_focused in focus_groups.items():
+                try:
+                    container = self.query_one(f"#{container_id}")
+                except NoMatches:
+                    continue
+                container.set_class(is_focused, "is-focused")
+                container.set_class(is_focused, "is-active")
+
+        def _alert_actions(self, alerts: tuple[AlertBadge, ...]) -> tuple[UIAction, ...]:
+            severity_order = {"critical": 0, "warning": 1, "info": 2, "success": 3}
+            seen: set[str] = set()
+            actions: list[UIAction] = []
+            ordered_alerts = sorted(
+                alerts,
+                key=lambda alert: (severity_order.get(alert.severity, 4), alert.label.lower()),
+            )
+            for alert in ordered_alerts:
+                if alert.action is None or alert.action.id in seen:
+                    continue
+                seen.add(alert.action.id)
+                actions.append(alert.action)
+                if len(actions) >= 3:
+                    break
+            return tuple(actions)
+
+        def _update_alert_actions(self, alerts: tuple[AlertBadge, ...]) -> None:
+            self._current_alert_actions.clear()
+            actions = self._alert_actions(alerts)
+            for index in range(3):
+                button = self.query_one(f"#alert-action-{index}", Button)
+                if index >= len(actions):
+                    button.label = ""
+                    button.disabled = True
+                    button.styles.display = "none"
+                    continue
+                action = actions[index]
+                button.label = self._display_action_label(action)
+                button.disabled = not action.enabled
+                button.styles.display = "block"
+                self._current_alert_actions[button.id] = action
+
+        def _update_action_hint(self, actions: tuple[UIAction, ...]) -> None:
+            focused_id = getattr(self.focused, "id", "")
+            action = self._current_action_slots.get(focused_id) or self._current_alert_actions.get(focused_id)
+            if action is None:
+                action = next((candidate for candidate in actions if candidate.enabled), None)
+            hint = action.hint if action is not None else "Focus an action to see a quick description."
+            self._action_hint = hint
+            try:
+                self.query_one("#action-hint", Static).update(f"Action Hint: {hint}")
+            except NoMatches:
+                return
 
         def _sort_label(self, state: SortState) -> str:
             return f"{state.key}{' desc' if state.reverse else ' asc'}"
@@ -578,9 +1006,9 @@ if TEXTUAL_IMPORT_ERROR is None:
             for repo in self.service.sort_repos(self.snapshot.repos, self.repo_sort):
                 self._repo_keys.append(repo.repo.id)
                 table.add_row(
-                    repo.repo.name,
+                    f"{self.service.repo_health_badge(repo.repo.id)} {repo.repo.name}",
                     repo.orchestrator.state,
-                    str(repo.queue_depth),
+                    f"{self.service.repo_queue_badge(repo.repo.id)} {repo.queue_depth}",
                     str(repo.in_flight_count),
                     f"{repo.summary.get('pass_rate_percent', 0.0):.1f}%",
                     render_duration_ms(int(repo.summary.get("duration_ms", {}).get("p95", 0))),
@@ -602,8 +1030,8 @@ if TEXTUAL_IMPORT_ERROR is None:
             for run in self.service.sort_runs(filtered_runs, self.run_sort):
                 self._run_keys.append(run.run_id)
                 table.add_row(
-                    run.run_id,
-                    run.state,
+                    f"{self.service.run_state_badge(repo.repo.id, run.run_id)} {run.run_id}",
+                    f"{self.service.run_queue_badge(repo.repo.id, run.run_id)} {run.state}",
                     "-" if run.overall_pass is None else ("yes" if run.overall_pass else "no"),
                     run.execution_profile or "-",
                     run.primary_error_code or "-",
@@ -777,11 +1205,12 @@ if TEXTUAL_IMPORT_ERROR is None:
                     button.styles.display = "none"
                     continue
                 action = flat_actions[slot]
-                button.label = action.label
+                button.label = self._display_action_label(action)
                 button.disabled = not action.enabled
                 button.variant = "warning" if action.requires_confirmation else "default"
                 button.styles.display = "block"
                 self._current_action_slots[button.id] = action
+            self._update_action_hint(actions)
 
         def _update_chat_followups(self, repo_id: str) -> None:
             self._current_chat_followups.clear()
@@ -794,7 +1223,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                     button.styles.display = "none"
                     continue
                 action = actions[index]
-                button.label = action.label
+                button.label = self._display_action_label(action)
                 button.disabled = not action.enabled
                 button.styles.display = "block"
                 self._current_chat_followups[button.id] = action
@@ -808,6 +1237,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         def _update_detail(self, *, force_streams: bool = False) -> None:
             repo = self._selected_repo()
             run = self._selected_run()
+            intro_card = self.query_one("#intro-card", Static)
             chat_banner = self.query_one("#chat-banner", Static)
             chat_history = self.query_one("#chat-history", Static)
             health = self.query_one("#health-text", Static)
@@ -820,9 +1250,12 @@ if TEXTUAL_IMPORT_ERROR is None:
             target_card = self.query_one("#target-card", Static)
             alert_banner = self.query_one("#alert-banner", Static)
             timeline_strip = self.query_one("#timeline-strip", Static)
+            recent_activity = self.query_one("#recent-activity", Static)
+            artifact_note = self.query_one("#artifact-note", Static)
 
             if repo is None:
                 for widget in (
+                    intro_card,
                     chat_banner,
                     chat_history,
                     health,
@@ -835,16 +1268,25 @@ if TEXTUAL_IMPORT_ERROR is None:
                     target_card,
                     alert_banner,
                     timeline_strip,
+                    recent_activity,
+                    artifact_note,
                 ):
                     widget.update("No repo selected.")
                 self._update_action_rail(())
+                self._update_alert_actions(())
                 return
 
+            intro_card.update(self._onboarding_text(repo, run))
+            intro_visible = self._show_intro_card(repo, run)
+            intro_card.styles.display = "block" if intro_visible else "none"
+            self.query_one("#intro-actions").styles.display = "block" if intro_visible else "none"
             chat_banner.update(self._chat_banner_text(repo, run))
             chat_history.update(self.service.chat_history_text(repo.repo.id))
             self._update_chat_followups(repo.repo.id)
             health.update(self.service.repo_health_text(repo.repo.id))
             help_text.update(self._help_text())
+            recent_activity.update(self._recent_activity_text(repo.repo.id))
+            artifact_note.update(self._artifact_note or "Best artifact note: waiting for a recommendation.")
 
             if run is None:
                 empty_message = self._empty_run_message(repo)
@@ -857,7 +1299,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                         ]
                     )
                 )
-                alert_banner.update(self._render_alerts(self.service.build_repo_alerts(repo.repo.id)))
+                repo_alerts = self.service.build_repo_alerts(repo.repo.id)
+                alert_banner.update(self._render_alerts(repo_alerts))
+                self._update_alert_actions(repo_alerts)
                 timeline_strip.update("No run selected.")
                 self._update_action_rail(())
                 for widget in (overview, events, transcript, score, patch):
@@ -866,6 +1310,8 @@ if TEXTUAL_IMPORT_ERROR is None:
 
             selection_key = f"{repo.repo.id}:{run.run_id}"
             selection_changed = selection_key != self._detail_selection_key
+            if selection_changed:
+                self._artifact_note = ""
             summary = self.service.build_target_summary(repo.repo.id, run.run_id)
             actions = self.service.build_context_actions(repo.repo.id, run.run_id)
             alerts = self.service.build_repo_alerts(repo.repo.id) + self.service.build_run_alerts(
@@ -877,6 +1323,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
             target_card.update(self._render_target_card(summary))
             alert_banner.update(self._render_alerts(alerts))
+            self._update_alert_actions(alerts)
             timeline_strip.update(self._render_timeline(timeline))
             self._update_action_rail(actions)
             self._sync_patch_tab(has_patch)
@@ -978,19 +1425,23 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def refresh_data(self) -> None:
             self.snapshot = self.service.refresh()
+            self._sync_recent_activity()
             if not self.selected_repo_id and self.snapshot.repos:
                 self.selected_repo_id = self.snapshot.repos[0].repo.id
             self._populate_repo_table()
             self._populate_run_table()
             self._update_filter_bar()
+            self._update_saved_views()
             self._update_context_labels()
             self._update_detail()
             self._update_summary_bar()
             self._sync_status_from_repo()
+            self._update_focus_state()
 
         def _apply_filter_state(self, *, status_message: str | None = None) -> None:
             self._populate_run_table()
             self._update_filter_bar()
+            self._update_saved_views()
             self._update_context_labels()
             self._update_detail(force_streams=True)
             self._update_summary_bar()
@@ -1004,7 +1455,16 @@ if TEXTUAL_IMPORT_ERROR is None:
             repo = self._selected_repo()
             repo_id = repo.repo.id if repo else ""
             return (
-                UIAction("open-chat", "Open Chat", "open", "navigation", "open chat", open_tab="tab-chat"),
+                UIAction(
+                    "open-chat",
+                    "Open Chat",
+                    "open",
+                    "navigation",
+                    "open chat",
+                    open_tab="tab-chat",
+                    hint="Jump to the Chat tab for guided control actions.",
+                    group="all-actions",
+                ),
                 UIAction(
                     "open-health",
                     "Open Health",
@@ -1012,6 +1472,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "navigation",
                     "open health",
                     open_tab="tab-health",
+                    hint="Open repo health, runtime, and canary details.",
+                    group="all-actions",
                 ),
                 UIAction(
                     "open-help",
@@ -1020,6 +1482,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "navigation",
                     "open help",
                     open_tab="tab-help",
+                    hint="Open the quick help tab.",
+                    shortcut_label="?",
+                    group="all-actions",
                 ),
                 UIAction(
                     "filter-failed",
@@ -1027,6 +1492,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter",
                     "navigation",
                     "filter failed",
+                    hint="Toggle the Failed chip in the guided filters.",
+                    group="all-actions",
                 ),
                 UIAction(
                     "filter-queued",
@@ -1034,6 +1501,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter",
                     "navigation",
                     "filter queued",
+                    hint="Toggle the Queued chip in the guided filters.",
+                    group="all-actions",
                 ),
                 UIAction(
                     "filter-capability",
@@ -1041,6 +1510,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter",
                     "navigation",
                     "filter capability",
+                    hint="Toggle the Capability chip in the guided filters.",
+                    group="all-actions",
                 ),
                 UIAction(
                     "filter-last24h",
@@ -1048,6 +1519,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter",
                     "navigation",
                     "filter last24h",
+                    hint="Toggle the Last 24h chip in the guided filters.",
+                    group="all-actions",
                 ),
                 UIAction(
                     "clear-filters",
@@ -1055,6 +1528,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter",
                     "navigation",
                     "filter clear",
+                    hint="Clear all guided filters and text refinement.",
+                    group="all-actions",
                 ),
                 UIAction(
                     "focus-newest-failed",
@@ -1064,6 +1539,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "focus newest-failed",
                     enabled=bool(repo_id and self.service.newest_failed_run_id(repo_id)),
                     disabled_reason="no failed run available",
+                    hint="Jump to the newest failed run in the current repo.",
+                    group="all-actions",
                 ),
                 UIAction(
                     "raw-command",
@@ -1072,19 +1549,98 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "navigation",
                     "__open_raw_command_prompt__",
                     aliases=("raw", "manual"),
+                    hint="Use the original raw command input.",
+                    group="all-actions",
                 ),
             )
 
-        def action_open_command(self) -> None:
+        def _picker_results(self) -> tuple[PickerResult, ...]:
             repo = self._selected_repo()
             run = self._selected_run()
-            actions = list(self._navigation_actions())
+            results: list[PickerResult] = []
+            row_index = 0
+
+            recommended: list[UIAction] = []
             if repo is not None and run is not None:
-                actions = list(self.service.build_context_actions(repo.repo.id, run.run_id)) + actions
-            action_tuple = tuple(actions)
-            self._picker_actions = {action.id: action for action in action_tuple}
+                alerts = self.service.build_repo_alerts(repo.repo.id) + self.service.build_run_alerts(
+                    repo.repo.id, run.run_id
+                )
+                recommended.extend(self._alert_actions(alerts))
+                recommended.extend(
+                    action for action in self.service.build_context_actions(repo.repo.id, run.run_id) if action.enabled
+                )
+            seen_recommended: set[str] = set()
+            for action in recommended:
+                if action.id in seen_recommended:
+                    continue
+                seen_recommended.add(action.id)
+                results.append(
+                    PickerResult(
+                        action=action,
+                        section="Recommended Now",
+                        priority=0,
+                        row_index=row_index,
+                    )
+                )
+                row_index += 1
+
+            for action in self._recent_picker_actions[:5]:
+                results.append(
+                    PickerResult(
+                        action=action,
+                        section="Recent Commands",
+                        priority=1,
+                        row_index=row_index,
+                    )
+                )
+                row_index += 1
+
+            for preset in self._saved_view_presets:
+                results.append(
+                    PickerResult(
+                        action=self._saved_view_action(preset),
+                        section="Saved Views",
+                        priority=2,
+                        row_index=row_index,
+                    )
+                )
+                row_index += 1
+
+            all_actions = list(self._navigation_actions())
+            if repo is not None and run is not None:
+                all_actions = list(self.service.build_context_actions(repo.repo.id, run.run_id)) + all_actions
+            seen_all: set[str] = set()
+            for action in all_actions:
+                if action.id in seen_all:
+                    continue
+                seen_all.add(action.id)
+                results.append(
+                    PickerResult(
+                        action=action,
+                        section="All Actions",
+                        priority=3,
+                        row_index=row_index,
+                    )
+                )
+                row_index += 1
+            return tuple(results)
+
+        def _remember_picker_action(self, action: UIAction) -> None:
+            key = (action.id, action.command_text)
+            self._recent_picker_actions = [
+                action,
+                *[
+                    existing
+                    for existing in self._recent_picker_actions
+                    if (existing.id, existing.command_text) != key
+                ],
+            ][:5]
+
+        def action_open_command(self) -> None:
+            picker_results = self._picker_results()
+            self._picker_actions = {result.action.id: result.action for result in picker_results}
             self.push_screen(
-                CommandPickerScreen(action_tuple),
+                CommandPickerScreen(picker_results),
                 callback=self._handle_picker_result,
             )
 
@@ -1094,6 +1650,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             action = self._picker_actions.get(action_id)
             if action is None:
                 return
+            self._remember_picker_action(action)
             if action.command_text == "__open_raw_command_prompt__":
                 self._open_input(
                     "command",
@@ -1104,6 +1661,17 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._execute_ui_action(action)
 
         def action_open_help(self) -> None:
+            self._remember_picker_action(
+                UIAction(
+                    id="open-help",
+                    label="Open Help",
+                    kind="open",
+                    scope="navigation",
+                    command_text="open help",
+                    open_tab="tab-help",
+                    shortcut_label="?",
+                )
+            )
             self._set_active_tab("tab-help")
             self._update_detail(force_streams=True)
             self._set_status("opened help", hold_seconds=2.0)
@@ -1114,10 +1682,21 @@ if TEXTUAL_IMPORT_ERROR is None:
             if repo is None or run is None:
                 self._set_status("select a run first", hold_seconds=2.0)
                 return
-            tab_id = self.service.recommended_artifact_tab(repo.repo.id, run.run_id)
-            self._set_active_tab(tab_id)
+            if self._suppress_best_artifact_record:
+                self._suppress_best_artifact_record = False
+            else:
+                self._record_action_execution(
+                    next(
+                        action
+                        for action in self.service.build_context_actions(repo.repo.id, run.run_id)
+                        if action.id == "open-best-artifact"
+                    )
+                )
+            recommendation = self.service.artifact_recommendation(repo.repo.id, run.run_id)
+            self._set_active_tab(recommendation.tab_id)
+            self._artifact_note = f"Best artifact: {recommendation.reason}"
             self._update_detail(force_streams=True)
-            self._set_status(f"opened {_tab_title(tab_id)}", hold_seconds=2.0)
+            self._set_status(recommendation.reason, hold_seconds=2.0)
 
         def _open_input(self, mode: str, value: str, placeholder: str) -> None:
             widget = self.query_one("#command-input", Input)
@@ -1277,6 +1856,29 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self.filter_state = self.service.build_filter_state()
             self._apply_filter_state(status_message=f"filter: {self._filter_label()}")
 
+        def _apply_saved_view(self, preset_id: str) -> None:
+            preset = self.service.saved_view_preset(preset_id)
+            if preset is None:
+                self._set_status(f"unknown saved view: {preset_id}", hold_seconds=2.0)
+                return
+            self.filter_state = preset.filter_state
+            self.run_sort = preset.run_sort
+            if preset.preferred_tab:
+                self._set_active_tab(preset.preferred_tab)
+            self._apply_filter_state(status_message=f"view: {preset.label.lower()}")
+
+        def _record_action_execution(self, action: UIAction) -> None:
+            repo = self._selected_repo()
+            repo_id = repo.repo.id if repo is not None else ""
+            if repo_id:
+                self._record_activity(
+                    repo_id,
+                    state="ACTION",
+                    target=repo.repo.name,
+                    message=action.label,
+                )
+            self._remember_picker_action(action)
+
         def _execute_ui_action(self, action: UIAction) -> None:
             if not action.enabled:
                 self._set_status(action.disabled_reason or f"{action.label} is unavailable", hold_seconds=2.0)
@@ -1287,12 +1889,18 @@ if TEXTUAL_IMPORT_ERROR is None:
                     callback=lambda confirmed: self._confirm_ui_action(action, confirmed),
                 )
                 return
+            self._record_action_execution(action)
+            if action.id == "open-best-artifact":
+                self._suppress_best_artifact_record = True
             self._execute_command(action.command_text)
 
         def _confirm_ui_action(self, action: UIAction, confirmed: bool) -> None:
             if not confirmed:
                 self._set_status(f"cancelled {action.label.lower()}", hold_seconds=2.0)
                 return
+            self._record_action_execution(action)
+            if action.id == "open-best-artifact":
+                self._suppress_best_artifact_record = True
             self._execute_command(action.command_text)
 
         def _select_run(self, run_id: str, *, open_tab: str | None = None) -> None:
@@ -1316,10 +1924,24 @@ if TEXTUAL_IMPORT_ERROR is None:
             if button_id in self._current_action_slots:
                 self._execute_ui_action(self._current_action_slots[button_id])
                 return
+            if button_id in self._current_alert_actions:
+                self._execute_ui_action(self._current_alert_actions[button_id])
+                return
             if button_id in self._current_chat_followups:
                 self._execute_ui_action(self._current_chat_followups[button_id])
                 return
-            if button_id == "filter-failed":
+            if button_id == "intro-help":
+                self.action_open_help()
+            elif button_id == "intro-chat":
+                self._set_active_tab("tab-chat")
+                self.query_one("#chat-input", Input).focus()
+                self._update_detail(force_streams=True)
+            elif button_id == "intro-failures":
+                self._apply_saved_view("failures")
+            elif button_id == "intro-dismiss":
+                self._dismissed_intro = True
+                self._update_detail(force_streams=True)
+            elif button_id == "filter-failed":
                 self._toggle_filter("failed")
             elif button_id == "filter-queued":
                 self._toggle_filter("queued")
@@ -1327,6 +1949,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self._toggle_filter("capability")
             elif button_id == "filter-last24h":
                 self._toggle_filter("last24h")
+            elif button_id.startswith("saved-view-"):
+                self._apply_saved_view(button_id.removeprefix("saved-view-"))
+            self._update_focus_state()
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             if event.data_table.id == "repo-table" and 0 <= event.cursor_row < len(self._repo_keys):
@@ -1374,6 +1999,20 @@ if TEXTUAL_IMPORT_ERROR is None:
                 event.stop()
                 self.action_open_help()
 
+        def on_focus(self, event) -> None:
+            self._update_focus_state()
+            self._update_action_hint(tuple(self._current_action_slots.values()))
+
+        def on_blur(self, event) -> None:
+            self._update_focus_state()
+
+        def on_descendant_focus(self, event) -> None:
+            self._update_focus_state()
+            self._update_action_hint(tuple(self._current_action_slots.values()))
+
+        def on_descendant_blur(self, event) -> None:
+            self._update_focus_state()
+
         def _handle_chat_result(self, result) -> None:
             if result.focus_run_id:
                 self.selected_run_id = result.focus_run_id
@@ -1409,6 +2048,16 @@ if TEXTUAL_IMPORT_ERROR is None:
             mode = self.input_mode
             self.input_mode = ""
             if mode == "command":
+                action = UIAction(
+                    id=f"raw:{value}",
+                    label=value,
+                    kind="raw",
+                    scope="navigation",
+                    command_text=value,
+                    hint="Repeat the same raw command later from the picker.",
+                    group="recent",
+                )
+                self._record_action_execution(action)
                 self._execute_command(value)
 
         def _parse_sort_command(self, tokens: list[str], *, repo_scope: bool) -> None:
@@ -1485,6 +2134,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                 else:
                     self._set_status(f"unknown filter target: {target or '-'}", hold_seconds=2.0)
                 return True
+            if tokens[0] == "saved-view":
+                preset_id = tokens[1] if len(tokens) > 1 else ""
+                self._apply_saved_view(preset_id)
+                return True
             if tokens[:2] == ["focus", "newest-failed"]:
                 if repo is None:
                     self._set_status("select a repo first", hold_seconds=2.0)
@@ -1493,9 +2146,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                 if not run_id:
                     self._set_status("no failed run available", hold_seconds=2.0)
                     return True
+                recommendation = self.service.artifact_recommendation(repo.repo.id, run_id)
                 self._select_run(
                     run_id,
-                    open_tab=self.service.recommended_artifact_tab(repo.repo.id, run_id),
+                    open_tab=recommendation.tab_id,
                 )
                 self._set_status(f"focused {run_id}", hold_seconds=2.0)
                 return True

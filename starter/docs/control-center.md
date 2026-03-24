@@ -73,6 +73,17 @@ If `runs_root` is omitted the command center uses `<root>/starter/runs`.
 
 ## Filters
 
+Above the filter chips there is a built-in `Saved Views` row for:
+
+- `All`
+- `Failures`
+- `Queued`
+- `Capability`
+- `Recent 24h`
+- `Long-running`
+
+Applying a saved view resets the filter/sort seed for that workflow, then you can refine it further with chips or text.
+
 The run pane has a visible guided filter bar with chips for:
 
 - `Failed`
@@ -93,11 +104,20 @@ profile, and failure classifications.
 Press `:` to open a searchable picker that surfaces context-aware run actions first,
 then recommended actions, repo actions, and navigation/filter actions.
 
+With a blank query the picker is grouped into:
+
+- `Recommended Now`
+- `Recent Commands`
+- `Saved Views`
+- `All Actions`
+
+The picker supports keyboard selection, and the highlighted result can be moved with the picker cursor actions before pressing `Enter`.
+
 The picker includes:
 
 - selected-run actions like `Open Best Artifact`, `Open Transcript`, `Open Score`, `Cancel`, `Rerun`
 - repo actions like `Runtime Check`, `Start Repo`, `Stop Repo`, `Restart Repo`, `Run Canary`
-- navigation and filter helpers like `Open Help`, `Toggle Failed Filter`, and `Focus Newest Failed Run`
+- navigation, saved-view, and filter helpers like `Open Help`, `Toggle Failed Filter`, `Focus Newest Failed Run`, and `Failures`
 - `Open Raw Command Prompt...` as a fallback into the original command entry flow
 
 The raw command executor remains available for operators who prefer direct commands.
@@ -141,17 +161,28 @@ If an id is omitted the currently selected repo or run is used.
 
 The right pane now keeps the same high-signal structure for every selection:
 
+- dismissible `Getting Started` guidance on first load, with empty-state variants when no repo or run is available
 - current target card with repo, run, state, pass/fail, profile, relative age, and safe next actions
 - alert banner with plain-language health warnings and failures
+- alert action buttons for the highest-priority next steps
 - run timeline strip for `Queued -> Claimed -> Model Running -> Scoring -> Complete`
-- inline action rail for common run and repo actions
+- inline action rail for common run and repo actions, including visible shortcut suffixes where a real binding exists
+- action hint strip and best-artifact reason note
+- recent activity panel with session-scoped actions, supervisor messages, and managed command state
 - existing tabbed artifacts below that shell
+
+Repo and run tables now prepend compact ASCII badges such as `[OK]`, `[!]`, `[FAIL]`, `[Q]`, and `[HOT]` to make scanning easier without adding more columns.
 
 `Open Best Artifact` chooses the most useful tab for the selected run:
 
 - failed or cancelled runs prefer `Score`, then `Transcript`, then `Events`
 - passing complete runs prefer `Patch`, then `Overview`
 - in-flight runs prefer `Events`
+
+When `Open Best Artifact` runs, the detail shell also explains why that tab was chosen, for example:
+
+- `Opened Score because this run failed.`
+- `Opened Events because this run is still in progress.`
 
 Destructive UI actions such as `Stop Repo`, `Restart Repo`, `Cancel Run`,
 `Rerun`, and force restore now use modal `Confirm` / `Cancel` buttons instead

@@ -772,6 +772,13 @@ def test_control_center_service_builds_filter_actions_alerts_and_timeline(tmp_pa
     )
     assert [row.run_id for row in failed_only] == ["run-fail"]
     assert service.recommended_artifact_tab("alpha", "run-fail") == "tab-score"
+    assert service.artifact_recommendation("alpha", "run-fail").reason == (
+        "Opened Score because this run failed."
+    )
+    assert service.repo_health_badge("alpha") == "[!]"
+    assert service.repo_queue_badge("alpha") == "[HOT]"
+    assert service.run_state_badge("alpha", "run-fail") == "[FAIL]"
+    assert service.run_queue_badge("alpha", "run-fail") == "[HOT]"
 
     alerts = service.build_repo_alerts("alpha") + service.build_run_alerts("alpha", "run-fail")
     labels = [alert.label for alert in alerts]
@@ -779,6 +786,10 @@ def test_control_center_service_builds_filter_actions_alerts_and_timeline(tmp_pa
     assert "Canary stale" in labels
     assert "Queue backing up" in labels
     assert "Retry ceiling hit" in labels
+    alert_actions = {alert.label: (alert.action.label if alert.action is not None else "") for alert in alerts}
+    assert alert_actions["Runtime check failed"] == "Run Runtime Check"
+    assert alert_actions["Queue backing up"] == "Filter Queued"
+    assert alert_actions["Retry ceiling hit"] == "Open Best Artifact"
 
     timeline = service.build_run_timeline("alpha", "run-fail")
     assert [step.label for step in timeline] == [
@@ -793,8 +804,23 @@ def test_control_center_service_builds_filter_actions_alerts_and_timeline(tmp_pa
     actions = service.build_context_actions("alpha", "run-fail")
     by_id = {action.id: action for action in actions}
     assert by_id["open-best-artifact"].command_text == "open-best-artifact"
+    assert by_id["open-best-artifact"].shortcut_label == "o"
+    assert by_id["archive-run"].shortcut_label == "a"
     assert by_id["cancel-run"].enabled is False
     assert by_id["rerun-run"].requires_confirmation is True
+    assert [preset.id for preset in service.saved_view_presets()] == [
+        "all",
+        "failures",
+        "queued",
+        "capability",
+        "recent24h",
+        "long-running",
+    ]
+    assert service.saved_view_matches(
+        "failures",
+        service.build_filter_state(failed_only=True),
+        cclib.SortState(key="updated", reverse=True),
+    )
 
 
 def test_control_center_service_chat_follow_ups_are_recorded(tmp_path: pathlib.Path) -> None:
@@ -1042,12 +1068,12 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
     def _action_slot(app: ControlCenterApp, label: str) -> Button:
         for index in range(12):
             button = app.query_one(f"#action-slot-{index}", Button)
-            if str(button.label) == label:
+            if label in str(button.label):
                 return button
         raise AssertionError(f"missing action slot: {label}")
 
     def _picker_result(screen, text: str) -> Button:
-        for index in range(8):
+        for index in range(12):
             button = screen.query_one(f"#picker-result-{index}", Button)
             if text in str(button.label):
                 return button
@@ -1066,6 +1092,15 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             assert "Runs | repo: Alpha" in str(app.query_one("#run-label").renderable)
             assert app.query_one("#detail-tabs").active == "tab-chat"
             assert "Try: show failed runs" in str(app.query_one("#chat-banner").renderable)
+            assert "Getting Started" in str(app.query_one("#intro-card", Static).renderable)
+            assert app.query_one("#saved-view-all", Button).variant == "primary"
+            app.query_one("#repo-table", DataTable).focus()
+            await pilot.pause()
+            assert app.query_one("#repo-pane").has_class("is-focused")
+            app.query_one("#intro-dismiss", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.query_one("#intro-card", Static).styles.display == "none"
 
             app.query_one("#repo-table", DataTable).focus()
             await pilot.press("j")
@@ -1081,6 +1116,15 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             assert "Queue backing up" in alert_text
             assert "Retry ceiling hit" in alert_text
             assert "Failed" in str(app.query_one("#timeline-strip", Static).renderable)
+            assert {
+                str(app.query_one("#alert-action-0", Button).label),
+                str(app.query_one("#alert-action-1", Button).label),
+                str(app.query_one("#alert-action-2", Button).label),
+            } == {
+                "Run Runtime Check",
+                "Filter Queued",
+                "Open Best Artifact (o)",
+            }
 
             action_labels = [
                 str(app.query_one(f"#action-slot-{index}", Button).label)
@@ -1088,19 +1132,34 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
                 if str(app.query_one(f"#action-slot-{index}", Button).label)
             ]
             assert action_labels[:6] == [
-                "Open Best Artifact",
+                "Open Best Artifact (o)",
                 "Open Transcript",
                 "Open Score",
                 "Runtime Check",
-                "Archive",
+                "Archive (a)",
                 "Cancel",
             ]
-            assert "Rerun" in action_labels
+            assert "Rerun" in " ".join(action_labels)
             assert _action_slot(app, "Cancel").disabled is True
+            assert "Open the artifact that best explains" in str(app.query_one("#action-hint").renderable)
+            assert app.query_one("#saved-view-failures", Button).variant == "default"
+
+            app.query_one("#saved-view-failures", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.filter_state.failed_only is True
+            assert app.query_one("#saved-view-failures", Button).variant == "primary"
+            assert run_table.row_count == 1
+
+            app.query_one("#saved-view-all", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.filter_state == cclib.RunFilterState()
 
             await pilot.press("o")
             await pilot.pause()
             assert app.query_one("#detail-tabs").active == "tab-score"
+            assert "Opened Score because this run failed." in str(app.query_one("#artifact-note").renderable)
 
             app.query_one("#filter-failed", Button).focus()
             await pilot.press("enter")
@@ -1141,6 +1200,18 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             await pilot.pause()
             assert app.filter_state.failed_only is True
             assert run_table.row_count == 1
+
+            await pilot.press(":")
+            await pilot.pause()
+            assert str(app.screen.query_one("#picker-section-0", Static).renderable) == "Recommended Now"
+            assert str(app.screen.query_one("#picker-section-1", Static).renderable) == "Recent Commands"
+            assert str(app.screen.query_one("#picker-section-2", Static).renderable) == "Saved Views"
+            assert app.screen.query_one("#picker-result-0", Button).variant == "primary"
+            app.screen.action_cursor_down()
+            await pilot.pause()
+            assert app.screen.query_one("#picker-result-1", Button).variant == "primary"
+            await pilot.press("escape")
+            await pilot.pause()
 
             await pilot.press(":")
             await pilot.pause()
@@ -1209,6 +1280,8 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             await pilot.pause()
             assert app.selected_repo_id == "beta"
             assert app.query_one("#detail-tabs").active == "tab-transcript"
+            assert "Recent Activity" in str(app.query_one("#recent-activity", Static).renderable)
+            assert "Rerun" in str(app.query_one("#recent-activity", Static).renderable)
 
             app.query_one("#chat-input", Input).focus()
             for key in "queue depth":
