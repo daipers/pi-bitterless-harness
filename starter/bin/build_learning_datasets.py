@@ -183,12 +183,32 @@ def build_retrieval_example(
         "generated_at": now_utc(),
         "example_id": f"run:{run_dir.name}",
         "query": {
-            "task_title": query.get("task_title"),
-            "goal": query.get("sections", {}).get("Goal", ""),
-            "constraints": query.get("sections", {}).get("Constraints", ""),
-            "done": query.get("sections", {}).get("Done", ""),
+            "task_title": context_manifest.get("query", {}).get("task_title", query.get("task_title")),
+            "goal": context_manifest.get("query", {}).get(
+                "goal", query.get("sections", {}).get("Goal", "")
+            ),
+            "constraints": context_manifest.get("query", {}).get(
+                "constraints", query.get("sections", {}).get("Constraints", "")
+            ),
+            "done": context_manifest.get("query", {}).get(
+                "done", query.get("sections", {}).get("Done", "")
+            ),
+            "text": context_manifest.get("query", {}).get("text", ""),
         },
-        "candidate_set": top_candidates,
+        "candidate_set": [
+            {
+                **candidate,
+                "document": {
+                    "text": str(candidate.get("document_text", "")),
+                    "summary": str(candidate.get("summary", "")),
+                    "claims": list(candidate.get("claims", [])),
+                    "evidence_paths": list(candidate.get("evidence_paths", [])),
+                    "artifact_records": list(candidate.get("artifact_records", [])),
+                },
+            }
+            for candidate in top_candidates
+            if isinstance(candidate, dict)
+        ],
         "gold_source_run_ids": gold_source_run_ids,
         "hard_negative_run_ids": hard_negative_run_ids,
         "abstention_label": bool(context_manifest.get("empty_context", False)),
@@ -257,6 +277,16 @@ def build_policy_example(
             "duration_ms": timings.get("run_duration_ms"),
             "context_empty": context_manifest.get("empty_context"),
             "failure_classification_count": len(score.get("failure_classifications", [])),
+            "task_text": "\n".join(
+                [
+                    str(task.get("task_title", "")),
+                    str(task.get("sections", {}).get("Goal", "")),
+                    str(task.get("sections", {}).get("Constraints", "")),
+                    str(task.get("sections", {}).get("Done", "")),
+                ]
+            ).strip(),
+            "top_candidate_score": retrieval.get("top_candidate_score"),
+            "ranking_latency_ms": retrieval.get("ranking_latency_ms"),
         },
         "labels": {
             "overall_pass": bool(score.get("overall_pass", False)),
@@ -270,8 +300,25 @@ def build_policy_example(
                 "selected_source_count": retrieval.get("selected_source_count", 0),
                 "candidate_run_count": retrieval.get("candidate_run_count", 0),
             },
+            "capability_profile": (
+                list((score.get("capabilities") or {}).get("spawned_profile_ids", []))[0]
+                if list((score.get("capabilities") or {}).get("spawned_profile_ids", []))
+                else None
+            ),
         },
         "candidate_context": candidates,
+        "observed": {
+            "task": {
+                "title": task.get("task_title"),
+                "goal": task.get("sections", {}).get("Goal", ""),
+                "constraints": task.get("sections", {}).get("Constraints", ""),
+                "done": task.get("sections", {}).get("Done", ""),
+            },
+            "retrieval": retrieval,
+            "timings": timings,
+            "failure_classifications": list(score.get("failure_classifications", [])),
+            "capabilities": score.get("capabilities", {}),
+        },
     }
 
 

@@ -153,7 +153,10 @@ def candidate_summary(candidate: dict[str, Any] | None) -> dict[str, Any]:
             "retriever_version": runtime.get("retriever_version"),
             "reranker_version": runtime.get("reranker_version"),
             "abstention_model_version": runtime.get("abstention_model_version"),
-            "model_version": runtime.get("model_version"),
+            "model_version": runtime.get("model_version")
+            or (runtime.get("model", {}) if isinstance(runtime.get("model"), dict) else {}).get(
+                "model_version"
+            ),
             "policy_model_version": runtime.get("policy_model_version"),
         },
     }

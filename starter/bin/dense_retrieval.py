@@ -13,6 +13,7 @@ TOKEN_RE = __import__("re").compile(r"[a-z0-9]+")
 DEFAULT_HASH_DIM = 8192
 DEFAULT_EMBEDDING_DIM = 256
 DEFAULT_PROJECTION_SEED = 7
+DEFAULT_SCORE_MODE = "cosine"
 
 
 def _stable_hash(token: str, *, hash_dim: int) -> int:
@@ -98,6 +99,41 @@ def query_text_from_example(example: dict[str, Any]) -> str:
 
 def _document_text(row: dict[str, Any]) -> str:
     return str(row.get("text", ""))
+
+
+def encode_query(
+    text: str,
+    *,
+    runtime: dict[str, Any],
+) -> numpy.ndarray:
+    return encode_text(
+        text,
+        hash_dim=int(runtime["hash_dim"]),
+        feature_weights=runtime["feature_weights"],
+        projection=runtime["projection"],
+    )
+
+
+def encode_document(
+    text: str,
+    *,
+    runtime: dict[str, Any],
+) -> numpy.ndarray:
+    return encode_query(text, runtime=runtime)
+
+
+def score_pair(
+    query_text: str,
+    document_text: str,
+    *,
+    runtime: dict[str, Any],
+) -> float:
+    query_embedding = encode_query(query_text, runtime=runtime)
+    document_embedding = encode_document(document_text, runtime=runtime)
+    score_mode = str(runtime.get("score_mode", DEFAULT_SCORE_MODE))
+    if score_mode != "cosine":
+        raise ValueError(f"unsupported score mode: {score_mode}")
+    return cosine_similarity(query_embedding, document_embedding)
 
 
 def _feature_vectors_for_documents(
@@ -249,10 +285,12 @@ def write_dense_retriever_artifacts(
     numpy.save(feature_weights_path, feature_weights.astype(numpy.float32))
     config_payload = {
         "retriever_type": "dense-v1",
+        "encoder_type": "local-hashed-v2",
         "hash_dim": hash_dim,
         "embedding_dim": embedding_dim,
         "projection_seed": projection_seed,
         "document_fingerprint": document_fingerprint,
+        "score_mode": DEFAULT_SCORE_MODE,
     }
     config_path = artifacts_dir / "encoder-config.json"
     config_path.write_text(
@@ -271,6 +309,7 @@ def write_dense_retriever_artifacts(
     )
     return {
         "retriever_type": "dense-v1",
+        "encoder_type": "local-hashed-v2",
         "hash_dim": hash_dim,
         "embedding_dim": embedding_dim,
         "projection_seed": projection_seed,
@@ -278,6 +317,7 @@ def write_dense_retriever_artifacts(
         "artifact_fingerprint": artifact_fingerprint,
         "feature_weights_path": str(feature_weights_path.resolve()),
         "config_path": str(config_path.resolve()),
+        "score_mode": DEFAULT_SCORE_MODE,
     }
 
 
@@ -300,7 +340,8 @@ def load_dense_retriever_runtime(retriever_payload: dict[str, Any]) -> dict[str,
         seed=projection_seed,
     )
     return {
-        "retriever_type": "dense-v1",
+        "retriever_type": str(retriever_payload.get("retriever_type", "dense-v1")),
+        "encoder_type": str(retriever_payload.get("encoder_type", "local-hashed-v2")),
         "hash_dim": hash_dim,
         "embedding_dim": embedding_dim,
         "projection_seed": projection_seed,
@@ -308,4 +349,9 @@ def load_dense_retriever_runtime(retriever_payload: dict[str, Any]) -> dict[str,
         "feature_weights_path": str(feature_weights_path.resolve()),
         "feature_weights": feature_weights,
         "projection": projection,
+        "score_mode": str(retriever_payload.get("score_mode", DEFAULT_SCORE_MODE)),
     }
+
+
+def load_text_encoder_runtime(artifact_payload: dict[str, Any]) -> dict[str, Any]:
+    return load_dense_retriever_runtime(artifact_payload)

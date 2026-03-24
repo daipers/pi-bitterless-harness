@@ -418,8 +418,18 @@ def main(argv: list[str] | None = None) -> int:
             "total_score": item["total_score"],
             "score_breakdown": dict(item["score_breakdown"]),
             "usefulness_probability": item.get("usefulness_probability"),
+            "candidate_score": item.get("candidate_score"),
             "dense_stage1_score": item.get("dense_stage1_score"),
             "selected": item["run_id"] in selected_run_ids,
+            "summary": item.get("summary", ""),
+            "claims": list(item.get("claims", [])),
+            "artifact_records": list(item.get("artifact_records", [])),
+            "evidence_paths": list(item.get("retrieval_view", {}).get("evidence_paths", [])),
+            "document_text": str(item.get("retrieval_view", {}).get("text", "")),
+            "source_snapshot_fingerprint": item.get("retrieval_view", {}).get(
+                "source_snapshot_fingerprint", ""
+            )
+            or item.get("source_snapshot_fingerprint", ""),
         }
         for item in rerank_pool
     ]
@@ -549,6 +559,13 @@ def main(argv: list[str] | None = None) -> int:
         "selected_source_run_ids": selected_run_ids,
         "selected_sources": selected_manifest_entries,
         "top_candidates": top_candidates,
+        "query": {
+            "task_title": query.get("task_title", ""),
+            "goal": query.get("sections", {}).get("Goal", ""),
+            "constraints": query.get("sections", {}).get("Constraints", ""),
+            "done": query.get("sections", {}).get("Done", ""),
+            "text": query_text,
+        },
         "skipped_sources_count": skipped_sources,
         "candidate_shadow": candidate_shadow,
         "guardrail_decisions": guardrail_decisions,

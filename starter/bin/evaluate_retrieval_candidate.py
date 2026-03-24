@@ -47,7 +47,10 @@ def read_json(path: pathlib.Path) -> dict[str, Any]:
 
 def retriever_requires_replay(candidate_manifest: dict[str, Any]) -> bool:
     runtime = candidate_manifest.get("runtime", {}) if isinstance(candidate_manifest, dict) else {}
-    return str(runtime.get("retriever_version", "")) == "dense-hashed-shared-encoder-v1"
+    return str(runtime.get("retriever_version", "")) in {
+        "dense-hashed-shared-encoder-v1",
+        "lexical-stage1-v2",
+    } or str(runtime.get("reranker_version", "")) == "text-pair-hashed-reranker-v2"
 
 
 def benchmark_command(

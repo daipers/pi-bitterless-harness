@@ -20,6 +20,7 @@ from capabilitylib import (
     load_capability_library,
 )
 from harnesslib import (
+    DEFAULT_RETRIEVAL_CONFIG,
     EXECUTION_PROFILES,
     RUNNER_VERSION,
     build_run_event,
@@ -32,6 +33,7 @@ from harnesslib import (
     load_run_contract,
     make_result_template,
     now_utc,
+    parse_task_file,
     resolve_execution_settings,
     write_json,
 )
@@ -41,6 +43,7 @@ from learninglib import (
     effective_candidate_mode,
     load_candidate_manifest,
 )
+from policylib import policy_feature_payload, predict_policy_heads
 
 
 def now_ms() -> int:
@@ -368,7 +371,13 @@ class RunTaskRunner:
         self.bundle_candidate_summary = candidate_summary(None)
         self.policy_candidate_recommendations: dict[str, Any] = {}
         self.policy_candidate_applied: list[str] = []
+        self.policy_candidate_overrides: list[str] = []
         self.context_budget_overrides: dict[str, int] = {}
+        self.retrieval_budget_envelope = {
+            "max_source_runs": int(DEFAULT_RETRIEVAL_CONFIG["max_source_runs"]),
+            "max_candidates": int(DEFAULT_RETRIEVAL_CONFIG["max_candidates"]),
+        }
+        self.selected_capability_profile: str | None = None
         self.model_selection_source = "cli_or_default"
         self.model_fallback = ""
 
@@ -543,6 +552,7 @@ class RunTaskRunner:
                     **dict(self.policy_candidate_summary),
                     "recommendations": dict(self.policy_candidate_recommendations),
                     "applied": list(self.policy_candidate_applied),
+                    "overrides": list(self.policy_candidate_overrides),
                 },
                 "model": {
                     **dict(self.model_candidate_summary),
@@ -911,6 +921,7 @@ class RunTaskRunner:
                 "subagents_allowed": self.subagents_allowed,
                 "max_agents": self.subagent_max_agents,
                 "allowed_profiles": list(self.allowed_subagent_profiles),
+                "selected_profile": self.selected_capability_profile,
                 "usage_path": capability_score.get("usage_path") or DEFAULT_USAGE_PATH,
                 "usage_present": capability_score.get("usage_present"),
                 "usage_valid": capability_score.get("usage_valid"),
@@ -928,6 +939,7 @@ class RunTaskRunner:
                     **dict(self.policy_candidate_summary),
                     "recommendations": dict(self.policy_candidate_recommendations),
                     "applied": list(self.policy_candidate_applied),
+                    "overrides": list(self.policy_candidate_overrides),
                 },
                 "model": {
                     **dict(self.model_candidate_summary),
@@ -990,16 +1002,78 @@ class RunTaskRunner:
             return None, 0.0
         return payload, 0.0
 
+    def _policy_model_predictions(self) -> dict[str, dict[str, Any]]:
+        if not self.policy_candidate:
+            return {}
+        runtime = candidate_runtime(self.policy_candidate)
+        model = dict(runtime.get("model", {}))
+        artifact_paths = dict(model.get("artifact_paths", {}))
+        model_path = pathlib.Path(str(artifact_paths.get("model_path", "")))
+        if not model_path.is_file():
+            return {}
+        try:
+            model_payload = json.loads(model_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        try:
+            task_payload = parse_task_file(self.task_md)
+        except Exception:
+            return {}
+        feature_payload = policy_feature_payload(
+            {
+                "features": {
+                    "task_text": "\n".join(
+                        [
+                            str(task_payload.get("task_title", "")),
+                            str(task_payload.get("sections", {}).get("Goal", "")),
+                            str(task_payload.get("sections", {}).get("Constraints", "")),
+                            str(task_payload.get("sections", {}).get("Done", "")),
+                        ]
+                    ).strip(),
+                    "execution_profile": self.execution_profile,
+                    "policy_path": self.policy_path,
+                    "eval_command_count": len(task_payload.get("eval_commands", [])),
+                    "required_artifact_count": len(task_payload.get("required_artifacts", [])),
+                    "selected_source_count": 0,
+                    "candidate_run_count": 0,
+                    "duration_ms": 0,
+                    "context_empty": True,
+                    "failure_classification_count": 0,
+                    "top_candidate_score": 0,
+                    "ranking_latency_ms": 0,
+                    "abstained": False,
+                }
+            }
+        )
+        return predict_policy_heads(model_payload, feature_payload)
+
     def _apply_policy_candidate(self) -> None:
         self.policy_candidate_recommendations = {}
         self.policy_candidate_applied = []
+        self.policy_candidate_overrides = []
         if not self.policy_candidate:
             return
         runtime = candidate_runtime(self.policy_candidate)
         activation_threshold = float(runtime.get("activation_threshold", 0.0))
         mode = effective_candidate_mode(self.policy_candidate)
+        predictions = self._policy_model_predictions()
 
-        execution_profile, profile_confidence = self._recommendation_payload("execution_profile")
+        def prediction_payload(*names: str) -> tuple[Any, float]:
+            for name in names:
+                payload = predictions.get(name)
+                if isinstance(payload, dict) and "value" in payload:
+                    return payload.get("value"), float(payload.get("confidence", 0.0))
+            for name in names:
+                value, confidence = self._recommendation_payload(name)
+                if value is not None:
+                    return value, confidence
+            defaults = dict(runtime.get("defaults", {}))
+            for name in names:
+                if name in defaults:
+                    return defaults.get(name), 0.0
+            return None, 0.0
+
+        execution_profile, profile_confidence = prediction_payload("execution_profile")
         if execution_profile is not None:
             self.policy_candidate_recommendations["execution_profile"] = {
                 "value": execution_profile,
@@ -1014,7 +1088,12 @@ class RunTaskRunner:
                 self.policy_path = default_policy_path(self.execution_profile)
                 self.policy_candidate_applied.append("execution_profile")
 
-        retry_limit, retry_confidence = self._recommendation_payload("retry_limit")
+        retry_payload, retry_confidence = prediction_payload("retry_policy", "retry_limit")
+        retry_limit = (
+            retry_payload.get("retry_limit")
+            if isinstance(retry_payload, dict)
+            else retry_payload
+        )
         if retry_limit is not None:
             self.policy_candidate_recommendations["retry_limit"] = {
                 "value": retry_limit,
@@ -1024,32 +1103,60 @@ class RunTaskRunner:
                 self.retry_count = str(max(1, int(retry_limit)))
                 self.policy_candidate_applied.append("retry_limit")
 
-        context_budget, context_confidence = self._recommendation_payload("context_budget")
+        context_budget, context_confidence = prediction_payload("retrieval_budget", "context_budget")
         if isinstance(context_budget, dict):
+            clipped_budget = {
+                "max_source_runs": min(
+                    max(1, int(context_budget.get("max_source_runs", 1))),
+                    max(1, int(self.retrieval_budget_envelope.get("max_source_runs", 1))),
+                ),
+                "max_candidates": min(
+                    max(1, int(context_budget.get("max_candidates", 1))),
+                    max(1, int(self.retrieval_budget_envelope.get("max_candidates", 1))),
+                ),
+            }
             self.policy_candidate_recommendations["context_budget"] = {
-                "value": dict(context_budget),
+                "value": dict(clipped_budget),
                 "confidence": context_confidence,
             }
             if mode == "active" and context_confidence >= activation_threshold:
-                if "max_source_runs" in context_budget:
-                    self.context_budget_overrides["max_source_runs"] = max(
-                        1, int(context_budget["max_source_runs"])
-                    )
-                if "max_candidates" in context_budget:
-                    self.context_budget_overrides["max_candidates"] = max(
-                        1, int(context_budget["max_candidates"])
-                    )
+                self.context_budget_overrides["max_source_runs"] = int(
+                    clipped_budget["max_source_runs"]
+                )
+                self.context_budget_overrides["max_candidates"] = int(
+                    clipped_budget["max_candidates"]
+                )
+                if clipped_budget != {
+                    "max_source_runs": int(context_budget.get("max_source_runs", 1)),
+                    "max_candidates": int(context_budget.get("max_candidates", 1)),
+                }:
+                    self.policy_candidate_overrides.append("context_budget_clipped")
                 if self.context_budget_overrides:
                     self.policy_candidate_applied.append("context_budget")
 
-        benchmark_eligible, benchmark_confidence = self._recommendation_payload(
-            "benchmark_eligible"
+        benchmark_eligible, benchmark_confidence = prediction_payload(
+            "benchmark_eligibility", "benchmark_eligible"
         )
         if benchmark_eligible is not None:
             self.policy_candidate_recommendations["benchmark_eligible"] = {
                 "value": bool(benchmark_eligible),
                 "confidence": benchmark_confidence,
             }
+
+        capability_profile, capability_confidence = prediction_payload("capability_profile")
+        if capability_profile is not None:
+            self.policy_candidate_recommendations["capability_profile"] = {
+                "value": capability_profile,
+                "confidence": capability_confidence,
+            }
+            if (
+                mode == "active"
+                and capability_confidence >= activation_threshold
+                and capability_profile in self.allowed_subagent_profiles
+            ):
+                self.allowed_subagent_profiles = [str(capability_profile)]
+                self.selected_capability_profile = str(capability_profile)
+                self.policy_candidate_applied.append("capability_profile")
 
     def _apply_model_candidate(self) -> None:
         self.model_selection_source = "cli_or_default"
@@ -1176,13 +1283,10 @@ class RunTaskRunner:
         self.run_contract_version = settings["run_contract_version"]
         self.execution_profile = settings["execution_profile"]
         self.policy_path = settings["policy_path"]
-        self._load_runtime_candidates()
-        self._apply_policy_candidate()
-        self.policy = load_policy(self.policy_path, repo_root=self.repo_root)
-        self._apply_model_candidate()
-        self.context_enabled = "1" if settings["retrieval_enabled"] else "0"
-        self.context_manifest_rel = settings["context_manifest_path"]
-        self.context_summary_rel = settings["context_summary_path"]
+        self.retrieval_budget_envelope = {
+            "max_source_runs": max(1, int(settings.get("retrieval", {}).get("max_source_runs", 1))),
+            "max_candidates": max(1, int(settings.get("retrieval", {}).get("max_candidates", 1))),
+        }
         self.transport_mode = settings.get("transport_mode", "cli_json")
         self.capabilities_enabled = bool(settings.get("capabilities_enabled", False))
         self.capability_library_path = str(settings.get("capability_library_path") or "")
@@ -1190,6 +1294,13 @@ class RunTaskRunner:
         self.subagents_allowed = bool(settings.get("subagents_allowed", False))
         self.subagent_max_agents = int(settings.get("subagent_max_agents", 0) or 0)
         self.allowed_subagent_profiles = list(settings.get("allowed_subagent_profiles", []))
+        self._load_runtime_candidates()
+        self._apply_policy_candidate()
+        self.policy = load_policy(self.policy_path, repo_root=self.repo_root)
+        self._apply_model_candidate()
+        self.context_enabled = "1" if settings["retrieval_enabled"] else "0"
+        self.context_manifest_rel = settings["context_manifest_path"]
+        self.context_summary_rel = settings["context_summary_path"]
         self.capability_library = None
         if self.capabilities_enabled:
             try:

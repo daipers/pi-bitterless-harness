@@ -3,15 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import pathlib
 from typing import Any
 
-from harnesslib import now_utc, sha256_file
+from harnesslib import DEFAULT_RETRIEVAL_CONFIG, now_utc, sha256_file
 from learninglib import build_candidate_manifest, write_candidate_manifest
+from policylib import predict_policy_heads, train_contextual_policy_model
 
-DEFAULT_RETRY_LIMIT = 2
-RECOMMENDED_RETRY_LIMIT = 3
 DEFAULT_ACTIVATION_THRESHOLD = 0.6
 
 
@@ -44,24 +42,6 @@ def candidate_id_for_path(out_path: pathlib.Path, *, examples_path: pathlib.Path
     return f"{stem}-{fingerprint[:8]}"
 
 
-def wilson_lower_bound(successes: int, total: int, *, z: float = 1.0) -> float:
-    if total <= 0:
-        return 0.0
-    proportion = successes / total
-    denominator = 1.0 + (z * z) / total
-    center = proportion + (z * z) / (2.0 * total)
-    margin = z * math.sqrt((proportion * (1.0 - proportion) + (z * z) / (4.0 * total)) / total)
-    return max(0.0, min(1.0, (center - margin) / denominator))
-
-
-def percentile(values: list[int], fraction: float) -> int:
-    if not values:
-        return 0
-    ordered = sorted(int(value) for value in values)
-    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * fraction) - 1))
-    return ordered[index]
-
-
 def policy_rows(examples: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for example in examples:
@@ -72,151 +52,32 @@ def policy_rows(examples: list[dict[str, Any]]) -> list[tuple[dict[str, Any], di
     return rows
 
 
-def learn_execution_profile(rows: list[tuple[dict[str, Any], dict[str, Any]]]) -> tuple[str, dict[str, Any]]:
-    profile_stats: dict[str, dict[str, int]] = {}
-    for _features, labels in rows:
-        profile = str(labels.get("execution_profile", "")).strip()
-        if not profile:
-            continue
-        stats = profile_stats.setdefault(profile, {"total": 0, "success": 0})
-        stats["total"] += 1
-        if bool(labels.get("overall_pass", False)):
-            stats["success"] += 1
-
-    if not profile_stats:
-        return "strict", {"value": "strict", "confidence": 0.0, "support": 0}
-
-    ranked = []
-    for profile, stats in profile_stats.items():
-        support = int(stats["total"])
-        successes = int(stats["success"])
-        pass_rate = successes / support if support else 0.0
-        lower_bound = wilson_lower_bound(successes, support)
-        ranked.append((lower_bound, pass_rate, support, profile))
-    ranked.sort(reverse=True)
-    lower_bound, pass_rate, support, profile = ranked[0]
-    return profile, {
-        "value": profile,
-        "confidence": round(lower_bound, 4),
-        "support": support,
-        "success_count": int(profile_stats[profile]["success"]),
-        "pass_rate": round(pass_rate, 4),
-        "lower_bound": round(lower_bound, 4),
-    }
-
-
-def learn_retry_limit(rows: list[tuple[dict[str, Any], dict[str, Any]]]) -> tuple[int, dict[str, Any]]:
-    total = len(rows)
-    retry_true = sum(1 for _features, labels in rows if bool(labels.get("retry_recommended", False)))
-    retry_false = max(0, total - retry_true)
-    positive_rate = retry_true / total if total else 0.0
-    positive_lower_bound = wilson_lower_bound(retry_true, total)
-    negative_lower_bound = wilson_lower_bound(retry_false, total)
-    if retry_true > 0 and (positive_rate >= 0.25 or positive_lower_bound >= 0.15):
-        return RECOMMENDED_RETRY_LIMIT, {
-            "value": RECOMMENDED_RETRY_LIMIT,
-            "confidence": round(max(positive_lower_bound, positive_rate), 4),
-            "support": total,
-            "positive_count": retry_true,
-            "positive_rate": round(positive_rate, 4),
-            "lower_bound": round(positive_lower_bound, 4),
-        }
-    return DEFAULT_RETRY_LIMIT, {
-        "value": DEFAULT_RETRY_LIMIT,
-        "confidence": round(max(negative_lower_bound, retry_false / total if total else 0.0), 4),
-        "support": total,
-        "negative_count": retry_false,
-        "negative_rate": round(retry_false / total if total else 0.0, 4),
-        "lower_bound": round(negative_lower_bound, 4),
-    }
-
-
-def learn_context_budget(rows: list[tuple[dict[str, Any], dict[str, Any]]]) -> tuple[dict[str, int], dict[str, Any]]:
-    successful = [labels for _features, labels in rows if bool(labels.get("overall_pass", False))]
-    selected_source_counts: list[int] = []
-    candidate_run_counts: list[int] = []
-    for labels in successful:
-        context_budget = labels.get("context_budget", {})
-        if not isinstance(context_budget, dict):
-            continue
-        selected_source_count = int(context_budget.get("selected_source_count", 0) or 0)
-        candidate_run_count = int(context_budget.get("candidate_run_count", 0) or 0)
-        if selected_source_count > 0:
-            selected_source_counts.append(selected_source_count)
-        if candidate_run_count > 0:
-            candidate_run_counts.append(candidate_run_count)
-
-    max_source_runs = max(1, percentile(selected_source_counts, 0.75) or 1)
-    max_candidates = max(max_source_runs, percentile(candidate_run_counts, 0.75) or max_source_runs)
-    support = max(len(selected_source_counts), len(candidate_run_counts))
-    confidence = min(1.0, support / 8.0) if support else 0.0
-    return {
-        "max_source_runs": max_source_runs,
-        "max_candidates": max_candidates,
-    }, {
-        "value": {
-            "max_source_runs": max_source_runs,
-            "max_candidates": max_candidates,
+def training_summary(rows: list[tuple[dict[str, Any], dict[str, Any]]], *, model: dict[str, Any]) -> dict[str, Any]:
+    predictions = predict_policy_heads(
+        model,
+        {
+            "task_text": "",
+            "execution_profile": "",
+            "policy_path": "",
+            "eval_command_count": 0,
+            "required_artifact_count": 0,
+            "selected_source_count": 0,
+            "candidate_run_count": 0,
+            "duration_ms": 0,
+            "failure_classification_count": 0,
+            "top_candidate_score": 0,
+            "ranking_latency_ms": 0,
+            "abstained": False,
+            "context_empty": True,
         },
-        "confidence": round(confidence, 4),
-        "support": support,
-        "selected_source_count_p75": max_source_runs,
-        "candidate_run_count_p75": max_candidates,
-    }
-
-
-def learn_benchmark_eligibility(
-    rows: list[tuple[dict[str, Any], dict[str, Any]]],
-) -> tuple[bool, dict[str, Any]]:
-    total = len(rows)
-    eligible_count = sum(1 for _features, labels in rows if bool(labels.get("benchmark_eligible", False)))
-    ineligible_count = max(0, total - eligible_count)
-    eligible_rate = eligible_count / total if total else 0.0
-    eligible_lower_bound = wilson_lower_bound(eligible_count, total)
-    ineligible_lower_bound = wilson_lower_bound(ineligible_count, total)
-    if eligible_count >= ineligible_count:
-        return True, {
-            "value": True,
-            "confidence": round(max(eligible_lower_bound, eligible_rate), 4),
-            "support": total,
-            "positive_count": eligible_count,
-            "positive_rate": round(eligible_rate, 4),
-            "lower_bound": round(eligible_lower_bound, 4),
-        }
-    return False, {
-        "value": False,
-        "confidence": round(
-            max(ineligible_lower_bound, ineligible_count / total if total else 0.0),
-            4,
-        ),
-        "support": total,
-        "negative_count": ineligible_count,
-        "negative_rate": round(ineligible_count / total if total else 0.0, 4),
-        "lower_bound": round(ineligible_lower_bound, 4),
-    }
-
-
-def training_summary(
-    rows: list[tuple[dict[str, Any], dict[str, Any]]],
-    *,
-    execution_profile: str,
-    retry_limit: int,
-    context_budget: dict[str, int],
-    benchmark_eligible: bool,
-) -> dict[str, Any]:
+    )
     successful = [labels for _features, labels in rows if bool(labels.get("overall_pass", False))]
-    capability_rows = [
-        labels for _features, labels in rows if str(labels.get("execution_profile", "")) == "capability"
-    ]
     return {
         "example_count": len(rows),
         "success_count": len(successful),
-        "recommended_execution_profile": execution_profile,
-        "recommended_retry_limit": retry_limit,
-        "recommended_context_budget": dict(context_budget),
-        "recommended_benchmark_eligible": benchmark_eligible,
-        "capability_example_count": len(capability_rows),
         "trained_at": now_utc(),
+        "head_count": len(model.get("heads", {})),
+        "default_predictions": predictions,
     }
 
 
@@ -229,10 +90,21 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         raise SystemExit("no policy examples found")
 
-    execution_profile, execution_profile_payload = learn_execution_profile(rows)
-    retry_limit, retry_payload = learn_retry_limit(rows)
-    context_budget, context_budget_payload = learn_context_budget(rows)
-    benchmark_eligible, benchmark_payload = learn_benchmark_eligibility(rows)
+    defaults = {
+        "execution_profile": "strict",
+        "retrieval_budget": {
+            "max_source_runs": int(DEFAULT_RETRIEVAL_CONFIG["max_source_runs"]),
+            "max_candidates": int(DEFAULT_RETRIEVAL_CONFIG["max_candidates"]),
+        },
+        "retry_policy": {"retry_limit": 2},
+        "benchmark_eligibility": False,
+        "capability_profile": None,
+    }
+    model = train_contextual_policy_model(rows, defaults=defaults)
+    artifacts_dir = pathlib.Path(f"{out_path}.artifacts")
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    model_path = artifacts_dir / "policy-model.json"
+    model_path.write_text(json.dumps(model, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     candidate_payload = build_candidate_manifest(
         candidate_type="policy",
@@ -240,26 +112,36 @@ def main(argv: list[str] | None = None) -> int:
         or candidate_id_for_path(out_path, examples_path=examples_path),
         mode=args.mode,
         runtime={
-            "policy_model_version": "aggregate-policy-v1",
+            "policy_model_version": "contextual-policy-v2",
             "activation_threshold": max(0.0, min(1.0, float(args.activation_threshold))),
-            "recommendations": {
-                "execution_profile": execution_profile_payload,
-                "retry_limit": retry_payload,
-                "context_budget": context_budget_payload,
-                "benchmark_eligible": benchmark_payload,
+            "model": {
+                "model_version": "contextual-policy-v2",
+                "artifact_paths": {"model_path": str(model_path.resolve())},
+                "vector_dim": int(model.get("vector_dim", 128)),
             },
-            "training_summary": training_summary(
-                rows,
-                execution_profile=execution_profile,
-                retry_limit=retry_limit,
-                context_budget=context_budget,
-                benchmark_eligible=benchmark_eligible,
-            ),
+            "heads": {
+                "execution_profile": {"default": defaults["execution_profile"]},
+                "retrieval_budget": {"default": defaults["retrieval_budget"]},
+                "retry_policy": {"default": defaults["retry_policy"]},
+                "benchmark_eligibility": {"default": defaults["benchmark_eligibility"]},
+                "capability_profile": {"default": defaults["capability_profile"]},
+            },
+            "defaults": defaults,
+            "recommendations": {
+                "execution_profile": {"value": defaults["execution_profile"], "confidence": 0.0},
+                "retry_limit": {"value": defaults["retry_policy"]["retry_limit"], "confidence": 0.0},
+                "context_budget": {"value": defaults["retrieval_budget"], "confidence": 0.0},
+                "benchmark_eligible": {
+                    "value": defaults["benchmark_eligibility"],
+                    "confidence": 0.0,
+                },
+            },
+            "training_summary": training_summary(rows, model=model),
         },
         training_dataset_fingerprints={"policy_examples": sha256_file(examples_path) or ""},
         evaluation_dataset_fingerprints={},
         bundle_id=args.bundle_id,
-        description="Offline-learned policy recommendations aggregated from policy examples.",
+        description="Contextual policy recommendations learned from task and runtime features.",
         promotion={
             "activation_approved": False,
             "approved_at": None,

@@ -354,8 +354,9 @@ def test_train_retrieval_candidate_emits_shadow_candidate_with_learned_weights(
     assert payload["candidate_id"] == "retrieval-trained-1"
     assert payload["mode"] == "shadow"
     assert payload["promotion"]["activation_approved"] is False
-    assert payload["runtime"]["retriever_version"] == "lexical-stage1-v1"
-    assert payload["runtime"]["reranker"]["feature_weights"]["claim_overlap"] != 0
+    assert payload["runtime"]["retriever_version"] == "lexical-stage1-v2"
+    assert payload["runtime"]["reranker_version"] == "text-pair-hashed-reranker-v2"
+    assert payload["runtime"]["reranker"]["artifact_paths"]["feature_weights_path"]
     assert payload["runtime"]["abstention"]["probability_threshold"] > 0
 
 
@@ -484,6 +485,7 @@ def test_train_retrieval_candidate_dense_v1_writes_retriever_artifacts(
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     retriever = payload["runtime"]["retriever"]
     assert payload["runtime"]["retriever_version"] == "dense-hashed-shared-encoder-v1"
+    assert payload["runtime"]["reranker_version"] == "text-pair-hashed-reranker-v2"
     assert retriever["retriever_type"] == "dense-v1"
     assert pathlib.Path(retriever["feature_weights_path"]).is_file()
     assert pathlib.Path(retriever["config_path"]).is_file()
@@ -802,13 +804,10 @@ def test_train_policy_candidate_emits_shadow_candidate_with_learned_recommendati
     assert payload["candidate_manifest_version"] == "v1"
     assert payload["candidate_id"] == "policy-trained-1"
     assert payload["mode"] == "shadow"
-    assert payload["runtime"]["policy_model_version"] == "aggregate-policy-v1"
-    assert payload["runtime"]["recommendations"]["execution_profile"]["value"] == "capability"
-    assert payload["runtime"]["recommendations"]["retry_limit"]["value"] == 3
-    assert (
-        payload["runtime"]["recommendations"]["context_budget"]["value"]["max_source_runs"] >= 2
-    )
-    assert payload["runtime"]["recommendations"]["benchmark_eligible"]["value"] is True
+    assert payload["runtime"]["policy_model_version"] == "contextual-policy-v2"
+    assert payload["runtime"]["model"]["artifact_paths"]["model_path"]
+    assert "execution_profile" in payload["runtime"]["heads"]
+    assert payload["runtime"]["defaults"]["execution_profile"] == "strict"
     assert payload["promotion"]["activation_approved"] is False
 
 
@@ -886,10 +885,10 @@ def test_evaluate_policy_candidate_can_promote_manifest_from_replay_and_canaries
     baseline_canary_dir.mkdir(parents=True, exist_ok=True)
     candidate_canary_dir.mkdir(parents=True, exist_ok=True)
     for path, timestamp in [
-        (baseline_canary_dir / "one.summary.json", "2026-03-22T10:00:00Z"),
-        (baseline_canary_dir / "two.summary.json", "2026-03-22T09:00:00Z"),
-        (candidate_canary_dir / "one.summary.json", "2026-03-22T10:30:00Z"),
-        (candidate_canary_dir / "two.summary.json", "2026-03-22T09:30:00Z"),
+        (baseline_canary_dir / "one.summary.json", "2026-03-24T10:00:00Z"),
+        (baseline_canary_dir / "two.summary.json", "2026-03-24T09:00:00Z"),
+        (candidate_canary_dir / "one.summary.json", "2026-03-24T10:30:00Z"),
+        (candidate_canary_dir / "two.summary.json", "2026-03-24T09:30:00Z"),
     ]:
         path.write_text(
             json.dumps(

@@ -41,7 +41,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         }
 
         #summary-bar {
-          height: 2;
+          height: 3;
           padding: 0 1;
           background: $surface;
           color: $text;
@@ -52,12 +52,27 @@ if TEXTUAL_IMPORT_ERROR is None:
           layout: horizontal;
         }
 
-        #repo-table {
+        #repo-pane {
           width: 42;
         }
 
-        #run-table {
+        #run-pane {
           width: 1fr;
+        }
+
+        #repo-pane, #run-pane {
+          layout: vertical;
+        }
+
+        #repo-label, #run-label {
+          height: 2;
+          padding: 0 1;
+          background: $surface-lighten-1;
+          color: $text;
+        }
+
+        #repo-table, #run-table {
+          height: 1fr;
         }
 
         #detail-pane {
@@ -65,8 +80,24 @@ if TEXTUAL_IMPORT_ERROR is None:
           min-width: 40;
         }
 
-        #health-text, #overview-text, #events-text, #transcript-text, #score-text, #patch-text {
+        #chat-history, #health-text, #overview-text, #events-text, #transcript-text, #score-text, #patch-text, #help-text {
           overflow-y: auto;
+        }
+
+        #chat-pane {
+          height: 1fr;
+          layout: vertical;
+        }
+
+        #chat-banner {
+          height: 5;
+          padding: 0 1;
+          background: $surface-lighten-1;
+          color: $text;
+        }
+
+        #chat-input {
+          dock: bottom;
         }
 
         #status-line {
@@ -96,6 +127,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             Binding("a", "archive_run", "Archive"),
             Binding("shift+r", "restore_evidence", "Restore"),
             Binding("y", "runtime_check", "Runtime"),
+            Binding("?", "open_help", "Help"),
             Binding("escape", "close_input", show=False),
         ]
 
@@ -121,10 +153,19 @@ if TEXTUAL_IMPORT_ERROR is None:
             yield Header(show_clock=True)
             yield Static(id="summary-bar")
             with Horizontal(id="body"):
-                yield DataTable(id="repo-table")
-                yield DataTable(id="run-table")
+                with Vertical(id="repo-pane"):
+                    yield Static(id="repo-label")
+                    yield DataTable(id="repo-table")
+                with Vertical(id="run-pane"):
+                    yield Static(id="run-label")
+                    yield DataTable(id="run-table")
                 with Vertical(id="detail-pane"):
                     with TabbedContent(id="detail-tabs"):
+                        with TabPane("Chat", id="tab-chat"):
+                            with Vertical(id="chat-pane"):
+                                yield Static(id="chat-banner")
+                                yield Static(id="chat-history")
+                                yield Input(id="chat-input", placeholder="Ask about runs, or type /new ...")
                         with TabPane("Health", id="tab-health"):
                             yield Static(id="health-text")
                         with TabPane("Overview", id="tab-overview"):
@@ -137,6 +178,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                             yield Static(id="score-text")
                         with TabPane("Patch", id="tab-patch"):
                             yield Static(id="patch-text")
+                        with TabPane("Help", id="tab-help"):
+                            yield Static(id="help-text")
             yield Static(id="status-line")
             yield Input(id="command-input")
             yield Footer()
@@ -171,12 +214,13 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def _selected_run(self) -> RunRow | None:
             repo = self._selected_repo()
-            if repo is None:
+            if repo is None or not self._run_keys:
                 return None
+            target_run_id = self.selected_run_id if self.selected_run_id in self._run_keys else self._run_keys[0]
             for run in repo.runs:
-                if run.run_id == self.selected_run_id:
+                if run.run_id == target_run_id:
                     return run
-            return repo.runs[0] if repo.runs else None
+            return None
 
         def _current_stream_kind(self) -> str:
             return {
@@ -187,6 +231,132 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def _sort_label(self, state: SortState) -> str:
             return f"{state.key}{' desc' if state.reverse else ' asc'}"
+
+        def _pass_label(self, run: RunRow) -> str:
+            if run.overall_pass is True:
+                return "pass"
+            if run.overall_pass is False:
+                return "fail"
+            return "pending"
+
+        def _focused_area_label(self) -> str:
+            focused = self.focused
+            if isinstance(focused, DataTable):
+                if focused.id == "repo-table":
+                    return "repo list"
+                if focused.id == "run-table":
+                    return "run list"
+            if focused is not None and getattr(focused, "id", "") == "chat-input":
+                return "chat input"
+            if focused is not None and getattr(focused, "id", "") == "command-input":
+                return "command input"
+            if focused is not None and getattr(focused, "id", "") == "detail-tabs":
+                return "detail tabs"
+            return "workspace"
+
+        def _update_context_labels(self) -> None:
+            repo = self._selected_repo()
+            visible_repo_count = len(self._repo_keys)
+            total_repo_count = len(self.snapshot.repos)
+            repo_label = (
+                f"Repos | selected: {repo.repo.name if repo else '-'} | "
+                f"visible: {visible_repo_count}/{total_repo_count} | "
+                f"sort: {self._sort_label(self.repo_sort)}"
+            )
+            self.query_one("#repo-label", Static).update(repo_label)
+
+            total_run_count = len(repo.runs) if repo is not None else 0
+            selected_run = self._selected_run()
+            run_context = (
+                f"selected: {selected_run.run_id}"
+                if selected_run is not None
+                else "selected: none"
+            )
+            run_label = (
+                f"Runs | repo: {repo.repo.name if repo else '-'} | {run_context} | "
+                f"visible: {len(self._run_keys)}/{total_run_count} | "
+                f"sort: {self._sort_label(self.run_sort)} | "
+                f"filter: {self.filter_text or '(none)'}"
+            )
+            self.query_one("#run-label", Static).update(run_label)
+
+        def _chat_banner_text(self, repo: RepoSnapshot, run: RunRow | None) -> str:
+            lines = [self.service.chat_banner_text(repo.repo.id)]
+            if run is None:
+                lines.append("No visible run is selected. Pick a run from the table or clear the filter with `/`.")
+            else:
+                lines.append(
+                    f"Selected run: {run.run_id} | state={run.state} | "
+                    f"pass={self._pass_label(run)} | profile={run.execution_profile or '-'}"
+                )
+            lines.append(
+                "Try: show failed runs | queue depth | current run status | /new fix flaky login"
+            )
+            return "\n".join(lines)
+
+        def _empty_run_message(self, repo: RepoSnapshot) -> str:
+            if not repo.runs:
+                return (
+                    "No runs are available for this repo yet.\n\n"
+                    "Use the Chat tab to draft a run, or wait for the orchestrator to create one."
+                )
+            if self.filter_text:
+                return (
+                    f"No runs match the current filter: {self.filter_text}\n\n"
+                    "Press `/` to edit the filter, or submit an empty filter to clear it."
+                )
+            return (
+                "No visible run is selected.\n\n"
+                "Move through the run table with j/k or the arrow keys, then open details with Enter."
+            )
+
+        def _help_text(self) -> str:
+            repo = self._selected_repo()
+            run = self._selected_run()
+            enabled_follow = ", ".join(
+                kind for kind, enabled in self.follow_mode.items() if enabled
+            ) or "none"
+            lines = [
+                "Quick guide",
+                "=" * 11,
+                f"Focus: {self._focused_area_label()}",
+                f"Selected repo: {repo.repo.name if repo else '-'}",
+                f"Selected run: {run.run_id if run else '-'}",
+                f"Run filter: {self.filter_text or '(none)'}",
+                f"Repo sort: {self._sort_label(self.repo_sort)}",
+                f"Run sort: {self._sort_label(self.run_sort)}",
+                f"Follow mode: {enabled_follow}",
+                "",
+                "Keyboard",
+                "=" * 8,
+                "tab: cycle repo list, run list, and detail tabs",
+                "j / k: move inside the focused table",
+                "/: edit the run filter",
+                ": open the command input",
+                "enter: focus the detail tabs",
+                "f: toggle follow on Events, Transcript, or Patch",
+                "s / r: change or reverse the active table sort",
+                "a / R / y: archive, restore, or run the repo runtime check",
+                "?: open this Help tab",
+                "",
+                "Filters",
+                "=" * 7,
+                "Plain text matches run id, state, profile, and failure codes.",
+                "Examples: state:failed | profile:capability | failure:eval_failed | age:7",
+                "",
+                "Chat",
+                "=" * 4,
+                "Status questions: show failed runs | queue depth | canary status | current run status",
+                "Draft a new run: /new fix flaky login",
+                "Mutating chat actions pause for confirm before they execute.",
+                "",
+                "Commands",
+                "=" * 8,
+                "Repo: repo start | repo stop | repo restart | repo canary",
+                "Run: run cancel | run enqueue | run rerun | archive-run | restore-evidence",
+                "Open tabs: open health | open events | open transcript | open score | open patch",
+            ]
+            return "\n".join(lines)
 
         def _populate_repo_table(self) -> None:
             table = self.query_one("#repo-table", DataTable)
@@ -252,22 +422,30 @@ if TEXTUAL_IMPORT_ERROR is None:
         def _update_detail(self, *, force_streams: bool = False) -> None:
             repo = self._selected_repo()
             run = self._selected_run()
+            chat_banner = self.query_one("#chat-banner", Static)
+            chat_history = self.query_one("#chat-history", Static)
             health = self.query_one("#health-text", Static)
             overview = self.query_one("#overview-text", Static)
             events = self.query_one("#events-text", Static)
             transcript = self.query_one("#transcript-text", Static)
             score = self.query_one("#score-text", Static)
             patch = self.query_one("#patch-text", Static)
+            help_text = self.query_one("#help-text", Static)
             if repo is None:
                 self._sync_patch_tab(False)
-                for widget in (health, overview, events, transcript, score, patch):
+                help_text.update(self._help_text())
+                for widget in (chat_banner, chat_history, health, overview, events, transcript, score, patch):
                     widget.update("No repo selected.")
                 return
+            chat_banner.update(self._chat_banner_text(repo, run))
+            chat_history.update(self.service.chat_history_text(repo.repo.id))
             health.update(self.service.repo_health_text(repo.repo.id))
+            help_text.update(self._help_text())
             if run is None:
                 self._sync_patch_tab(False)
+                empty_message = self._empty_run_message(repo)
                 for widget in (overview, events, transcript, score, patch):
-                    widget.update("No run selected.")
+                    widget.update(empty_message)
                 return
             selection_key = f"{repo.repo.id}:{run.run_id}"
             selection_changed = selection_key != self._detail_selection_key
@@ -314,24 +492,46 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def _update_summary_bar(self) -> None:
             self.query_one("#summary-bar", Static).update(
-                " | ".join(
+                "\n".join(
                     [
-                        f"Repos {len(self.snapshot.repos)}",
-                        f"Runs {self.snapshot.totals.get('total_runs', 0)}",
-                        f"Queued {self.snapshot.totals.get('queued', 0)}",
-                        f"InFlight {self.snapshot.totals.get('in_flight', 0)}",
-                        f"Stale {self.snapshot.totals.get('stale_runs', 0)}",
-                        f"RuntimeFail {self.snapshot.totals.get('repos_runtime_failing', 0)}",
-                        f"CanaryBad {self.snapshot.totals.get('repos_canary_bad', 0)}",
-                        f"Pass {self.snapshot.pass_rate_percent:.1f}%",
-                        f"RepoSort {self._sort_label(self.repo_sort)}",
-                        f"RunSort {self._sort_label(self.run_sort)}",
-                        f"Filter {self.filter_text or '(none)'}",
-                        "/ filter",
-                        ": command",
-                        "q quit",
+                        " | ".join(
+                            [
+                                f"Repos {len(self.snapshot.repos)}",
+                                f"Runs {self.snapshot.totals.get('total_runs', 0)}",
+                                f"Queued {self.snapshot.totals.get('queued', 0)}",
+                                f"InFlight {self.snapshot.totals.get('in_flight', 0)}",
+                                f"Stale {self.snapshot.totals.get('stale_runs', 0)}",
+                                f"RuntimeFail {self.snapshot.totals.get('repos_runtime_failing', 0)}",
+                                f"CanaryBad {self.snapshot.totals.get('repos_canary_bad', 0)}",
+                                f"Pass {self.snapshot.pass_rate_percent:.1f}%",
+                            ]
+                        ),
+                        " | ".join(
+                            [
+                                f"Focus {self._focused_area_label()}",
+                                f"Repo {self._selected_repo().repo.id if self._selected_repo() else '-'}",
+                                f"Run {self._selected_run().run_id if self._selected_run() else '-'}",
+                                f"Filter {self.filter_text or '(none)'}",
+                                "/ filter",
+                                ": command",
+                                "? help",
+                                "q quit",
+                            ]
+                        ),
                     ]
                 )
+            )
+
+        def _default_status_text(self) -> str:
+            enabled_follow = [kind for kind, enabled in self.follow_mode.items() if enabled]
+            follow_text = f" | Follow {', '.join(enabled_follow)}" if enabled_follow else ""
+            repo = self._selected_repo()
+            run = self._selected_run()
+            return (
+                f"Ready | Focus {self._focused_area_label()} | "
+                f"Repo {repo.repo.name if repo else '-'} | "
+                f"Run {run.run_id if run else '-'}{follow_text} | "
+                "Press ? for shortcuts and examples"
             )
 
         def _sync_status_from_repo(self) -> None:
@@ -339,11 +539,14 @@ if TEXTUAL_IMPORT_ERROR is None:
                 return
             repo = self._selected_repo()
             if repo is None or not repo.recent_messages:
+                self._set_status(self._default_status_text())
                 return
             latest_message = repo.recent_messages[-1]
             if latest_message != self._last_repo_message:
                 self._last_repo_message = latest_message
                 self._set_status(latest_message)
+                return
+            self._set_status(self._default_status_text())
 
         def refresh_data(self) -> None:
             self.snapshot = self.service.refresh()
@@ -351,6 +554,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self.selected_repo_id = self.snapshot.repos[0].repo.id
             self._populate_repo_table()
             self._populate_run_table()
+            self._update_context_labels()
             self._update_detail()
             self._update_summary_bar()
             self._sync_status_from_repo()
@@ -370,8 +574,13 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._open_input(
                 "command",
                 "",
-                "archive-run | restore-evidence | runtime-check | sort-runs duration desc",
+                "archive-run | restore-evidence | runtime-check | sort-runs duration desc | open help",
             )
+
+        def action_open_help(self) -> None:
+            self._set_active_tab("tab-help")
+            self._update_detail(force_streams=True)
+            self._set_status("opened help", hold_seconds=2.0)
 
         def action_close_input(self) -> None:
             widget = self.query_one("#command-input", Input)
@@ -505,14 +714,34 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self._update_detail()
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
-            widget = self.query_one("#command-input", Input)
             value = event.value.strip()
+            if event.input.id == "chat-input":
+                repo = self._selected_repo()
+                if repo is None:
+                    self._set_status("select a repo before using chat", hold_seconds=2.0)
+                    return
+                result = self.service.submit_chat_message(
+                    repo.repo.id,
+                    value,
+                    selected_run_id=self.selected_run_id,
+                )
+                if result.focus_run_id:
+                    self.selected_run_id = result.focus_run_id
+                if result.open_tab:
+                    self._set_active_tab(result.open_tab)
+                event.input.value = ""
+                self._set_status(result.reply, hold_seconds=3.0)
+                self.refresh_data()
+                return
+
+            widget = self.query_one("#command-input", Input)
             widget.styles.display = "none"
             mode = self.input_mode
             self.input_mode = ""
             if mode == "filter":
                 self.filter_text = value
                 self._populate_run_table()
+                self._update_context_labels()
                 self._update_detail(force_streams=True)
                 self._set_status(f"filter set to: {self.filter_text or '(none)'}", hold_seconds=2.0)
                 return
@@ -656,7 +885,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                         self._set_status(f"unknown run action: {action}", hold_seconds=2.0)
                 elif tokens[0] == "open":
                     target = tokens[1] if len(tokens) > 1 else "manifest"
-                    if target == "health":
+                    if target == "chat":
+                        self._set_active_tab("tab-chat")
+                    elif target == "health":
                         self._set_active_tab("tab-health")
                     elif target == "events":
                         self._set_active_tab("tab-events")
@@ -666,6 +897,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                         self._set_active_tab("tab-score")
                     elif target == "patch":
                         self._set_active_tab("tab-patch")
+                    elif target == "help":
+                        self._set_active_tab("tab-help")
                     else:
                         self.overview_preview = "manifest"
                         self._set_active_tab("tab-overview")

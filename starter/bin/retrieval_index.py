@@ -11,7 +11,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 import numpy
-from dense_retrieval import encode_text, load_dense_retriever_runtime
+from dense_retrieval import (
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_HASH_DIM,
+    DEFAULT_PROJECTION_SEED,
+    encode_text,
+    load_dense_retriever_runtime,
+    load_text_encoder_runtime,
+    score_pair,
+)
 from harnesslib import (
     evaluate_required_artifact_path,
     now_utc,
@@ -827,9 +835,11 @@ def retrieval_candidate_is_dense(retrieval_candidate: dict[str, Any] | None) -> 
     if not retrieval_candidate:
         return False
     runtime = candidate_runtime(retrieval_candidate)
+    stage1 = runtime.get("stage1", {})
     retriever = runtime.get("retriever", {})
     return (
         str(runtime.get("retriever_version", "")) == "dense-hashed-shared-encoder-v1"
+        or (isinstance(stage1, dict) and str(stage1.get("type", "")) == "dense-v1")
         or (
             isinstance(retriever, dict)
             and str(retriever.get("retriever_type", "")) == "dense-v1"
@@ -948,6 +958,63 @@ def dense_stage1_ranking(
 def stage1_candidate_score(query: dict[str, Any], entry: dict[str, Any]) -> int:
     field_tokens = collections.Counter(entry.get("document_tokens", {}).get("view_text", {}))
     return lexical_score(query["candidate_tokens"], dict(field_tokens))
+
+
+def candidate_query_text(query: dict[str, Any]) -> str:
+    sections = query.get("sections", {}) if isinstance(query.get("sections"), dict) else {}
+    explicit = str(query.get("text", "")).strip()
+    if explicit:
+        return explicit
+    return "\n".join(
+        [
+            str(query.get("task_title", "")),
+            str(sections.get("Goal", "")),
+            str(sections.get("Constraints", "")),
+            str(sections.get("Done", "")),
+        ]
+    ).strip()
+
+
+def candidate_document_text(entry: dict[str, Any]) -> str:
+    explicit = str(entry.get("retrieval_view", {}).get("text", "")).strip()
+    if explicit:
+        return explicit
+    parts = [str(entry.get("summary", "")).strip()]
+    parts.extend(str(item).strip() for item in entry.get("claims", []) if str(item).strip())
+    parts.extend(
+        str(item).strip()
+        for item in entry.get("retrieval_view", {}).get("evidence_paths", [])
+        if str(item).strip()
+    )
+    for artifact in entry.get("artifact_records", []):
+        if not isinstance(artifact, dict):
+            continue
+        parts.append(str(artifact.get("description", "")).strip())
+        parts.append(str(artifact.get("excerpt", "")).strip())
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _candidate_reranker_runtime(retrieval_candidate: dict[str, Any]) -> dict[str, Any] | None:
+    runtime = candidate_runtime(retrieval_candidate)
+    reranker = runtime.get("reranker", {})
+    if not isinstance(reranker, dict):
+        return None
+    encoder_payload = reranker.get("encoder")
+    if isinstance(encoder_payload, dict) and encoder_payload.get("feature_weights_path"):
+        return load_text_encoder_runtime(encoder_payload)
+    artifact_paths = reranker.get("artifact_paths", {})
+    if isinstance(artifact_paths, dict) and artifact_paths.get("feature_weights_path"):
+        payload = {
+            "feature_weights_path": artifact_paths.get("feature_weights_path"),
+            "config_path": artifact_paths.get("config_path"),
+            "hash_dim": reranker.get("hash_dim", DEFAULT_HASH_DIM),
+            "embedding_dim": reranker.get("embedding_dim", DEFAULT_EMBEDDING_DIM),
+            "projection_seed": reranker.get("projection_seed", DEFAULT_PROJECTION_SEED),
+            "artifact_fingerprint": reranker.get("artifact_fingerprint", ""),
+            "score_mode": reranker.get("score_mode", "cosine"),
+        }
+        return load_text_encoder_runtime(payload)
+    return None
 
 
 def _field_overlap_score(
@@ -1069,13 +1136,27 @@ def score_index_entry(
     if retrieval_candidate and effective_mode in {"shadow", "active"}:
         runtime = candidate_runtime(retrieval_candidate)
         reranker = dict(runtime.get("reranker", {}))
-        feature_weights = dict(reranker.get("feature_weights", {}))
         bias = float(reranker.get("bias", 0.0))
-        linear_score = bias
-        for feature_name, feature_value in candidate_features.items():
-            linear_score += float(feature_weights.get(feature_name, 0.0)) * float(feature_value)
-        usefulness_probability = round(sigmoid(linear_score), 6)
-        candidate_score = usefulness_probability
+        encoder_runtime = None
+        try:
+            encoder_runtime = _candidate_reranker_runtime(retrieval_candidate)
+        except Exception:
+            encoder_runtime = None
+        if encoder_runtime is not None:
+            linear_score = score_pair(
+                candidate_query_text(query),
+                candidate_document_text(entry),
+                runtime=encoder_runtime,
+            ) + bias
+            usefulness_probability = round(sigmoid(linear_score), 6)
+            candidate_score = round(float(linear_score), 6)
+        else:
+            feature_weights = dict(reranker.get("feature_weights", {}))
+            linear_score = bias
+            for feature_name, feature_value in candidate_features.items():
+                linear_score += float(feature_weights.get(feature_name, 0.0)) * float(feature_value)
+            usefulness_probability = round(sigmoid(linear_score), 6)
+            candidate_score = usefulness_probability
         candidate_summary = {
             "candidate_id": retrieval_candidate.get("candidate_id"),
             "mode": effective_mode,
@@ -1112,7 +1193,11 @@ def rank_index_entries(
         cutoff = min(cutoff, int(max_candidates))
     if retrieval_candidate:
         selection = dict(candidate_runtime(retrieval_candidate).get("selection", {}))
-        cutoff = min(cutoff, int(selection.get("stage1_k", cutoff)))
+        stage1 = dict(candidate_runtime(retrieval_candidate).get("stage1", {}))
+        cutoff = min(
+            cutoff,
+            int(selection.get("stage1_k", stage1.get("max_candidates", cutoff))),
+        )
 
     stage1_candidates: list[dict[str, Any]] = []
     for entry in entries:

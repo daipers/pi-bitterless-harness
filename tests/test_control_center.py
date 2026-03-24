@@ -18,6 +18,39 @@ def _make_repo_root(tmp_path: pathlib.Path, name: str = "repo") -> pathlib.Path:
     (root / "starter" / "bin").mkdir(parents=True)
     (root / "starter" / "runs").mkdir()
     script_payloads = {
+        "new-task.sh": (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "profile=\"strict\"\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  case \"$1\" in\n"
+            "    --profile)\n"
+            "      profile=\"$2\"\n"
+            "      shift 2\n"
+            "      ;;\n"
+            "    *)\n"
+            "      break\n"
+            "      ;;\n"
+            "  esac\n"
+            "done\n"
+            "title=\"$*\"\n"
+            "slug=\"$(printf '%s' \"$title\" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9[:space:]-' | tr ' ' '-')\"\n"
+            "run_id=\"chat-${slug:-task}\"\n"
+            "run_dir=\"$(cd \"$(dirname \"$0\")/..\" && pwd)/runs/${run_id}\"\n"
+            "mkdir -p \"$run_dir/outputs\" \"$run_dir/score\" \"$run_dir/home\" \"$run_dir/session\"\n"
+            "cat > \"$run_dir/task.md\" <<'EOF'\n"
+            "# Task\n"
+            "stub\n\n"
+            "## Result JSON schema (source of truth)\n"
+            "```json\n"
+            "{}\n"
+            "```\n"
+            "EOF\n"
+            "printf '# Run\\n' > \"$run_dir/RUN.md\"\n"
+            "printf '{\"execution_profile\":\"%s\"}\\n' \"$profile\" > \"$run_dir/run.contract.json\"\n"
+            "printf 'new\\n' > \"$run_dir/run.state\"\n"
+            "echo \"runs/${run_id}\"\n"
+        ),
         "run-task.sh": "#!/bin/sh\nexit 0\n",
         "orchestrator.py": "#!/bin/sh\nexit 0\n",
         "run_real_canary.py": "#!/bin/sh\nexit 0\n",
@@ -165,6 +198,7 @@ def test_load_control_center_config_derives_runs_root(tmp_path: pathlib.Path) ->
                 'id = "alpha"',
                 'name = "Alpha"',
                 f'root = "{repo_root}"',
+                'default_model = "openai/gpt-5.4-mini"',
                 "",
             ]
         ),
@@ -176,6 +210,7 @@ def test_load_control_center_config_derives_runs_root(tmp_path: pathlib.Path) ->
     assert config.ui.refresh_interval_seconds == 2.5
     assert config.ui.window_days == 10
     assert config.repos[0].runs_root == (repo_root / "starter" / "runs").resolve()
+    assert config.repos[0].default_model == "openai/gpt-5.4-mini"
 
 
 def test_startup_preflight_passes_for_valid_repo(tmp_path: pathlib.Path, monkeypatch) -> None:
@@ -656,6 +691,100 @@ def test_harvester_emits_operator_summary_signals(tmp_path: pathlib.Path, monkey
     assert payload["canary_status"]["all_passed"] is True
 
 
+def test_chat_read_only_query_and_pending_confirmation(tmp_path: pathlib.Path) -> None:
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    _write_run(runs_root, "run-fail", state="failed", overall_pass=False, primary_error_code="eval_failed")
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                ),
+            ),
+            source_path=None,
+        )
+    )
+    service.refresh()
+
+    read_result = service.submit_chat_message("alpha", "show failed runs")
+    assert "Failed runs" in read_result.reply
+    assert service.chat_banner_text("alpha").startswith("No pending action")
+
+    pending_result = service.submit_chat_message("alpha", "restart repo")
+    assert "confirm" in pending_result.reply.lower()
+    assert "Restart repo" in service.chat_banner_text("alpha")
+
+
+def test_chat_confirm_executes_pending_action_and_clears_state(tmp_path: pathlib.Path) -> None:
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                ),
+            ),
+            source_path=None,
+        )
+    )
+    service.restart_repo = lambda repo_id: f"restarted {repo_id}"  # type: ignore[method-assign]
+
+    service.submit_chat_message("alpha", "restart repo")
+    result = service.submit_chat_message("alpha", "confirm")
+
+    assert result.reply == "restarted alpha"
+    assert service.chat_banner_text("alpha").startswith("No pending action")
+    assert "restarted alpha" in service.chat_history_text("alpha")
+
+
+def test_chat_new_run_draft_and_confirm_launch(tmp_path: pathlib.Path) -> None:
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                    default_profile="capability",
+                    default_model="openai/gpt-5.4-mini",
+                ),
+            ),
+            source_path=None,
+        )
+    )
+
+    draft = service.submit_chat_message("alpha", "/new fix flaky login")
+    assert "Pending run draft" in draft.reply
+    assert "openai/gpt-5.4-mini" in draft.reply
+    assert "capability" in draft.reply
+
+    result = service.submit_chat_message("alpha", "confirm")
+    assert result.focus_run_id.startswith("chat-")
+    assert "Created run" in result.reply
+    assert (runs_root / result.focus_run_id / "task.md").exists()
+    assert "Original operator request: fix flaky login" in (
+        runs_root / result.focus_run_id / "task.md"
+    ).read_text(encoding="utf-8")
+    assert service.chat_banner_text("alpha").startswith("No pending action")
+
+
 def test_control_center_main_check_mode_returns_exit_codes(
     tmp_path: pathlib.Path,
     capsys,
@@ -745,7 +874,22 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             assert repo_table.row_count == 2
             assert run_table.row_count == 2
             assert "InFlight" in str(app.query_one("#summary-bar").renderable)
+            assert "Repos | selected: Alpha" in str(app.query_one("#repo-label").renderable)
+            assert "Runs | repo: Alpha" in str(app.query_one("#run-label").renderable)
+            assert app.query_one("#detail-tabs").active == "tab-chat"
+            assert "Try: show failed runs" in str(app.query_one("#chat-banner").renderable)
 
+            app.query_one("#chat-input").focus()
+            for key in "show failed runs":
+                await pilot.press("space" if key == " " else key)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "No failed runs are visible in the current window." in str(
+                app.query_one("#chat-history").renderable
+            )
+
+            await pilot.press("tab")
+            await pilot.pause()
             await pilot.press("s")
             await pilot.pause()
             assert "repo sort: orchestrator" in str(app.query_one("#status-line").renderable)
@@ -777,6 +921,12 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             await pilot.pause()
             assert run_table.row_count == 1
             assert app.selected_run_id == "run-failure"
+            assert "filter: state:failed" in str(app.query_one("#run-label").renderable)
+
+            await pilot.press("?")
+            await pilot.pause()
+            assert app.query_one("#detail-tabs").active == "tab-help"
+            assert "Quick guide" in str(app.query_one("#help-text").renderable)
 
             await pilot.press(":")
             for key in "open health":
@@ -851,6 +1001,16 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             await pilot.pause()
             assert "restore run-failure /tmp/archive.tgz True" in str(
                 app.query_one("#status-line").renderable
+            )
+
+            app.filter_text = "state:missing"
+            app._populate_run_table()
+            app._update_context_labels()
+            app._update_detail(force_streams=True)
+            await pilot.pause()
+            assert run_table.row_count == 0
+            assert "No runs match the current filter: state:missing" in str(
+                app.query_one("#overview-text").renderable
             )
 
     asyncio.run(runner())
