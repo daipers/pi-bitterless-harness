@@ -142,17 +142,18 @@ Use the local command center when you want one terminal cockpit across multiple
 Bitterless harness repos:
 
 ```bash
+python3 starter/bin/control_center.py --check
 python3 starter/bin/control_center.py
 ```
 
 It reads the existing run files and queue JSONL logs, owns one orchestrator
 process per configured repo, and exposes safe operator actions like start, stop,
-restart, canary, cancel, enqueue, and rerun.
+restart, canary, runtime checks, cancel, enqueue, rerun, archive, and restore.
 
 Configuration lives at `~/.config/bitterless/control-center.toml` by default.
 Start from [`control-center.example.toml`](./control-center.example.toml) and see
-[`docs/control-center.md`](./docs/control-center.md) for keybindings and command
-palette usage.
+[`docs/control-center.md`](./docs/control-center.md) for keybindings, sort/follow
+controls, and command palette usage.
 
 ## Run directory contract
 

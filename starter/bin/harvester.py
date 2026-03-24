@@ -9,6 +9,8 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
+STALE_NON_TERMINAL_MS = 15 * 60 * 1000
+
 
 def _to_state(value: str | None) -> str:
     value = (value or "").strip().lower()
@@ -140,6 +142,41 @@ def _percentile(values: list[int], ratio: float) -> int:
     values = sorted(values)
     index = min(len(values) - 1, max(0, int((len(values) - 1) * ratio)))
     return values[index]
+
+
+def _top_failure_causes(counter: Counter[str], *, limit: int = 5) -> list[dict[str, Any]]:
+    ranked = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    return [{"code": code, "count": count} for code, count in ranked[:limit]]
+
+
+def _latest_canary_status(root: pathlib.Path) -> dict[str, Any]:
+    candidates = sorted(root.glob("real-canary-*.summary.json"))
+    if not candidates:
+        return {
+            "latest_summary_path": None,
+            "completed_epoch_ms": None,
+            "freshness_hours": None,
+            "all_passed": None,
+        }
+    latest = max(candidates, key=lambda path: path.stat().st_mtime)
+    payload = _read_json(latest)
+    completed_epoch_ms = _parse_ts_ms(payload.get("finished_at") or payload.get("generated_at"))
+    freshness_hours = None
+    if completed_epoch_ms is not None:
+        freshness_hours = round((now_ms() - completed_epoch_ms) / (60 * 60 * 1000), 2)
+    overall_ok = payload.get("overall_ok")
+    all_passed = overall_ok if isinstance(overall_ok, bool) else None
+    if all_passed is None:
+        totals = payload.get("scenario_totals", {})
+        failed = totals.get("failed") if isinstance(totals, dict) else None
+        if isinstance(failed, int):
+            all_passed = failed == 0
+    return {
+        "latest_summary_path": str(latest.resolve()),
+        "completed_epoch_ms": completed_epoch_ms,
+        "freshness_hours": freshness_hours,
+        "all_passed": all_passed,
+    }
 
 
 def _split_codes(value: Any) -> list[str]:
@@ -336,25 +373,53 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
     longest_runs: list[dict[str, Any]] = []
     now = now_ms()
     trend_window = 24 * 60 * 60 * 1000
+    queue_waits: list[int] = []
+    score_waits: list[int] = []
+    last_updated_epoch_ms: int | None = None
+    last_success_epoch_ms: int | None = None
+    last_failure_epoch_ms: int | None = None
+    stale_non_terminal_count = 0
+    oldest_non_terminal_age_ms = 0
 
     for entry in entries:
         run_dir = entry["run_dir"]
-        state = entry["state"]
+        state = _effective_state(run_dir, entry["manifest"])
         manifest = entry["manifest"]
         score_payload = entry["score"]
         events = entry["events"]
         duration_ms = entry["duration_ms"]
+        updated_epoch_ms = int(run_dir.stat().st_mtime * 1000)
+        run_finished_epoch_ms = _parse_ts_ms(manifest.get("timings", {}).get("run_finished_epoch_ms"))
+        queue_wait_ms = int(manifest.get("orchestration", {}).get("queue_wait_ms", 0) or 0)
+        score_wait_ms = int(manifest.get("orchestration", {}).get("score_wait_ms", 0) or 0)
+
+        if queue_wait_ms > 0:
+            queue_waits.append(queue_wait_ms)
+        if score_wait_ms > 0:
+            score_waits.append(score_wait_ms)
+        if last_updated_epoch_ms is None or updated_epoch_ms > last_updated_epoch_ms:
+            last_updated_epoch_ms = updated_epoch_ms
 
         if state == "complete":
             totals["complete"] += 1
             if score_payload.get("overall_pass") is True:
                 totals["complete_pass"] += 1
+                if run_finished_epoch_ms is not None:
+                    if last_success_epoch_ms is None or run_finished_epoch_ms > last_success_epoch_ms:
+                        last_success_epoch_ms = run_finished_epoch_ms
             else:
                 totals["complete_fail"] += 1
+                if run_finished_epoch_ms is not None:
+                    if last_failure_epoch_ms is None or run_finished_epoch_ms > last_failure_epoch_ms:
+                        last_failure_epoch_ms = run_finished_epoch_ms
         elif state == "cancelled":
             totals["cancelled"] += 1
+            if updated_epoch_ms > (last_failure_epoch_ms or 0):
+                last_failure_epoch_ms = updated_epoch_ms
         elif state == "failed":
             totals["failed"] += 1
+            if updated_epoch_ms > (last_failure_epoch_ms or 0):
+                last_failure_epoch_ms = updated_epoch_ms
         elif state in {"scoring", "score_pending"}:
             totals["scoring"] += 1
         elif state == "model_running":
@@ -365,6 +430,12 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
             totals["queued"] += 1
         elif state != "complete":
             totals["running"] += 1
+
+        if state not in {"complete", "failed", "cancelled"}:
+            age_ms = max(0, now - updated_epoch_ms)
+            oldest_non_terminal_age_ms = max(oldest_non_terminal_age_ms, age_ms)
+            if age_ms >= STALE_NON_TERMINAL_MS:
+                stale_non_terminal_count += 1
 
         if duration_ms > 0:
             durations.append(duration_ms)
@@ -466,13 +537,30 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
             "p99": _percentile(durations, 0.99),
             "max": durations[-1] if durations else 0,
         },
+        "queue_wait_ms": {
+            "p50": _percentile(queue_waits, 0.50),
+            "p95": _percentile(queue_waits, 0.95),
+        },
+        "score_wait_ms": {
+            "p50": _percentile(score_waits, 0.50),
+            "p95": _percentile(score_waits, 0.95),
+        },
+        "activity": {
+            "last_updated_epoch_ms": last_updated_epoch_ms,
+            "last_success_epoch_ms": last_success_epoch_ms,
+            "last_failure_epoch_ms": last_failure_epoch_ms,
+            "stale_non_terminal_count": stale_non_terminal_count,
+            "oldest_non_terminal_age_ms": oldest_non_terminal_age_ms,
+        },
         "failure_classification_counts": dict(failure_by_code),
+        "top_failure_causes": _top_failure_causes(failure_by_code),
         "eval_failure_by_cause": dict(eval_failure_by_cause),
         "queue_saturation": {
             "events_total": saturation_events,
             "events_last_24h": sum(saturation_last_24h.values()),
             "trend_last_24h_by_hour": saturation_hours,
         },
+        "canary_status": _latest_canary_status(root),
         "top_offending_tasks": offending[:10],
         "longest_runs": longest_runs[:10],
     }

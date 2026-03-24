@@ -28,6 +28,7 @@ For local operator workflows across multiple Bitterless harness repos, use the
 Textual command center:
 
 ```bash
+python3 starter/bin/control_center.py --check
 python3 starter/bin/control_center.py
 ```
 
@@ -35,7 +36,8 @@ The command center is local-only, reads the existing file-native artifacts as th
 source of truth, and owns one orchestrator process per configured repo. Use
 [`../control-center.example.toml`](../control-center.example.toml) as the config
 starting point and [`control-center.md`](./control-center.md) for keybindings,
-filters, and command palette actions.
+filters, command palette actions, sort/follow controls, archive/restore actions,
+runtime checks, and the startup preflight.
 
 ## Release-candidate gate
 
@@ -144,6 +146,7 @@ The legacy `outputs/run_manifest.json.error_code` remains for compatibility. Use
 - Build candidate reports with `python3 starter/bin/build_candidate_report.py`
 - Restore an archived run with `starter/bin/restore-run-evidence.sh`
 - Partial reruns are automatically moved into `runs/<run-id>/recovery/<timestamp>/`
+- Command-center supervisor state is persisted under `starter/runs/.orchestrator/supervisor-status.json`
 - Recovery evidence is included in secret scanning; reruns fail if archived recovery artifacts
   still contain likely secrets
 - Imported retrieval payloads under `context/source-runs/` are treated as historical references and
