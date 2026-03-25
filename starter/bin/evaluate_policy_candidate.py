@@ -35,6 +35,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="glob for candidate canary summaries",
     )
+    parser.add_argument(
+        "--baseline-canary-kind",
+        choices=["real_cli", "real_managed_rpc"],
+        default=None,
+        help="optional baseline canary kind filter",
+    )
+    parser.add_argument(
+        "--candidate-canary-kind",
+        choices=["real_cli", "real_managed_rpc"],
+        default=None,
+        help="optional candidate canary kind filter",
+    )
     parser.add_argument("--out", required=True, help="candidate report output path")
     parser.add_argument("--promote-if-passed", action="store_true")
     parser.add_argument("--promote-mode", choices=["shadow", "active"], default="active")
@@ -102,6 +114,7 @@ def canary_validation_report(
     freshness_hours: int,
     min_pass_rate: float,
     expected_pi: str,
+    canary_kind: str | None = None,
 ) -> dict[str, Any]:
     try:
         summary = validate_summaries(
@@ -110,10 +123,16 @@ def canary_validation_report(
             freshness_hours=max(1, freshness_hours),
             min_pass_rate=max(0.0, min(1.0, min_pass_rate)),
             expected_pi=expected_pi,
+            canary_kind=canary_kind,
         )
-        return {"passed": True, **summary, "pattern": pattern}
+        return {"passed": True, **summary, "pattern": pattern, "requested_canary_kind": canary_kind}
     except SystemExit as exc:
-        return {"passed": False, "pattern": pattern, "reason": str(exc)}
+        return {
+            "passed": False,
+            "pattern": pattern,
+            "reason": str(exc),
+            "requested_canary_kind": canary_kind,
+        }
 
 
 def compare_canary_reports(
@@ -124,6 +143,8 @@ def compare_canary_reports(
     freshness_hours: int,
     min_pass_rate: float,
     expected_pi: str,
+    baseline_canary_kind: str | None = None,
+    candidate_canary_kind: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, bool]]:
     baseline_report = canary_validation_report(
         baseline_pattern,
@@ -131,6 +152,7 @@ def compare_canary_reports(
         freshness_hours=freshness_hours,
         min_pass_rate=min_pass_rate,
         expected_pi=expected_pi,
+        canary_kind=baseline_canary_kind,
     )
     candidate_report = canary_validation_report(
         candidate_pattern,
@@ -138,6 +160,7 @@ def compare_canary_reports(
         freshness_hours=freshness_hours,
         min_pass_rate=min_pass_rate,
         expected_pi=expected_pi,
+        canary_kind=candidate_canary_kind,
     )
     baseline_pass_rate = float(baseline_report.get("pass_rate", 0.0) or 0.0)
     candidate_pass_rate = float(candidate_report.get("pass_rate", 0.0) or 0.0)
@@ -248,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
         freshness_hours=max(1, args.freshness_hours),
         min_pass_rate=max(0.0, min(1.0, args.min_pass_rate)),
         expected_pi=expected_pi,
+        baseline_canary_kind=args.baseline_canary_kind,
+        candidate_canary_kind=args.candidate_canary_kind,
     )
 
     threshold_results = {**replay_thresholds, **canary_thresholds}
@@ -287,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
                     "candidate_replay_report": str(candidate_replay_report_path),
                     "baseline_canary_summary_glob": args.baseline_canary_summary_glob,
                     "candidate_canary_summary_glob": args.candidate_canary_summary_glob,
+                    "baseline_canary_kind": args.baseline_canary_kind,
+                    "candidate_canary_kind": args.candidate_canary_kind,
                 },
             }
         )

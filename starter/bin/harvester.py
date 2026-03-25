@@ -149,6 +149,46 @@ def _top_failure_causes(counter: Counter[str], *, limit: int = 5) -> list[dict[s
     return [{"code": code, "count": count} for code, count in ranked[:limit]]
 
 
+def _normalize_canary_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    normalized["canary_kind"] = str(normalized.get("canary_kind") or "real_cli").strip() or "real_cli"
+    normalized["transport_mode"] = (
+        str(normalized.get("transport_mode") or "cli_json").strip() or "cli_json"
+    )
+    interception_proven = normalized.get("interception_proven")
+    normalized["interception_proven"] = (
+        bool(interception_proven) if isinstance(interception_proven, bool) else False
+    )
+    return normalized
+
+
+def _canary_all_passed(payload: dict[str, Any]) -> bool | None:
+    overall_ok = payload.get("overall_ok")
+    if isinstance(overall_ok, bool):
+        return overall_ok
+    totals = payload.get("scenario_totals", {})
+    failed = totals.get("failed") if isinstance(totals, dict) else None
+    if isinstance(failed, int):
+        return failed == 0
+    return None
+
+
+def _build_canary_track(path: pathlib.Path, payload: dict[str, Any]) -> dict[str, Any]:
+    completed_epoch_ms = _parse_ts_ms(payload.get("finished_at") or payload.get("generated_at"))
+    freshness_hours = None
+    if completed_epoch_ms is not None:
+        freshness_hours = round((now_ms() - completed_epoch_ms) / (60 * 60 * 1000), 2)
+    return {
+        "latest_summary_path": str(path.resolve()),
+        "completed_epoch_ms": completed_epoch_ms,
+        "freshness_hours": freshness_hours,
+        "all_passed": _canary_all_passed(payload),
+        "canary_kind": payload.get("canary_kind"),
+        "transport_mode": payload.get("transport_mode"),
+        "interception_proven": bool(payload.get("interception_proven", False)),
+    }
+
+
 def _latest_canary_status(root: pathlib.Path) -> dict[str, Any]:
     candidates = sorted(root.glob("real-canary-*.summary.json"))
     if not candidates:
@@ -157,26 +197,25 @@ def _latest_canary_status(root: pathlib.Path) -> dict[str, Any]:
             "completed_epoch_ms": None,
             "freshness_hours": None,
             "all_passed": None,
+            "tracks": {},
         }
     latest = max(candidates, key=lambda path: path.stat().st_mtime)
-    payload = _read_json(latest)
-    completed_epoch_ms = _parse_ts_ms(payload.get("finished_at") or payload.get("generated_at"))
-    freshness_hours = None
-    if completed_epoch_ms is not None:
-        freshness_hours = round((now_ms() - completed_epoch_ms) / (60 * 60 * 1000), 2)
-    overall_ok = payload.get("overall_ok")
-    all_passed = overall_ok if isinstance(overall_ok, bool) else None
-    if all_passed is None:
-        totals = payload.get("scenario_totals", {})
-        failed = totals.get("failed") if isinstance(totals, dict) else None
-        if isinstance(failed, int):
-            all_passed = failed == 0
-    return {
-        "latest_summary_path": str(latest.resolve()),
-        "completed_epoch_ms": completed_epoch_ms,
-        "freshness_hours": freshness_hours,
-        "all_passed": all_passed,
-    }
+    payload = _normalize_canary_summary(_read_json(latest))
+    tracks: dict[str, dict[str, Any]] = {}
+    for path in candidates:
+        raw_payload = _read_json(path)
+        if not raw_payload:
+            continue
+        normalized = _normalize_canary_summary(raw_payload)
+        kind = str(normalized.get("canary_kind") or "real_cli")
+        current = tracks.get(kind)
+        if current is None or path.stat().st_mtime >= pathlib.Path(
+            current["latest_summary_path"]
+        ).stat().st_mtime:
+            tracks[kind] = _build_canary_track(path, normalized)
+    aggregate = _build_canary_track(latest, payload)
+    aggregate["tracks"] = tracks
+    return aggregate
 
 
 def _split_codes(value: Any) -> list[str]:

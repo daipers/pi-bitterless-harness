@@ -55,3 +55,38 @@ def test_parse_args_accepts_label_and_policy_candidate(tmp_path: pathlib.Path) -
     assert args.label == "policy-candidate"
     assert args.policy_candidate == str(tmp_path / "policy.json")
     assert args.summary_path == str(tmp_path / "summary.json")
+
+
+def test_main_writes_v3_cli_summary(tmp_path: pathlib.Path, monkeypatch) -> None:
+    starter_root = tmp_path / "starter"
+    starter_root.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "PI_VERSION").write_text("0.61.1\n", encoding="utf-8")
+    summary_path = tmp_path / "summary.json"
+
+    monkeypatch.setattr(run_real_canary, "STARTER_ROOT", starter_root)
+    monkeypatch.setattr(run_real_canary, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(run_real_canary, "base_env", lambda **_: {})
+    monkeypatch.setattr(run_real_canary, "git_sha", lambda: "abc123")
+    monkeypatch.setattr(run_real_canary, "scenario_success", lambda env, model: {"run_dir": "success"})
+    monkeypatch.setattr(
+        run_real_canary, "scenario_corrupt_result", lambda env, model: {"run_dir": "corrupt"}
+    )
+    monkeypatch.setattr(run_real_canary, "scenario_timeout", lambda env, model: {"run_dir": "timeout"})
+    monkeypatch.setattr(
+        run_real_canary, "scenario_interrupted", lambda env, model: {"run_dir": "interrupted"}
+    )
+    monkeypatch.setattr(run_real_canary, "scenario_retry", lambda env, model: {"run_dir": "retry"})
+    monkeypatch.setattr(
+        run_real_canary, "scenario_partial_recovery", lambda env, model: {"run_dir": "recovery"}
+    )
+
+    exit_code = run_real_canary.main(["--summary-path", str(summary_path), "--label", "default"])
+
+    assert exit_code == 0
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["summary_version"] == "v3"
+    assert summary["canary_kind"] == "real_cli"
+    assert summary["transport_mode"] == "cli_json"
+    assert summary["interception_proven"] is False
+    assert summary["scenario_totals"]["total"] == 6
+    assert summary["overall_ok"] is True

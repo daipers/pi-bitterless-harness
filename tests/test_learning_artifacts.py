@@ -1057,3 +1057,129 @@ def test_evaluate_policy_candidate_blocks_promotion_when_candidate_canaries_regr
     assert report["comparison"]["threshold_results"]["candidate_canary_pass"] is False
     assert promoted_manifest["promotion"]["activation_approved"] is False
     assert promoted_manifest["mode"] == "shadow"
+
+
+def test_evaluate_policy_candidate_supports_optional_canary_kind_filters(
+    isolated_repo: pathlib.Path,
+) -> None:
+    starter = isolated_repo / "starter"
+    candidate_path = starter / "candidates" / "policy" / "trained.json"
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    write_candidate_manifest(
+        candidate_path,
+        build_candidate_manifest(
+            candidate_type="policy",
+            candidate_id="policy-trained-1",
+            mode="shadow",
+            runtime={"policy_model_version": "aggregate-policy-v1", "recommendations": {}},
+            promotion={
+                "activation_approved": False,
+                "approved_at": None,
+                "approval_reason": "pending replay/canary benchmark",
+            },
+        ),
+    )
+    baseline_replay_path = starter / "runs" / "baseline-replay.json"
+    baseline_replay_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_replay_path.write_text(
+        json.dumps(
+            {
+                "benchmark_report_version": "v1",
+                "generated_at": "2026-03-22T10:00:00Z",
+                "overall_pass": True,
+                "replay": {
+                    "workload_metrics": [
+                        {"concurrency": 1, "pass_rate_percent": 80.0, "retry_recovery_rate": 1.0}
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    candidate_replay_path = starter / "runs" / "candidate-replay.json"
+    candidate_replay_path.write_text(
+        json.dumps(
+            {
+                "benchmark_report_version": "v1",
+                "generated_at": "2026-03-22T11:00:00Z",
+                "overall_pass": True,
+                "replay": {
+                    "workload_metrics": [
+                        {"concurrency": 1, "pass_rate_percent": 90.0, "retry_recovery_rate": 1.0}
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    baseline_canary_dir = starter / "runs" / "baseline-canaries"
+    candidate_canary_dir = starter / "runs" / "candidate-canaries"
+    baseline_canary_dir.mkdir(parents=True, exist_ok=True)
+    candidate_canary_dir.mkdir(parents=True, exist_ok=True)
+    for path, timestamp, canary_kind in [
+        (baseline_canary_dir / "cli-one.summary.json", "2026-03-24T10:00:00Z", "real_cli"),
+        (baseline_canary_dir / "cli-two.summary.json", "2026-03-24T09:00:00Z", "real_cli"),
+        (baseline_canary_dir / "managed.summary.json", "2026-03-24T08:00:00Z", "real_managed_rpc"),
+        (candidate_canary_dir / "cli-one.summary.json", "2026-03-24T10:30:00Z", "real_cli"),
+        (candidate_canary_dir / "cli-two.summary.json", "2026-03-24T09:30:00Z", "real_cli"),
+        (candidate_canary_dir / "managed.summary.json", "2026-03-24T08:30:00Z", "real_managed_rpc"),
+    ]:
+        path.write_text(
+            json.dumps(
+                {
+                    "summary_version": "v3",
+                    "generated_at": timestamp,
+                    "overall_ok": True,
+                    "supported_pi_version": "0.61.1",
+                    "git_sha": "abc123",
+                    "canary_kind": canary_kind,
+                    "transport_mode": "managed_rpc" if canary_kind == "real_managed_rpc" else "cli_json",
+                    "interception_proven": canary_kind == "real_managed_rpc",
+                    "scenario_totals": {"total": 6, "passed": 6, "failed": 0},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    report_path = starter / "runs" / "policy-candidate-report.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(starter / "bin" / "evaluate_policy_candidate.py"),
+            "--candidate",
+            str(candidate_path),
+            "--baseline-replay-report",
+            str(baseline_replay_path),
+            "--candidate-replay-report",
+            str(candidate_replay_path),
+            "--baseline-canary-summary-glob",
+            str(baseline_canary_dir / "*.summary.json"),
+            "--candidate-canary-summary-glob",
+            str(candidate_canary_dir / "*.summary.json"),
+            "--baseline-canary-kind",
+            "real_cli",
+            "--candidate-canary-kind",
+            "real_cli",
+            "--out",
+            str(report_path),
+            "--promote-if-passed",
+        ],
+        cwd=starter,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"PYTHONPATH": str(starter / "bin")},
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    promoted_manifest = json.loads(candidate_path.read_text(encoding="utf-8"))
+    assert report["comparison"]["candidate_metrics"]["canary"]["requested_canary_kind"] == "real_cli"
+    assert report["comparison"]["baseline_metrics"]["canary"]["requested_canary_kind"] == "real_cli"
+    assert promoted_manifest["promotion"]["evidence"]["baseline_canary_kind"] == "real_cli"
+    assert promoted_manifest["promotion"]["evidence"]["candidate_canary_kind"] == "real_cli"

@@ -381,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     passed = sum(1 for result in results if result["ok"])
     summary = {
-        "summary_version": "v2",
+        "summary_version": "v3",
         "generated_at": now_iso(),
         "started_at": started_at,
         "finished_at": now_iso(),
@@ -389,6 +389,9 @@ def main(argv: list[str] | None = None) -> int:
         "supported_pi_version": (REPO_ROOT / "PI_VERSION").read_text(encoding="utf-8").strip(),
         "model": model or None,
         "canary_label": args.label,
+        "canary_kind": "real_cli",
+        "transport_mode": "cli_json",
+        "interception_proven": False,
         "policy_candidate": candidate_metadata(args.policy_candidate),
         "bundle_candidate": candidate_metadata(args.bundle_candidate),
         "git_sha": git_sha() or os.environ.get("GITHUB_SHA", ""),

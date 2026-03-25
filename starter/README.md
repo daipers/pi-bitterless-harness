@@ -208,7 +208,7 @@ Everything else is for humans and the model.
 - `capability` adds explicit retrieval context under `context/` before launch.
 - Existing V1 and V2 run directories still execute unchanged; the runner detects the contract version from `run.contract.json`.
 - V3 adds an opt-in capability manifest and RPC transport selection for subagent-capable runs.
-- V4 adds opt-in `managed_rpc` transport with fail-closed live interception for every subagent action.
+- V4 adds opt-in `managed_rpc` transport that refuses to launch unless the configured peer implements `--managed-rpc-probe` for fail-closed pre-execution interception.
 
 Profile precedence at runtime:
 
@@ -435,7 +435,7 @@ export HARNESS_REAL_PI_MODEL=anthropic/claude-sonnet-4
 python3 starter/bin/run_real_canary.py
 ```
 
-The canary covers success, forced invalid `result.json`, timeout, interruption, retry, and partial-run recovery. Evidence is written under `starter/runs/`, and each canary summary now includes scenario rollups, `PI_VERSION`, model, commit SHA, and referenced run directories.
+The current real canary covers the CLI transport only: success, forced invalid `result.json`, timeout, interruption, retry, and partial-run recovery. Evidence is written under `starter/runs/`, and each canary summary now includes typed canary metadata, scenario rollups, `PI_VERSION`, model, commit SHA, and referenced run directories. Real `managed_rpc` interception canaries remain pending a real transport adapter.
 
 For a real policy-candidate promotion check, use [`.github/workflows/real-policy-candidate-canary.yml`](../../.github/workflows/real-policy-candidate-canary.yml). It runs a baseline real-`pi` canary, captures a replay corpus, reruns the canary and replay benchmark with a temporarily activated policy candidate manifest, and emits a typed `policy-candidate-report.json`.
 
@@ -477,6 +477,7 @@ If `HARNESS_BENCHMARK_REPORT` and `HARNESS_CANARY_SUMMARY_GLOB` are set, `starte
 
 Set `HARNESS_REPLAY_REPORT` and `HARNESS_FAULT_REPORT` as well when building a promotion-ready bundle so replay and fault-injection evidence are attached to the same release package.
 Set `HARNESS_POLICY_CANDIDATE_REPORT` as well when an active policy candidate is part of the promotion proof.
+Use `--canary-kind real_cli` or `--canary-kind real_managed_rpc` when you want verification against a specific canary track; leaving it unset keeps the current mixed-track behavior.
 
 For automation-facing failure handling, use `outputs/run_manifest.json.primary_error_code` and `outputs/run_manifest.json.failure_classifications`. The legacy aggregate `error_code` remains for compatibility, and the raw evidence in `score.json`, `run-events.jsonl`, `transcript.jsonl`, and `pi.stderr.log` remains the richer source of truth.
 

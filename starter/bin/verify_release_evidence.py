@@ -14,11 +14,18 @@ from typing import Any
 
 GITHUB_API_HOST = "api.github.com"
 PYTHON_VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
+KNOWN_CANARY_KINDS = {"real_cli", "real_managed_rpc"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify Bitterless Harness release evidence.")
     parser.add_argument("--summary-glob", default=None, help="glob for local canary summaries")
+    parser.add_argument(
+        "--canary-kind",
+        choices=sorted(KNOWN_CANARY_KINDS),
+        default=None,
+        help="optional canary kind filter for release verification",
+    )
     parser.add_argument("--github-repo", default=None, help="owner/repo for GitHub API lookup")
     parser.add_argument(
         "--workflow-file",
@@ -218,6 +225,65 @@ def load_github_summaries(args: argparse.Namespace) -> list[dict[str, Any]]:
     return summaries
 
 
+def normalize_canary_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(summary)
+    canary_kind = str(normalized.get("canary_kind") or "real_cli").strip() or "real_cli"
+    transport_mode = str(normalized.get("transport_mode") or "cli_json").strip() or "cli_json"
+    interception_proven = normalized.get("interception_proven")
+    normalized["canary_kind"] = canary_kind
+    normalized["transport_mode"] = transport_mode
+    normalized["interception_proven"] = (
+        bool(interception_proven) if isinstance(interception_proven, bool) else False
+    )
+    return normalized
+
+
+def filter_summaries_by_kind(
+    summaries: list[dict[str, Any]],
+    *,
+    canary_kind: str | None,
+) -> list[dict[str, Any]]:
+    normalized = [normalize_canary_summary(summary) for summary in summaries]
+    if not canary_kind:
+        return normalized
+    return [summary for summary in normalized if summary.get("canary_kind") == canary_kind]
+
+
+def summarize_tracks(summaries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    tracks: dict[str, dict[str, Any]] = {}
+    for summary in [normalize_canary_summary(item) for item in summaries]:
+        canary_kind = str(summary.get("canary_kind") or "real_cli")
+        generated_at = summary.get("generated_at")
+        entry = tracks.setdefault(
+            canary_kind,
+            {
+                "canary_kind": canary_kind,
+                "transport_mode": summary.get("transport_mode"),
+                "interception_proven": bool(summary.get("interception_proven", False)),
+                "total_runs": 0,
+                "passing_runs": 0,
+                "failing_runs": 0,
+                "freshest_generated_at": None,
+                "oldest_generated_at": None,
+            },
+        )
+        entry["total_runs"] += 1
+        if summary.get("overall_ok") is True:
+            entry["passing_runs"] += 1
+        else:
+            entry["failing_runs"] += 1
+        if generated_at:
+            if not entry["freshest_generated_at"] or parse_iso(str(generated_at)) > parse_iso(
+                str(entry["freshest_generated_at"])
+            ):
+                entry["freshest_generated_at"] = generated_at
+            if not entry["oldest_generated_at"] or parse_iso(str(generated_at)) < parse_iso(
+                str(entry["oldest_generated_at"])
+            ):
+                entry["oldest_generated_at"] = generated_at
+    return tracks
+
+
 def select_recent_summaries(
     summaries: list[dict[str, Any]],
     *,
@@ -241,16 +307,21 @@ def validate_summaries(
     freshness_hours: int,
     min_pass_rate: float,
     expected_pi: str,
+    canary_kind: str | None = None,
 ) -> dict[str, Any]:
+    normalized = [normalize_canary_summary(summary) for summary in summaries]
+    tracks = summarize_tracks(normalized)
+    filtered = filter_summaries_by_kind(normalized, canary_kind=canary_kind)
     selected = select_recent_summaries(
-        summaries,
+        filtered,
         min_runs=min_runs,
         freshness_hours=freshness_hours,
     )
     if len(selected) < min_runs:
+        kind_text = f" for canary kind {canary_kind}" if canary_kind else ""
         raise SystemExit(
             "insufficient fresh canary evidence: "
-            f"found {len(selected)} summary file(s), need {min_runs}"
+            f"found {len(selected)} summary file(s){kind_text}, need {min_runs}"
         )
 
     if any(str(summary.get("supported_pi_version", "")) != expected_pi for summary in selected):
@@ -271,12 +342,14 @@ def validate_summaries(
 
     return {
         "passed": True,
+        "canary_kind": canary_kind,
         "selected_runs": len(selected),
         "pass_rate": round(pass_rate, 2),
         "freshest_generated_at": selected[0].get("generated_at"),
         "oldest_generated_at": selected[-1].get("generated_at"),
         "supported_pi_version": expected_pi,
         "git_shas": [summary.get("git_sha") for summary in selected],
+        "tracks": tracks,
     }
 
 
@@ -401,6 +474,7 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
         freshness_hours=max(1, args.freshness_hours),
         min_pass_rate=max(0.0, min(1.0, args.min_pass_rate)),
         expected_pi=expected_pi,
+        canary_kind=args.canary_kind,
     )
 
     benchmark_report = None
@@ -474,6 +548,8 @@ def build_release_gate_report(args: argparse.Namespace) -> dict[str, Any]:
         },
         "summary": {
             "selected_canary_runs": canary_report.get("selected_runs"),
+            "requested_canary_kind": args.canary_kind,
+            "canary_tracks": canary_report.get("tracks", {}),
             "benchmark_gated_sections": benchmark_report.get("gated_sections", []),
             "expected_pi_version": expected_pi,
             "expected_python_policy": python_version_policy(expected_python),
