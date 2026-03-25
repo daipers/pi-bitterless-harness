@@ -840,10 +840,7 @@ def retrieval_candidate_is_dense(retrieval_candidate: dict[str, Any] | None) -> 
     return (
         str(runtime.get("retriever_version", "")) == "dense-hashed-shared-encoder-v1"
         or (isinstance(stage1, dict) and str(stage1.get("type", "")) == "dense-v1")
-        or (
-            isinstance(retriever, dict)
-            and str(retriever.get("retriever_type", "")) == "dense-v1"
-        )
+        or (isinstance(retriever, dict) and str(retriever.get("retriever_type", "")) == "dense-v1")
     )
 
 
@@ -947,8 +944,7 @@ def dense_stage1_ranking(
         "scores": {run_id: score for run_id, score in limited},
         "ordered_run_ids": [run_id for run_id, _ in limited],
         "top_scores": [
-            {"run_id": run_id, "dense_stage1_score": score}
-            for run_id, score in limited[:5]
+            {"run_id": run_id, "dense_stage1_score": score} for run_id, score in limited[:5]
         ],
         "stage1_k": stage1_k,
         "cache_root": str(cache_root),
@@ -1143,11 +1139,14 @@ def score_index_entry(
         except Exception:
             encoder_runtime = None
         if encoder_runtime is not None:
-            linear_score = score_pair(
-                candidate_query_text(query),
-                candidate_document_text(entry),
-                runtime=encoder_runtime,
-            ) + bias
+            linear_score = (
+                score_pair(
+                    candidate_query_text(query),
+                    candidate_document_text(entry),
+                    runtime=encoder_runtime,
+                )
+                + bias
+            )
             usefulness_probability = round(sigmoid(linear_score), 6)
             candidate_score = round(float(linear_score), 6)
         else:

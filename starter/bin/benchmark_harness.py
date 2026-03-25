@@ -869,9 +869,7 @@ def benchmark_fault_injection(
                     "evidence": {
                         "manifest": manifest,
                         "score": score_payload,
-                        "event_excerpt": excerpt_lines(
-                            run_dir / "run-events.jsonl", line_limit=10
-                        ),
+                        "event_excerpt": excerpt_lines(run_dir / "run-events.jsonl", line_limit=10),
                         "transcript_excerpt": excerpt_lines(
                             run_dir / "transcript.jsonl", line_limit=10
                         ),

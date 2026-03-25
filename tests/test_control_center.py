@@ -21,11 +21,11 @@ def _make_repo_root(tmp_path: pathlib.Path, name: str = "repo") -> pathlib.Path:
         "new-task.sh": (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            "profile=\"strict\"\n"
+            'profile="strict"\n'
             "while [[ $# -gt 0 ]]; do\n"
-            "  case \"$1\" in\n"
+            '  case "$1" in\n'
             "    --profile)\n"
-            "      profile=\"$2\"\n"
+            '      profile="$2"\n'
             "      shift 2\n"
             "      ;;\n"
             "    *)\n"
@@ -33,11 +33,11 @@ def _make_repo_root(tmp_path: pathlib.Path, name: str = "repo") -> pathlib.Path:
             "      ;;\n"
             "  esac\n"
             "done\n"
-            "title=\"$*\"\n"
+            'title="$*"\n'
             "slug=\"$(printf '%s' \"$title\" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9[:space:]-' | tr ' ' '-')\"\n"
-            "run_id=\"chat-${slug:-task}\"\n"
-            "run_dir=\"$(cd \"$(dirname \"$0\")/..\" && pwd)/runs/${run_id}\"\n"
-            "mkdir -p \"$run_dir/outputs\" \"$run_dir/score\" \"$run_dir/home\" \"$run_dir/session\"\n"
+            'run_id="chat-${slug:-task}"\n'
+            'run_dir="$(cd "$(dirname "$0")/.." && pwd)/runs/${run_id}"\n'
+            'mkdir -p "$run_dir/outputs" "$run_dir/score" "$run_dir/home" "$run_dir/session"\n'
             "cat > \"$run_dir/task.md\" <<'EOF'\n"
             "# Task\n"
             "stub\n\n"
@@ -47,9 +47,9 @@ def _make_repo_root(tmp_path: pathlib.Path, name: str = "repo") -> pathlib.Path:
             "```\n"
             "EOF\n"
             "printf '# Run\\n' > \"$run_dir/RUN.md\"\n"
-            "printf '{\"execution_profile\":\"%s\"}\\n' \"$profile\" > \"$run_dir/run.contract.json\"\n"
+            'printf \'{"execution_profile":"%s"}\\n\' "$profile" > "$run_dir/run.contract.json"\n'
             "printf 'new\\n' > \"$run_dir/run.state\"\n"
-            "echo \"runs/${run_id}\"\n"
+            'echo "runs/${run_id}"\n'
         ),
         "run-task.sh": "#!/bin/sh\nexit 0\n",
         "orchestrator.py": "#!/bin/sh\nexit 0\n",
@@ -57,21 +57,21 @@ def _make_repo_root(tmp_path: pathlib.Path, name: str = "repo") -> pathlib.Path:
         "archive-run-evidence.sh": (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            "run_dir=\"$1\"\n"
-            "archive_path=\"${2:-${run_dir%/}.tgz}\"\n"
-            "tar -czf \"$archive_path\""
-            " -C \"$(dirname \"$run_dir\")\""
-            " \"$(basename \"$run_dir\")\"\n"
-            "echo \"$archive_path\"\n"
+            'run_dir="$1"\n'
+            'archive_path="${2:-${run_dir%/}.tgz}"\n'
+            'tar -czf "$archive_path"'
+            ' -C "$(dirname "$run_dir")"'
+            ' "$(basename "$run_dir")"\n'
+            'echo "$archive_path"\n'
         ),
         "restore-run-evidence.sh": (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            "archive_path=\"$1\"\n"
-            "destination_dir=\"$2\"\n"
-            "mkdir -p \"$destination_dir\"\n"
-            "tar -xzf \"$archive_path\" -C \"$destination_dir\"\n"
-            "echo \"$destination_dir\"\n"
+            'archive_path="$1"\n'
+            'destination_dir="$2"\n'
+            'mkdir -p "$destination_dir"\n'
+            'tar -xzf "$archive_path" -C "$destination_dir"\n'
+            'echo "$destination_dir"\n'
         ),
         "check-supported-runtime.sh": (
             "#!/usr/bin/env bash\n"
@@ -80,7 +80,7 @@ def _make_repo_root(tmp_path: pathlib.Path, name: str = "repo") -> pathlib.Path:
             "  cat .runtime-check-fail >&2\n"
             "  exit 1\n"
             "fi\n"
-            "echo \"supported runtime check passed: python 3.12.9, pi 0.61.1\"\n"
+            'echo "supported runtime check passed: python 3.12.9, pi 0.61.1"\n'
         ),
     }
     for rel, contents in script_payloads.items():
@@ -148,25 +148,32 @@ def _write_canary_summary(
     suffix: str = "latest",
     finished_at: str = "2026-03-23T12:00:00Z",
     overall_ok: bool = True,
+    canary_kind: str | None = None,
 ) -> pathlib.Path:
     path = runs_root / f"real-canary-{suffix}.summary.json"
-    path.write_text(
-        json.dumps(
+    payload = {
+        "summary_version": "v2",
+        "generated_at": finished_at,
+        "finished_at": finished_at,
+        "overall_ok": overall_ok,
+        "scenario_totals": {
+            "total": 6,
+            "passed": 6 if overall_ok else 5,
+            "failed": 0 if overall_ok else 1,
+        },
+    }
+    if canary_kind is not None:
+        payload.update(
             {
-                "summary_version": "v2",
-                "generated_at": finished_at,
-                "finished_at": finished_at,
-                "overall_ok": overall_ok,
-                "scenario_totals": {
-                    "total": 6,
-                    "passed": 6 if overall_ok else 5,
-                    "failed": 0 if overall_ok else 1,
-                },
+                "summary_version": "v3",
+                "canary_kind": canary_kind,
+                "transport_mode": "managed_rpc"
+                if canary_kind == "real_managed_rpc"
+                else "cli_json",
+                "interception_proven": canary_kind == "real_managed_rpc",
             }
         )
-        + "\n",
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     return path
 
 
@@ -306,8 +313,7 @@ def test_startup_preflight_fails_for_missing_required_script(
 
     assert report.ok is False
     assert any(
-        "required script is missing" in issue.message
-        for issue in report.repo_reports[0].issues
+        "required script is missing" in issue.message for issue in report.repo_reports[0].issues
     )
 
 
@@ -389,7 +395,9 @@ def test_repo_supervisor_start_stop_restart_and_backoff(
 
     supervisor = cclib.RepoSupervisor(repo)
 
-    assert supervisor.start() == "orchestrator started"
+    start_outcome = supervisor.start()
+    assert start_outcome.status == "completed"
+    assert start_outcome.message == "orchestrator started"
     assert popen_calls[0]["command"] == [
         "python3",
         str(repo_root / "starter" / "bin" / "orchestrator.py"),
@@ -421,9 +429,13 @@ def test_repo_supervisor_start_stop_restart_and_backoff(
     assert supervisor.snapshot().state == "running"
     assert supervisor.restart_failures == 1
 
-    assert supervisor.restart() == "orchestrator restarted"
+    restart_outcome = supervisor.restart()
+    assert restart_outcome.status == "completed"
+    assert restart_outcome.message == "orchestrator restarted"
     assert len(popen_calls) == 3
-    assert supervisor.stop() == "orchestrator stopped"
+    stop_outcome = supervisor.stop()
+    assert stop_outcome.status == "completed"
+    assert stop_outcome.message == "orchestrator stopped"
     assert supervisor.snapshot().state == "stopped"
     status_payload = json.loads(supervisor.status_path.read_text(encoding="utf-8"))
     assert status_payload["state"] == "stopped"
@@ -453,8 +465,9 @@ def test_repo_supervisor_records_launch_failure_and_crash_loop(
 
     supervisor = cclib.RepoSupervisor(repo)
 
-    message = supervisor.start()
-    assert "launch failed" in message
+    outcome = supervisor.start()
+    assert outcome.status == "failed"
+    assert "launch failed" in outcome.message
     assert supervisor.last_error == "launch failed: OSError: boom"
     assert supervisor.snapshot().state == "backoff"
 
@@ -507,7 +520,9 @@ def test_repo_supervisor_rotates_large_logs_before_launch(
     supervisor.stderr_path.write_bytes(b"y" * (cclib.ORCHESTRATOR_LOG_ROTATE_BYTES + 10))
     monkeypatch.setattr(cclib.subprocess, "Popen", FakeProcess)
 
-    assert supervisor.start() == "orchestrator started"
+    start_outcome = supervisor.start()
+    assert start_outcome.status == "completed"
+    assert start_outcome.message == "orchestrator started"
     assert supervisor.stdout_path.with_name("orchestrator.stdout.log.1").exists()
     assert supervisor.stderr_path.with_name("orchestrator.stderr.log.1").exists()
 
@@ -570,13 +585,17 @@ def test_control_center_service_collects_rows_and_safe_actions(
     assert snapshot.totals["in_flight"] == 1
     assert "Top failure causes" in service.repo_health_text("alpha")
 
-    assert service.cancel_run("alpha", "run-queued") == "cancellation requested for run-queued"
+    cancel_outcome = service.cancel_run("alpha", "run-queued")
+    assert cancel_outcome.status == "completed"
+    assert cancel_outcome.message == "cancellation requested for run-queued"
     assert (queued_run / ".orchestrator-cancel").exists()
 
     (queued_run / ".orchestrator-cancel").unlink()
     (orchestrator_root / "run_queue.jsonl").write_text("", encoding="utf-8")
     service.refresh()
-    assert service.enqueue_run("alpha", "run-queued") == "enqueued run-queued"
+    enqueue_outcome = service.enqueue_run("alpha", "run-queued")
+    assert enqueue_outcome.status == "completed"
+    assert enqueue_outcome.message == "enqueued run-queued"
     queue_entries = harvester.read_queue_entries(orchestrator_root / "run_queue.jsonl")
     assert queue_entries["run-queued"]["worker_id"] == "control-center"
     assert (queued_run / "run.state").read_text(encoding="utf-8").strip() == "queued"
@@ -606,7 +625,9 @@ def test_control_center_service_collects_rows_and_safe_actions(
             self.returncode = -9
 
     monkeypatch.setattr(cclib.subprocess, "Popen", FakeProcess)
-    assert service.rerun_run("alpha", "run-failed") == "rerun run-failed started"
+    rerun_outcome = service.rerun_run("alpha", "run-failed")
+    assert rerun_outcome.status == "started"
+    assert rerun_outcome.message == "rerun run-failed started"
     supervisor = service.supervisors["alpha"]
     assert "rerun:run-failed" in supervisor.active_commands
     managed = supervisor.active_commands["rerun:run-failed"]
@@ -633,7 +654,9 @@ def test_control_center_service_archive_restore_round_trip(tmp_path: pathlib.Pat
     service = cclib.ControlCenterService(config)
     service.refresh()
 
-    assert service.archive_run("alpha", "run-archive") == "archive run-archive started"
+    archive_outcome = service.archive_run("alpha", "run-archive")
+    assert archive_outcome.status == "started"
+    assert archive_outcome.message == "archive run-archive started"
     _poll_supervisor_until_idle(service.supervisors["alpha"])
     service.refresh()
     archive_path = service.archive_path("alpha", "run-archive")
@@ -641,7 +664,9 @@ def test_control_center_service_archive_restore_round_trip(tmp_path: pathlib.Pat
     assert "archive run-archive" in service.repo_health_text("alpha")
 
     shutil.rmtree(run_dir)
-    assert service.restore_evidence("alpha", "run-archive") == "restore run-archive started"
+    restore_outcome = service.restore_evidence("alpha", "run-archive")
+    assert restore_outcome.status == "started"
+    assert restore_outcome.message == "restore run-archive started"
     _poll_supervisor_until_idle(service.supervisors["alpha"])
     assert run_dir.exists()
     assert (run_dir / "score.json").exists()
@@ -671,7 +696,9 @@ def test_runtime_check_failure_surfaces_in_repo_health(tmp_path: pathlib.Path) -
     service = cclib.ControlCenterService(config)
     service.refresh()
 
-    assert service.runtime_check("alpha") == "runtime check started"
+    runtime_outcome = service.runtime_check("alpha")
+    assert runtime_outcome.status == "started"
+    assert runtime_outcome.message == "runtime check started"
     _poll_supervisor_until_idle(service.supervisors["alpha"])
     snapshot = service.refresh()
 
@@ -698,6 +725,13 @@ def test_harvester_emits_operator_summary_signals(tmp_path: pathlib.Path, monkey
         finished_at="2026-03-23T12:00:00Z",
         overall_ok=True,
     )
+    _write_canary_summary(
+        runs_root,
+        suffix="managed",
+        finished_at="2026-03-23T11:00:00Z",
+        overall_ok=True,
+        canary_kind="real_managed_rpc",
+    )
     stale_mtime = time.time() - (20 * 60)
     old_run.touch()
     os.utime(old_run, (stale_mtime, stale_mtime))
@@ -712,9 +746,13 @@ def test_harvester_emits_operator_summary_signals(tmp_path: pathlib.Path, monkey
     assert payload["top_failure_causes"][0]["code"] == "eval_failed"
     assert payload["canary_status"]["latest_summary_path"].endswith(".summary.json")
     assert payload["canary_status"]["all_passed"] is True
+    assert payload["canary_status"]["tracks"]["real_cli"]["transport_mode"] == "cli_json"
+    assert payload["canary_status"]["tracks"]["real_managed_rpc"]["interception_proven"] is True
 
 
-def test_control_center_service_builds_filter_actions_alerts_and_timeline(tmp_path: pathlib.Path) -> None:
+def test_control_center_service_builds_filter_actions_alerts_and_timeline(
+    tmp_path: pathlib.Path,
+) -> None:
     repo_root = _make_repo_root(tmp_path, "alpha")
     runs_root = repo_root / "starter" / "runs"
     failed_run = _write_run(
@@ -775,6 +813,17 @@ def test_control_center_service_builds_filter_actions_alerts_and_timeline(tmp_pa
     assert service.artifact_recommendation("alpha", "run-fail").reason == (
         "Opened Score because this run failed."
     )
+    explainer = service.build_action_explainer("alpha", "run-fail", "open-best-artifact")
+    assert explainer.expect_next == "Opened Score because this run failed."
+    assert explainer.risk_label == "Safe"
+    cancel_explainer = service.build_action_explainer("alpha", "run-fail", "cancel-run")
+    assert cancel_explainer.enabled is False
+    assert cancel_explainer.disabled_reason == "run already terminal"
+    guidance = service.build_selection_guidance("alpha", "run-fail")
+    assert guidance.safe_next_step == "Open Best Artifact"
+    assert "safest next step" in guidance.status_summary
+    assert "runtime check failed" in service.build_repo_guidance("alpha").lower()
+    assert "selected run failed" in service.build_run_guidance("alpha", "run-fail").lower()
     assert service.repo_health_badge("alpha") == "[!]"
     assert service.repo_queue_badge("alpha") == "[HOT]"
     assert service.run_state_badge("alpha", "run-fail") == "[FAIL]"
@@ -786,7 +835,9 @@ def test_control_center_service_builds_filter_actions_alerts_and_timeline(tmp_pa
     assert "Canary stale" in labels
     assert "Queue backing up" in labels
     assert "Retry ceiling hit" in labels
-    alert_actions = {alert.label: (alert.action.label if alert.action is not None else "") for alert in alerts}
+    alert_actions = {
+        alert.label: (alert.action.label if alert.action is not None else "") for alert in alerts
+    }
     assert alert_actions["Runtime check failed"] == "Run Runtime Check"
     assert alert_actions["Queue backing up"] == "Filter Queued"
     assert alert_actions["Retry ceiling hit"] == "Open Best Artifact"
@@ -866,7 +917,9 @@ def test_control_center_service_chat_follow_ups_are_recorded(tmp_path: pathlib.P
 def test_chat_read_only_query_and_pending_confirmation(tmp_path: pathlib.Path) -> None:
     repo_root = _make_repo_root(tmp_path, "alpha")
     runs_root = repo_root / "starter" / "runs"
-    _write_run(runs_root, "run-fail", state="failed", overall_pass=False, primary_error_code="eval_failed")
+    _write_run(
+        runs_root, "run-fail", state="failed", overall_pass=False, primary_error_code="eval_failed"
+    )
     service = cclib.ControlCenterService(
         cclib.ControlCenterConfig(
             ui=cclib.UIConfig(),
@@ -911,7 +964,9 @@ def test_chat_confirm_executes_pending_action_and_clears_state(tmp_path: pathlib
             source_path=None,
         )
     )
-    service.restart_repo = lambda repo_id: f"restarted {repo_id}"  # type: ignore[method-assign]
+    service.restart_repo = lambda repo_id: cclib.ActionOutcome.completed(  # type: ignore[method-assign]
+        f"restarted {repo_id}"
+    )
 
     service.submit_chat_message("alpha", "restart repo")
     result = service.submit_chat_message("alpha", "confirm")
@@ -988,6 +1043,206 @@ def test_control_center_main_check_mode_returns_exit_codes(
     assert "blockers found" in capsys.readouterr().out
 
 
+def test_control_center_model_complete_routes_to_events(tmp_path: pathlib.Path) -> None:
+    pytest.importorskip("textual")
+    from control_center import ControlCenterApp
+    from textual.widgets import DataTable, Static
+
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    _write_run(runs_root, "run-model-complete", state="model_complete", overall_pass=None)
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                ),
+            ),
+            source_path=None,
+        )
+    )
+    service.refresh()
+
+    assert service.artifact_recommendation("alpha", "run-model-complete").tab_id == "tab-events"
+    assert "Events is the safest place" in service.build_run_guidance("alpha", "run-model-complete")
+
+    async def runner() -> None:
+        app = ControlCenterApp(service)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            run_table = app.query_one("#run-table", DataTable)
+            assert "Next: Events" in str(run_table.get_row_at(0)[1])
+            await pilot.press("o")
+            await pilot.pause()
+            assert app.query_one("#detail-tabs").active == "tab-events"
+            assert "Opened Events because this run is still in progress." in str(
+                app.query_one("#artifact-note", Static).renderable
+            )
+
+    asyncio.run(runner())
+
+
+def test_control_center_force_restore_confirms_once_and_executes(tmp_path: pathlib.Path) -> None:
+    pytest.importorskip("textual")
+    from textual.widgets import Button, Input, Static
+
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    _write_run(runs_root, "run-restore", state="failed", overall_pass=False)
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                ),
+            ),
+            source_path=None,
+        )
+    )
+    service.refresh()
+
+    restore_calls: list[tuple[str, str, str, bool]] = []
+    service.restore_evidence = (  # type: ignore[method-assign]
+        lambda repo_id, run_id, archive_path="", force=False: (
+            restore_calls.append((repo_id, run_id, archive_path, force))
+            or cclib.ActionOutcome.started("restore run-restore started")
+        )
+    )
+
+    async def runner() -> None:
+        app = control_center.ControlCenterApp(service)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            command_input = app.query_one("#command-input", Input)
+            app._open_input("command", "restore-evidence run-restore --force", "restore")
+            await pilot.pause()
+            command_input.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "Restore evidence for `run-restore`" in str(
+                app.screen.query_one("#confirm-title", Static).renderable
+            )
+            app.screen.query_one("#confirm-yes", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert restore_calls == [("alpha", "run-restore", "", True)]
+            assert "restore run-restore started" in str(app.query_one("#status-line").renderable)
+
+    asyncio.run(runner())
+
+
+def test_control_center_failed_runtime_check_uses_failed_feedback(tmp_path: pathlib.Path) -> None:
+    pytest.importorskip("textual")
+
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    _write_run(runs_root, "run-failure", state="failed", overall_pass=False)
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                ),
+            ),
+            source_path=None,
+        )
+    )
+    service.refresh()
+    service.runtime_check = lambda repo_id: cclib.ActionOutcome.failed(  # type: ignore[method-assign]
+        f"runtime check failed for {repo_id}"
+    )
+
+    async def runner() -> None:
+        app = control_center.ControlCenterApp(service)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            action = next(
+                candidate
+                for candidate in service.build_context_actions("alpha", "run-failure")
+                if candidate.id == "runtime-check"
+            )
+            app._execute_ui_action(action)
+            await pilot.pause()
+            status_text = str(app.query_one("#status-line").renderable)
+            recent_activity = str(app.query_one("#recent-activity").renderable)
+            assert "runtime check failed for alpha" in status_text
+            assert "Results will appear in Health." not in status_text
+            assert "FAILED" in recent_activity
+            assert (
+                "Failed runtime check for Alpha. runtime check failed for alpha" in recent_activity
+            )
+
+    asyncio.run(runner())
+
+
+def test_command_picker_executes_selected_duplicate_row(tmp_path: pathlib.Path) -> None:
+    pytest.importorskip("textual")
+    from textual.widgets import Input
+
+    repo_root = _make_repo_root(tmp_path, "alpha")
+    runs_root = repo_root / "starter" / "runs"
+    _write_run(runs_root, "run-failure", state="failed", overall_pass=False)
+    service = cclib.ControlCenterService(
+        cclib.ControlCenterConfig(
+            ui=cclib.UIConfig(),
+            repos=(
+                cclib.RepoConfig(
+                    id="alpha",
+                    name="Alpha",
+                    root=repo_root,
+                    runs_root=runs_root,
+                    auto_start=False,
+                ),
+            ),
+            source_path=None,
+        )
+    )
+    service.refresh()
+
+    async def runner() -> None:
+        app = control_center.ControlCenterApp(service)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._recent_picker_actions = [
+                cclib.UIAction(
+                    id="open-health",
+                    label="Open Health Recent",
+                    kind="open",
+                    scope="navigation",
+                    command_text="open help",
+                    open_tab="tab-help",
+                    hint="Duplicate id row that should still execute help.",
+                    risk_label="Safe",
+                )
+            ]
+            await pilot.press(":")
+            await pilot.pause()
+            picker_input = app.screen.query_one("#picker-query", Input)
+            picker_input.focus()
+            for key in "Open Health Recent":
+                await pilot.press("space" if key == " " else key)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.query_one("#detail-tabs").active == "tab-help"
+
+    asyncio.run(runner())
+
+
 def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) -> None:
     pytest.importorskip("textual")
     from control_center import ControlCenterApp
@@ -997,9 +1252,15 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
     repo_two = _make_repo_root(tmp_path, "beta")
     _write_run(repo_one / "starter" / "runs", "run-success", state="complete", overall_pass=True)
     _write_run(repo_one / "starter" / "runs", "run-pending", state="queued", overall_pass=None)
-    queued_a = _write_run(repo_two / "starter" / "runs", "run-queued-a", state="queued", overall_pass=None)
-    queued_b = _write_run(repo_two / "starter" / "runs", "run-queued-b", state="queued", overall_pass=None)
-    queued_c = _write_run(repo_two / "starter" / "runs", "run-queued-c", state="queued", overall_pass=None)
+    queued_a = _write_run(
+        repo_two / "starter" / "runs", "run-queued-a", state="queued", overall_pass=None
+    )
+    queued_b = _write_run(
+        repo_two / "starter" / "runs", "run-queued-b", state="queued", overall_pass=None
+    )
+    queued_c = _write_run(
+        repo_two / "starter" / "runs", "run-queued-c", state="queued", overall_pass=None
+    )
     failed_run = _write_run(
         repo_two / "starter" / "runs",
         "run-failure",
@@ -1053,14 +1314,26 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
 
     service.supervisors["beta"].last_runtime_check_ok = False
     service.supervisors["beta"].last_runtime_check_message = "unsupported runtime"
-    service.start_repo = lambda repo_id: f"started {repo_id}"  # type: ignore[method-assign]
-    service.stop_repo = lambda repo_id: f"stopped {repo_id}"  # type: ignore[method-assign]
-    service.restart_repo = lambda repo_id: f"restarted {repo_id}"  # type: ignore[method-assign]
-    service.runtime_check = lambda repo_id: f"runtime {repo_id}"  # type: ignore[method-assign]
-    service.archive_run = lambda repo_id, run_id: f"archive {run_id}"  # type: ignore[method-assign]
-    service.rerun_run = lambda repo_id, run_id: f"reran {run_id}"  # type: ignore[method-assign]
+    service.start_repo = lambda repo_id: cclib.ActionOutcome.completed(  # type: ignore[method-assign]
+        f"started {repo_id}"
+    )
+    service.stop_repo = lambda repo_id: cclib.ActionOutcome.completed(  # type: ignore[method-assign]
+        f"stopped {repo_id}"
+    )
+    service.restart_repo = lambda repo_id: cclib.ActionOutcome.completed(  # type: ignore[method-assign]
+        f"restarted {repo_id}"
+    )
+    service.runtime_check = lambda repo_id: cclib.ActionOutcome.started(  # type: ignore[method-assign]
+        f"runtime {repo_id}"
+    )
+    service.archive_run = lambda repo_id, run_id: cclib.ActionOutcome.started(  # type: ignore[method-assign]
+        f"archive {run_id}"
+    )
+    service.rerun_run = lambda repo_id, run_id: cclib.ActionOutcome.started(  # type: ignore[method-assign]
+        f"reran {run_id}"
+    )
     service.restore_evidence = (  # type: ignore[method-assign]
-        lambda repo_id, run_id, archive_path="", force=False: (
+        lambda repo_id, run_id, archive_path="", force=False: cclib.ActionOutcome.started(
             f"restore {run_id} {archive_path} {force}"
         )
     )
@@ -1110,12 +1383,19 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             await pilot.pause()
             assert app.selected_run_id == "run-failure"
             assert "run-failure" in str(app.query_one("#target-card", Static).renderable)
+            assert "Safe next step: Open Best Artifact" in str(
+                app.query_one("#target-card", Static).renderable
+            )
+            assert "Why now:" in str(app.query_one("#target-card", Static).renderable)
             alert_text = str(app.query_one("#alert-banner", Static).renderable)
             assert "Runtime check failed" in alert_text
             assert "Canary stale" in alert_text
             assert "Queue backing up" in alert_text
             assert "Retry ceiling hit" in alert_text
             assert "Failed" in str(app.query_one("#timeline-strip", Static).renderable)
+            assert "Selected run failed. Reviewing Score is the safest next step." in str(
+                app.query_one("#summary-bar", Static).renderable
+            )
             assert {
                 str(app.query_one("#alert-action-0", Button).label),
                 str(app.query_one("#alert-action-1", Button).label),
@@ -1141,8 +1421,19 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             ]
             assert "Rerun" in " ".join(action_labels)
             assert _action_slot(app, "Cancel").disabled is True
-            assert "Open the artifact that best explains" in str(app.query_one("#action-hint").renderable)
+            assert "Open the artifact that best explains" in str(
+                app.query_one("#action-hint").renderable
+            )
+            assert "What This Does" in str(app.query_one("#action-explainer").renderable)
+            assert "Use when:" in str(app.query_one("#action-explainer").renderable)
+            assert "Impact:" in str(app.query_one("#action-explainer").renderable)
+            assert "Next: Opened Score because this run failed." in str(
+                app.query_one("#action-explainer").renderable
+            )
+            assert "State: Ready" in str(app.query_one("#action-explainer").renderable)
             assert app.query_one("#saved-view-failures", Button).variant == "default"
+            assert "Blocked: stopped" in str(repo_table.get_row_at(1)[1])
+            assert "Next: Score" in str(run_table.get_row_at(0)[1])
 
             app.query_one("#saved-view-failures", Button).focus()
             await pilot.press("enter")
@@ -1159,7 +1450,9 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             await pilot.press("o")
             await pilot.pause()
             assert app.query_one("#detail-tabs").active == "tab-score"
-            assert "Opened Score because this run failed." in str(app.query_one("#artifact-note").renderable)
+            assert "Opened Score because this run failed." in str(
+                app.query_one("#artifact-note").renderable
+            )
 
             app.query_one("#filter-failed", Button).focus()
             await pilot.press("enter")
@@ -1193,7 +1486,10 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             await pilot.pause()
             assert str(app.query_one("#chat-followup-0", Button).label) == "Focus Newest Failed Run"
             assert str(app.query_one("#chat-followup-1", Button).label) == "Filter Failed"
-            assert str(app.query_one("#chat-followup-2", Button).label) == "Open Score for Newest Failed"
+            assert (
+                str(app.query_one("#chat-followup-2", Button).label)
+                == "Open Score for Newest Failed"
+            )
 
             app.query_one("#chat-followup-1", Button).focus()
             await pilot.press("enter")
@@ -1203,13 +1499,43 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
 
             await pilot.press(":")
             await pilot.pause()
-            assert str(app.screen.query_one("#picker-section-0", Static).renderable) == "Recommended Now"
-            assert str(app.screen.query_one("#picker-section-1", Static).renderable) == "Recent Commands"
-            assert str(app.screen.query_one("#picker-section-2", Static).renderable) == "Saved Views"
+            assert (
+                str(app.screen.query_one("#picker-section-0", Static).renderable)
+                == "Recommended Now"
+            )
+            assert (
+                str(app.screen.query_one("#picker-section-1", Static).renderable)
+                == "Recent Commands"
+            )
+            assert (
+                str(app.screen.query_one("#picker-section-2", Static).renderable) == "Saved Views"
+            )
+            assert "[Safe]" in str(app.screen.query_one("#picker-result-0", Button).label)
+            assert "Use when:" in str(app.screen.query_one("#picker-help", Static).renderable)
+            assert "State: Ready" in str(app.screen.query_one("#picker-help", Static).renderable)
             assert app.screen.query_one("#picker-result-0", Button).variant == "primary"
             app.screen.action_cursor_down()
             await pilot.pause()
             assert app.screen.query_one("#picker-result-1", Button).variant == "primary"
+            await pilot.press("escape")
+            await pilot.pause()
+
+            await pilot.press(":")
+            await pilot.pause()
+            picker_input = app.screen.query_one("#picker-query", Input)
+            picker_input.focus()
+            for key in "cancel":
+                await pilot.press(key)
+            await pilot.pause()
+            cancel_result = _picker_result(app.screen, "Cancel")
+            assert "[Careful]" in str(cancel_result.label)
+            assert cancel_result.disabled is True
+            assert "run already terminal" in str(
+                app.screen.query_one("#picker-help", Static).renderable
+            )
+            assert "State: Unavailable" in str(
+                app.screen.query_one("#picker-help", Static).renderable
+            )
             await pilot.press("escape")
             await pilot.pause()
 
@@ -1245,7 +1571,9 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
 
             await pilot.press("f")
             transcript_path = repo_two / "starter" / "runs" / "run-failure" / "transcript.jsonl"
-            transcript_path.write_text('{"type":"message"}\n{"type":"message","text":"tail"}\n', encoding="utf-8")
+            transcript_path.write_text(
+                '{"type":"message"}\n{"type":"message","text":"tail"}\n', encoding="utf-8"
+            )
             app.refresh_data()
             await pilot.pause()
             assert "tail" in str(app.query_one("#transcript-text").renderable)
@@ -1265,7 +1593,9 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             app.screen.query_one("#confirm-yes", Button).focus()
             await pilot.press("enter")
             await pilot.pause()
-            assert "reran run-failure" in str(app.query_one("#status-line").renderable)
+            assert "Watch Events for claim and start progress." in str(
+                app.query_one("#status-line").renderable
+            )
 
             app.query_one("#repo-table", DataTable).focus()
             await pilot.press("k")
@@ -1281,7 +1611,12 @@ def test_control_center_app_filters_and_command_palette(tmp_path: pathlib.Path) 
             assert app.selected_repo_id == "beta"
             assert app.query_one("#detail-tabs").active == "tab-transcript"
             assert "Recent Activity" in str(app.query_one("#recent-activity", Static).renderable)
-            assert "Rerun" in str(app.query_one("#recent-activity", Static).renderable)
+            assert "Opened Transcript for run-failure." in str(
+                app.query_one("#recent-activity", Static).renderable
+            )
+            assert "Queued rerun for run-failure." in str(
+                app.query_one("#recent-activity", Static).renderable
+            )
 
             app.query_one("#chat-input", Input).focus()
             for key in "queue depth":

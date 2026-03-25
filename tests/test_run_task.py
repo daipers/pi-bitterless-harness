@@ -274,8 +274,7 @@ def test_audit_capability_usage_writes_preview_artifact_and_event(tmp_path: path
     assert preview["usage_valid"] is False
     assert preview["usage_path"] == "outputs/subagent-usage.json"
     events = [
-        json.loads(line)
-        for line in runner.event_log_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in runner.event_log_path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(
         event["message"] == "subagent usage violations detected prior to scoring"

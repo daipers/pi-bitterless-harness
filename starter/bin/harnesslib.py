@@ -82,6 +82,7 @@ DEFAULT_GUARDRAIL_HOOKS = {
     "pre_context_build": {"enabled": True, "allow": True},
     "pre_run": {"enabled": True, "allow": True},
     "pre_score_dispatch": {"enabled": True, "allow": True},
+    "pre_subagent_action": {"enabled": True, "allow": True},
     "pre_tool_use": {
         "enabled": True,
         "allow": True,
@@ -534,6 +535,7 @@ def evaluate_policy_guardrail(
         "pre_context_build",
         "pre_run",
         "pre_score_dispatch",
+        "pre_subagent_action",
         "pre_tool_use",
     }:
         return {
@@ -614,6 +616,17 @@ def evaluate_policy_guardrail(
                 "policy_path": context.get("policy_path"),
             }
         )
+    elif hook == "pre_subagent_action":
+        effective_limits.update(
+            {
+                "action_type": context.get("action_type"),
+                "agent_type": context.get("agent_type"),
+                "policy_path": context.get("policy_path"),
+            }
+        )
+        if context.get("blocked", False):
+            allowed = False
+            violations.append("pre_subagent_action.blocked")
     elif hook == "pre_retrieval":
         if not context.get("retrieval_enabled", True):
             allowed = False
@@ -716,8 +729,7 @@ def make_result_template() -> dict[str, Any]:
             {
                 "path": "outputs/retrieval-metrics.json",
                 "description": (
-                    "Metrics snapshot showing the retrieval quality outputs produced by "
-                    "this run."
+                    "Metrics snapshot showing the retrieval quality outputs produced by this run."
                 ),
             }
         ],
@@ -898,12 +910,11 @@ def validate_run_contract(payload: dict[str, Any]) -> list[str]:
         if not isinstance(transport, dict):
             errors.append("transport must be an object")
         else:
-            expected_modes = {"cli_json", "rpc"} if version == RUN_CONTRACT_VERSION_V3 else {"managed_rpc"}
+            expected_modes = (
+                {"cli_json", "rpc"} if version == RUN_CONTRACT_VERSION_V3 else {"managed_rpc"}
+            )
             if transport.get("mode") not in expected_modes:
-                errors.append(
-                    "transport.mode must be one of: "
-                    + ", ".join(sorted(expected_modes))
-                )
+                errors.append("transport.mode must be one of: " + ", ".join(sorted(expected_modes)))
         capabilities = payload.get("capabilities")
         if not isinstance(capabilities, dict):
             errors.append("capabilities must be an object")

@@ -67,11 +67,15 @@ def test_main_writes_v3_cli_summary(tmp_path: pathlib.Path, monkeypatch) -> None
     monkeypatch.setattr(run_real_canary, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(run_real_canary, "base_env", lambda **_: {})
     monkeypatch.setattr(run_real_canary, "git_sha", lambda: "abc123")
-    monkeypatch.setattr(run_real_canary, "scenario_success", lambda env, model: {"run_dir": "success"})
+    monkeypatch.setattr(
+        run_real_canary, "scenario_success", lambda env, model: {"run_dir": "success"}
+    )
     monkeypatch.setattr(
         run_real_canary, "scenario_corrupt_result", lambda env, model: {"run_dir": "corrupt"}
     )
-    monkeypatch.setattr(run_real_canary, "scenario_timeout", lambda env, model: {"run_dir": "timeout"})
+    monkeypatch.setattr(
+        run_real_canary, "scenario_timeout", lambda env, model: {"run_dir": "timeout"}
+    )
     monkeypatch.setattr(
         run_real_canary, "scenario_interrupted", lambda env, model: {"run_dir": "interrupted"}
     )

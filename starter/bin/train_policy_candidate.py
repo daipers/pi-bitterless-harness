@@ -52,7 +52,9 @@ def policy_rows(examples: list[dict[str, Any]]) -> list[tuple[dict[str, Any], di
     return rows
 
 
-def training_summary(rows: list[tuple[dict[str, Any], dict[str, Any]]], *, model: dict[str, Any]) -> dict[str, Any]:
+def training_summary(
+    rows: list[tuple[dict[str, Any], dict[str, Any]]], *, model: dict[str, Any]
+) -> dict[str, Any]:
     predictions = predict_policy_heads(
         model,
         {
@@ -129,7 +131,10 @@ def main(argv: list[str] | None = None) -> int:
             "defaults": defaults,
             "recommendations": {
                 "execution_profile": {"value": defaults["execution_profile"], "confidence": 0.0},
-                "retry_limit": {"value": defaults["retry_policy"]["retry_limit"], "confidence": 0.0},
+                "retry_limit": {
+                    "value": defaults["retry_policy"]["retry_limit"],
+                    "confidence": 0.0,
+                },
                 "retrieval_budget": {"value": defaults["retrieval_budget"], "confidence": 0.0},
                 "benchmark_eligible": {
                     "value": defaults["benchmark_eligibility"],

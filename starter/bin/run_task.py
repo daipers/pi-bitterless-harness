@@ -372,7 +372,9 @@ class RunTaskRunner:
         self.interception_action_log_rel = DEFAULT_INTERCEPTION_ACTION_LOG_PATH
         self.interception_summary: dict[str, Any] = {}
         self.capability_library: dict[str, Any] | None = None
-        self.capability_usage_validation_path = self.run_dir / "outputs" / "subagent-usage-validation.json"
+        self.capability_usage_validation_path = (
+            self.run_dir / "outputs" / "subagent-usage-validation.json"
+        )
         self.capability_usage_validation: dict[str, Any] | None = None
         self.guardrail_decisions: list[dict[str, Any]] = []
         self.guardrails_path = self.run_dir / "outputs" / "guardrails.json"
@@ -944,7 +946,9 @@ class RunTaskRunner:
                 "allowed_profiles": list(self.allowed_subagent_profiles),
                 "selected_profile": self.selected_capability_profile,
                 "interception_enabled": self.interception_enabled,
-                "interception_mode": self.interception_fail_mode if self.interception_enabled else None,
+                "interception_mode": self.interception_fail_mode
+                if self.interception_enabled
+                else None,
                 "action_log_path": (
                     self.interception_action_log_rel if self.interception_enabled else None
                 ),
@@ -1124,9 +1128,7 @@ class RunTaskRunner:
 
         retry_payload, retry_confidence = prediction_payload("retry_policy", "retry_limit")
         retry_limit = (
-            retry_payload.get("retry_limit")
-            if isinstance(retry_payload, dict)
-            else retry_payload
+            retry_payload.get("retry_limit") if isinstance(retry_payload, dict) else retry_payload
         )
         if retry_limit is not None:
             self.policy_candidate_recommendations["retry_limit"] = {
@@ -1562,9 +1564,7 @@ class RunTaskRunner:
             )
         for profile_id in self.allowed_subagent_profiles:
             profile = dict(
-                (self.capability_library or {}).get("subagent_profiles", {}).get(
-                    profile_id, {}
-                )
+                (self.capability_library or {}).get("subagent_profiles", {}).get(profile_id, {})
             )
             transports = set(profile.get("transports", []))
             if self.transport_mode not in transports:
@@ -1781,8 +1781,10 @@ class RunTaskRunner:
                 text=True,
                 bufsize=1,
             )
-            assert process.stdout is not None
-            assert process.stdin is not None
+            if process.stdout is None or process.stdin is None:
+                process.kill()
+                process.wait()
+                raise RuntimeError("managed_rpc requires stdin/stdout pipes")
             for raw_line in process.stdout:
                 stdout_handle.write(raw_line)
                 stdout_handle.flush()
@@ -1794,7 +1796,11 @@ class RunTaskRunner:
                     continue
                 if payload.get("type") != "intercept_request":
                     continue
-                request = dict(payload.get("payload", {})) if isinstance(payload.get("payload"), dict) else dict(payload)
+                request = (
+                    dict(payload.get("payload", {}))
+                    if isinstance(payload.get("payload"), dict)
+                    else dict(payload)
+                )
                 request.setdefault("request_id", payload.get("request_id"))
                 decision = evaluate_intercepted_subagent_action(
                     request,
@@ -2012,9 +2018,7 @@ class RunTaskRunner:
         env["HARNESS_MODEL_CANDIDATE_ID"] = str(
             self.model_candidate_summary.get("candidate_id") or ""
         )
-        env["HARNESS_MODEL_CANDIDATE_MODE"] = str(
-            self.model_candidate_summary.get("mode") or "off"
-        )
+        env["HARNESS_MODEL_CANDIDATE_MODE"] = str(self.model_candidate_summary.get("mode") or "off")
         env["HARNESS_BUNDLE_CANDIDATE_ID"] = str(
             self.bundle_candidate_summary.get("candidate_id") or ""
         )

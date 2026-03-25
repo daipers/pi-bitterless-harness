@@ -22,7 +22,9 @@ def read_events(path: pathlib.Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_runner_score_and_orchestrator_events_match_run_event_contract(tmp_path: pathlib.Path) -> None:
+def test_runner_score_and_orchestrator_events_match_run_event_contract(
+    tmp_path: pathlib.Path,
+) -> None:
     schema = load_schema()
     event_log_path = tmp_path / "runs" / "event-contract" / "run-events.jsonl"
     run_dir = event_log_path.parent

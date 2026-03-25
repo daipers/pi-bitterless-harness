@@ -33,7 +33,9 @@ def write_result(run_dir: pathlib.Path, payload: dict[str, object]) -> None:
     (run_dir / "result.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def write_optional_subagent_usage(run_dir: pathlib.Path, scenario_payload: dict[str, object]) -> None:
+def write_optional_subagent_usage(
+    run_dir: pathlib.Path, scenario_payload: dict[str, object]
+) -> None:
     usage = scenario_payload.get("subagent_usage")
     if not isinstance(usage, dict):
         return

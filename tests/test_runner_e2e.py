@@ -299,9 +299,10 @@ def test_runner_v3_cli_subagent_contract_fails_fast(
         "transport.mode" in completed.stderr
         or "subagent-capable runs require transport.mode" in completed.stderr
     )
-    assert not (run_dir / "transcript.jsonl").exists() or (run_dir / "transcript.jsonl").read_text(
-        encoding="utf-8"
-    ) == ""
+    assert (
+        not (run_dir / "transcript.jsonl").exists()
+        or (run_dir / "transcript.jsonl").read_text(encoding="utf-8") == ""
+    )
 
 
 def test_runner_v3_rpc_materializes_capability_manifest_and_scores_usage(
@@ -465,9 +466,14 @@ def test_runner_async_scoring_surfaces_pre_score_capability_audit(
         for line in (run_dir / "run-events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert manifest["state"] == "score_pending"
-    assert manifest["capabilities"]["usage_validation_path"] == "outputs/subagent-usage-validation.json"
+    assert (
+        manifest["capabilities"]["usage_validation_path"]
+        == "outputs/subagent-usage-validation.json"
+    )
     assert manifest["capabilities"]["usage_valid"] is False
-    assert "subagents.write_not_allowed:focused_reader" in manifest["capabilities"]["usage_violations"]
+    assert (
+        "subagents.write_not_allowed:focused_reader" in manifest["capabilities"]["usage_violations"]
+    )
     assert preview["usage_valid"] is False
     assert "subagents.write_not_allowed:focused_reader" in preview["violations"]
     assert any(
@@ -499,7 +505,9 @@ def test_runner_v4_managed_rpc_happy_path_records_live_interception(
         run_dir,
         "happy_path",
         extra_env={
-            "HARNESS_PI_BIN": str(isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"),
+            "HARNESS_PI_BIN": str(
+                isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"
+            ),
         },
     )
 
@@ -573,7 +581,9 @@ def test_runner_v4_managed_rpc_denial_fails_closed(
         run_dir,
         "happy_path",
         extra_env={
-            "HARNESS_PI_BIN": str(isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"),
+            "HARNESS_PI_BIN": str(
+                isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"
+            ),
         },
     )
 
@@ -610,7 +620,9 @@ def test_runner_v4_contract_failure_blocks_launch_without_interception(
         run_dir,
         "happy_path",
         extra_env={
-            "HARNESS_PI_BIN": str(isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"),
+            "HARNESS_PI_BIN": str(
+                isolated_repo / "tests" / "fixtures" / "fake_managed_rpc_peer.py"
+            ),
         },
     )
 
@@ -645,7 +657,9 @@ def test_runner_v4_requires_managed_rpc_capable_peer(
     )
 
     assert completed.returncode == 2
-    assert "managed_rpc requires a peer that supports pre-execution interception" in completed.stderr
+    assert (
+        "managed_rpc requires a peer that supports pre-execution interception" in completed.stderr
+    )
 
 
 def test_runner_contract_failure_blocks_launch(isolated_repo: pathlib.Path) -> None:

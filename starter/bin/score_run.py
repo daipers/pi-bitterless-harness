@@ -347,7 +347,9 @@ def _load_execution_metadata(context: ScoreContext) -> dict[str, Any]:
         "interception_fail_mode": settings.get("interception_fail_mode"),
         "interception_action_log_path": (
             context.run_dir
-            / str(settings.get("interception_action_log_path") or DEFAULT_INTERCEPTION_ACTION_LOG_PATH)
+            / str(
+                settings.get("interception_action_log_path") or DEFAULT_INTERCEPTION_ACTION_LOG_PATH
+            )
         ),
         "capability_manifest_path": capability_manifest_path,
         "capability_manifest_payload": capability_manifest_payload

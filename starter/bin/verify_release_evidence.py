@@ -195,11 +195,7 @@ def load_local_summaries(pattern: str) -> list[dict[str, Any]]:
         pattern = candidate.name
     else:
         root = repo_root()
-    return [
-        read_json(path)
-        for path in sorted(root.glob(pattern), reverse=True)
-        if path.is_file()
-    ]
+    return [read_json(path) for path in sorted(root.glob(pattern), reverse=True) if path.is_file()]
 
 
 def load_github_summaries(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -335,8 +331,7 @@ def validate_summaries(
         )
 
     if any(
-        int((summary.get("scenario_totals") or {}).get("failed", 0)) > 0
-        for summary in selected
+        int((summary.get("scenario_totals") or {}).get("failed", 0)) > 0 for summary in selected
     ):
         raise SystemExit("canary evidence includes failed scenarios")
 

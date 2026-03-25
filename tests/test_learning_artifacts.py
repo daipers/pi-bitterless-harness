@@ -164,14 +164,14 @@ python3 ../tests/fixtures/pass_eval.py
         (out_root / "learning-datasets.manifest.json").read_text(encoding="utf-8")
     )
     trajectory_rows = (
-        out_root / "trajectory-records.jsonl"
-    ).read_text(encoding="utf-8").splitlines()
+        (out_root / "trajectory-records.jsonl").read_text(encoding="utf-8").splitlines()
+    )
     retrieval_rows = (
-        out_root / "retrieval-examples.jsonl"
-    ).read_text(encoding="utf-8").splitlines()
+        (out_root / "retrieval-examples.jsonl").read_text(encoding="utf-8").splitlines()
+    )
     retrieval_document_rows = (
-        out_root / "retrieval-documents.jsonl"
-    ).read_text(encoding="utf-8").splitlines()
+        (out_root / "retrieval-documents.jsonl").read_text(encoding="utf-8").splitlines()
+    )
     policy_rows = (out_root / "policy-examples.jsonl").read_text(encoding="utf-8").splitlines()
     model_rows = (out_root / "model-examples.jsonl").read_text(encoding="utf-8").splitlines()
 
@@ -808,9 +808,10 @@ def test_train_policy_candidate_emits_shadow_candidate_with_learned_recommendati
     assert payload["runtime"]["model"]["artifact_paths"]["model_path"]
     assert "execution_profile" in payload["runtime"]["heads"]
     assert payload["runtime"]["defaults"]["execution_profile"] == "strict"
-    assert payload["runtime"]["recommendations"]["retrieval_budget"]["value"] == payload["runtime"][
-        "defaults"
-    ]["retrieval_budget"]
+    assert (
+        payload["runtime"]["recommendations"]["retrieval_budget"]["value"]
+        == payload["runtime"]["defaults"]["retrieval_budget"]
+    )
     assert payload["promotion"]["activation_approved"] is False
 
 
@@ -1017,7 +1018,11 @@ def test_evaluate_policy_candidate_blocks_promotion_when_candidate_canaries_regr
                     "overall_ok": ok,
                     "supported_pi_version": "0.61.1",
                     "git_sha": "abc123",
-                    "scenario_totals": {"total": 6, "passed": 6 if ok else 5, "failed": 0 if ok else 1},
+                    "scenario_totals": {
+                        "total": 6,
+                        "passed": 6 if ok else 5,
+                        "failed": 0 if ok else 1,
+                    },
                 },
                 indent=2,
             )
@@ -1137,7 +1142,9 @@ def test_evaluate_policy_candidate_supports_optional_canary_kind_filters(
                     "supported_pi_version": "0.61.1",
                     "git_sha": "abc123",
                     "canary_kind": canary_kind,
-                    "transport_mode": "managed_rpc" if canary_kind == "real_managed_rpc" else "cli_json",
+                    "transport_mode": "managed_rpc"
+                    if canary_kind == "real_managed_rpc"
+                    else "cli_json",
                     "interception_proven": canary_kind == "real_managed_rpc",
                     "scenario_totals": {"total": 6, "passed": 6, "failed": 0},
                 },
@@ -1179,7 +1186,9 @@ def test_evaluate_policy_candidate_supports_optional_canary_kind_filters(
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     promoted_manifest = json.loads(candidate_path.read_text(encoding="utf-8"))
-    assert report["comparison"]["candidate_metrics"]["canary"]["requested_canary_kind"] == "real_cli"
+    assert (
+        report["comparison"]["candidate_metrics"]["canary"]["requested_canary_kind"] == "real_cli"
+    )
     assert report["comparison"]["baseline_metrics"]["canary"]["requested_canary_kind"] == "real_cli"
     assert promoted_manifest["promotion"]["evidence"]["baseline_canary_kind"] == "real_cli"
     assert promoted_manifest["promotion"]["evidence"]["candidate_canary_kind"] == "real_cli"

@@ -11,8 +11,10 @@ from learninglib import load_candidate_manifest, write_candidate_manifest
 from verify_release_evidence import (
     expected_pi_version,
     load_local_summaries,
-    parse_args as parse_release_args,
     validate_summaries,
+)
+from verify_release_evidence import (
+    parse_args as parse_release_args,
 )
 
 REPLAY_TARGET_METRICS = ("pass_rate_percent", "retry_recovery_rate")
@@ -23,8 +25,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Evaluate and optionally promote a policy candidate"
     )
     parser.add_argument("--candidate", required=True, help="policy candidate manifest path")
-    parser.add_argument("--baseline-replay-report", required=True, help="baseline replay report path")
-    parser.add_argument("--candidate-replay-report", required=True, help="candidate replay report path")
+    parser.add_argument(
+        "--baseline-replay-report", required=True, help="baseline replay report path"
+    )
+    parser.add_argument(
+        "--candidate-replay-report", required=True, help="candidate replay report path"
+    )
     parser.add_argument(
         "--baseline-canary-summary-glob",
         required=True,
@@ -254,7 +260,12 @@ def main(argv: list[str] | None = None) -> int:
     candidate_replay_report = read_json(candidate_replay_report_path)
     expected_pi = expected_pi_version(
         parse_release_args(
-            ["--summary-glob", args.candidate_canary_summary_glob, "--expected-pi-version", args.expected_pi_version]
+            [
+                "--summary-glob",
+                args.candidate_canary_summary_glob,
+                "--expected-pi-version",
+                args.expected_pi_version,
+            ]
             if args.expected_pi_version
             else ["--summary-glob", args.candidate_canary_summary_glob]
         )
@@ -278,9 +289,15 @@ def main(argv: list[str] | None = None) -> int:
     threshold_results = {**replay_thresholds, **canary_thresholds}
     activation_approved = all(bool(value) for value in threshold_results.values())
     approval_reason = "candidate beats or matches baseline replay/canary evidence"
-    if not replay_thresholds["candidate_replay_available"] or not replay_thresholds["baseline_replay_available"]:
+    if (
+        not replay_thresholds["candidate_replay_available"]
+        or not replay_thresholds["baseline_replay_available"]
+    ):
         approval_reason = "policy candidate requires baseline and candidate replay evidence"
-    elif not canary_thresholds["baseline_canary_available"] or not canary_thresholds["candidate_canary_pass"]:
+    elif (
+        not canary_thresholds["baseline_canary_available"]
+        or not canary_thresholds["candidate_canary_pass"]
+    ):
         approval_reason = "policy candidate requires passing baseline and candidate canary evidence"
     elif not activation_approved:
         approval_reason = "candidate failed replay/canary promotion checks"

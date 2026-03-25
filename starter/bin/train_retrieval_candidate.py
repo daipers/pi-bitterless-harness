@@ -7,7 +7,6 @@ import pathlib
 import statistics
 from typing import Any
 
-import numpy
 from dense_retrieval import (
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_HASH_DIM,

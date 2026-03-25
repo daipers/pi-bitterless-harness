@@ -151,7 +151,9 @@ def _top_failure_causes(counter: Counter[str], *, limit: int = 5) -> list[dict[s
 
 def _normalize_canary_summary(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
-    normalized["canary_kind"] = str(normalized.get("canary_kind") or "real_cli").strip() or "real_cli"
+    normalized["canary_kind"] = (
+        str(normalized.get("canary_kind") or "real_cli").strip() or "real_cli"
+    )
     normalized["transport_mode"] = (
         str(normalized.get("transport_mode") or "cli_json").strip() or "cli_json"
     )
@@ -209,9 +211,10 @@ def _latest_canary_status(root: pathlib.Path) -> dict[str, Any]:
         normalized = _normalize_canary_summary(raw_payload)
         kind = str(normalized.get("canary_kind") or "real_cli")
         current = tracks.get(kind)
-        if current is None or path.stat().st_mtime >= pathlib.Path(
-            current["latest_summary_path"]
-        ).stat().st_mtime:
+        if (
+            current is None
+            or path.stat().st_mtime >= pathlib.Path(current["latest_summary_path"]).stat().st_mtime
+        ):
             tracks[kind] = _build_canary_track(path, normalized)
     aggregate = _build_canary_track(latest, payload)
     aggregate["tracks"] = tracks
@@ -428,7 +431,9 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
         events = entry["events"]
         duration_ms = entry["duration_ms"]
         updated_epoch_ms = int(run_dir.stat().st_mtime * 1000)
-        run_finished_epoch_ms = _parse_ts_ms(manifest.get("timings", {}).get("run_finished_epoch_ms"))
+        run_finished_epoch_ms = _parse_ts_ms(
+            manifest.get("timings", {}).get("run_finished_epoch_ms")
+        )
         queue_wait_ms = int(manifest.get("orchestration", {}).get("queue_wait_ms", 0) or 0)
         score_wait_ms = int(manifest.get("orchestration", {}).get("score_wait_ms", 0) or 0)
 
@@ -444,12 +449,18 @@ def harvest(root: pathlib.Path, *, window_days: int = 30) -> dict[str, Any]:
             if score_payload.get("overall_pass") is True:
                 totals["complete_pass"] += 1
                 if run_finished_epoch_ms is not None:
-                    if last_success_epoch_ms is None or run_finished_epoch_ms > last_success_epoch_ms:
+                    if (
+                        last_success_epoch_ms is None
+                        or run_finished_epoch_ms > last_success_epoch_ms
+                    ):
                         last_success_epoch_ms = run_finished_epoch_ms
             else:
                 totals["complete_fail"] += 1
                 if run_finished_epoch_ms is not None:
-                    if last_failure_epoch_ms is None or run_finished_epoch_ms > last_failure_epoch_ms:
+                    if (
+                        last_failure_epoch_ms is None
+                        or run_finished_epoch_ms > last_failure_epoch_ms
+                    ):
                         last_failure_epoch_ms = run_finished_epoch_ms
         elif state == "cancelled":
             totals["cancelled"] += 1

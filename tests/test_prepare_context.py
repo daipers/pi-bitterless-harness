@@ -86,9 +86,7 @@ def write_dense_candidate(
             promotion={
                 "activation_approved": activation_approved,
                 "approved_at": "2026-03-22T12:00:00Z" if activation_approved else None,
-                "approval_reason": "test fixture"
-                if activation_approved
-                else "pending benchmark",
+                "approval_reason": "test fixture" if activation_approved else "pending benchmark",
             },
         ),
     )
@@ -434,15 +432,15 @@ python3 ../tests/fixtures/pass_eval.py
                     "feature_weights": {
                         "claim_overlap": 0.4,
                         "quality_prior": 0.6,
-                        "stage1_score": 0.1
-                    }
+                        "stage1_score": 0.1,
+                    },
                 },
-                "abstention": {"probability_threshold": 0.5}
+                "abstention": {"probability_threshold": 0.5},
             },
             promotion={
                 "activation_approved": True,
                 "approved_at": "2026-03-22T12:00:00Z",
-                "approval_reason": "test fixture"
+                "approval_reason": "test fixture",
             },
         ),
     )
@@ -560,7 +558,7 @@ python3 ../tests/fixtures/pass_eval.py
             promotion={
                 "activation_approved": False,
                 "approved_at": None,
-                "approval_reason": "pending benchmark"
+                "approval_reason": "pending benchmark",
             },
         ),
     )
@@ -899,9 +897,7 @@ python3 ../tests/fixtures/pass_eval.py
         activation_approved=True,
     )
     candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
-    pathlib.Path(
-        candidate_payload["runtime"]["retriever"]["feature_weights_path"]
-    ).unlink()
+    pathlib.Path(candidate_payload["runtime"]["retriever"]["feature_weights_path"]).unlink()
 
     env = os.environ | {"PYTHONPATH": str(starter / "bin")}
     subprocess.run(

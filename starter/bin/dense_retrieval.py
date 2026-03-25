@@ -244,9 +244,7 @@ def train_dense_feature_weights(
                     if pos_score > neg_score + margin:
                         continue
                     weights += (
-                        float(learning_rate)
-                        * q_features
-                        * (pos_features - neg_features)
+                        float(learning_rate) * q_features * (pos_features - neg_features)
                     ).astype(numpy.float32)
                     numpy.clip(weights, 0.05, 8.0, out=weights)
                     q_embedding = encode_feature_vector(

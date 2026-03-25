@@ -122,13 +122,12 @@ python3 ../tests/fixtures/pass_eval.py
             }
         ],
         artifacts=[
-        {
-            "path": "outputs/comet-proof.txt",
-            "description": (
-                "Comet-lattice proof artifact containing the preserved "
-                "scoring evidence."
-            ),
-        }
+            {
+                "path": "outputs/comet-proof.txt",
+                "description": (
+                    "Comet-lattice proof artifact containing the preserved scoring evidence."
+                ),
+            }
         ],
         artifact_contents={"outputs/comet-proof.txt": "comet-lattice proof\n"},
     )

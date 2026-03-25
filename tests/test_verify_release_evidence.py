@@ -35,7 +35,9 @@ def make_summary(
             "managed_rpc" if canary_kind == "real_managed_rpc" else "cli_json"
         )
         payload["interception_proven"] = (
-            interception_proven if interception_proven is not None else canary_kind == "real_managed_rpc"
+            interception_proven
+            if interception_proven is not None
+            else canary_kind == "real_managed_rpc"
         )
     return payload
 

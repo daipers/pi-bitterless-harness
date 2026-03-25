@@ -163,15 +163,18 @@ The right pane now keeps the same high-signal structure for every selection:
 
 - dismissible `Getting Started` guidance on first load, with empty-state variants when no repo or run is available
 - current target card with repo, run, state, pass/fail, profile, relative age, and safe next actions
+- explicit `Safe next step` and `Why now` guidance for the selected repo/run
 - alert banner with plain-language health warnings and failures
 - alert action buttons for the highest-priority next steps
 - run timeline strip for `Queued -> Claimed -> Model Running -> Scoring -> Complete`
 - inline action rail for common run and repo actions, including visible shortcut suffixes where a real binding exists
+- `What This Does` panel with `Use when`, `Impact`, `Next`, and `State`
 - action hint strip and best-artifact reason note
 - recent activity panel with session-scoped actions, supervisor messages, and managed command state
 - existing tabbed artifacts below that shell
 
 Repo and run tables now prepend compact ASCII badges such as `[OK]`, `[!]`, `[FAIL]`, `[Q]`, and `[HOT]` to make scanning easier without adding more columns.
+The repo status column also uses short guidance prefixes like `Ready:`, `Watch:`, and `Blocked:`, and run state cells include a `Next:` recommendation such as `Next: Score` or `Next: Events`.
 
 `Open Best Artifact` chooses the most useful tab for the selected run:
 
@@ -187,6 +190,17 @@ When `Open Best Artifact` runs, the detail shell also explains why that tab was 
 Destructive UI actions such as `Stop Repo`, `Restart Repo`, `Cancel Run`,
 `Rerun`, and force restore now use modal `Confirm` / `Cancel` buttons instead
 of typed confirmation.
+
+The command picker and action explainer share the same risk labels:
+
+- `Safe`: view-first action with no repo mutation
+- `Review`: reasonable action, but worth reading the explainer first
+- `Careful`: state-changing action that deserves extra attention
+
+The summary/header area now also carries a plain-language operator guidance strip such as:
+
+- `Selected run failed. Reviewing Score is the safest next step.`
+- `Repo queue is backed up. Filtering queued runs is the fastest way to inspect pressure.`
 
 Repo detail memory is preserved when switching repos, including the active tab,
 overview preview mode, and enabled follow streams.

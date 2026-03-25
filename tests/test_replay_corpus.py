@@ -22,8 +22,10 @@ def make_run(
         encoding="utf-8",
     )
     (run_dir / "run-events.jsonl").write_text(
-        json.dumps({"message": "event", "path": "context/source-runs/old-run"}) + "\n"
-        + json.dumps({"message": "safe event"}) + "\n",
+        json.dumps({"message": "event", "path": "context/source-runs/old-run"})
+        + "\n"
+        + json.dumps({"message": "safe event"})
+        + "\n",
         encoding="utf-8",
     )
     (run_dir / "transcript.jsonl").write_text(transcript_line + "\n", encoding="utf-8")
@@ -91,7 +93,4 @@ def test_build_replay_corpus_redacts_and_sorts(tmp_path: pathlib.Path) -> None:
     combined_event_excerpt = (
         records[0]["evidence"]["event_excerpt"] + records[1]["evidence"]["event_excerpt"]
     )
-    assert all(
-        "context/source-runs/" not in line
-        for line in combined_event_excerpt
-    )
+    assert all("context/source-runs/" not in line for line in combined_event_excerpt)

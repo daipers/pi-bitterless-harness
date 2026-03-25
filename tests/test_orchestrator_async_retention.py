@@ -83,9 +83,7 @@ def _make_run_run_dir(runs_root: pathlib.Path, run_id: str) -> pathlib.Path:
         "## Constraints\n- Stay local.\n\n## Done\n- Done.\n\n"
         "## Eval\n```bash\necho ok\n```\n\n## Required Artifacts\n"
         "- result.json\n\n## Result JSON schema (source of truth)\n"
-        "```json\n"
-        + json.dumps(schema)
-        + "\n```\n"
+        "```json\n" + json.dumps(schema) + "\n```\n"
     )
     (run_dir / "task.md").write_text(
         task_text,

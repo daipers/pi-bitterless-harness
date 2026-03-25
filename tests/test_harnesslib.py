@@ -428,8 +428,7 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
     assert "capabilities.subagents.max_agents must be a non-negative integer" in v3_errors
     assert (
         "capabilities.subagents.allowed_profiles must contain at least one profile "
-        "when subagents are allowed"
-        in v3_errors
+        "when subagents are allowed" in v3_errors
     )
     assert "capabilities.enabled must be true when subagents are allowed" in v3_errors
 
@@ -446,8 +445,7 @@ def test_run_contract_and_eval_helpers_cover_remaining_error_paths() -> None:
     assert "capabilities.interception.fail_mode must be 'fail_closed'" in v4_errors
     assert (
         "capabilities.interception.action_log_path must be "
-        "'outputs/subagent-action-log.jsonl'"
-        in v4_errors
+        "'outputs/subagent-action-log.jsonl'" in v4_errors
     )
 
 
@@ -562,3 +560,108 @@ def test_policy_guardrail_pre_tool_use_enforces_policy_and_environment() -> None
     )
     assert decision["allowed"] is False
     assert decision["violations"] == ["tool_use.network_access"]
+
+
+def test_policy_guardrail_handles_other_hooks_and_unknown_hook() -> None:
+    strict = load_policy("policies/strict.json")
+
+    unknown = evaluate_policy_guardrail(strict, "does_not_exist")
+    assert unknown["allowed"] is False
+    assert unknown["violations"] == ["unknown hook: does_not_exist"]
+
+    pre_run = evaluate_policy_guardrail(
+        strict,
+        "pre_run",
+        context={
+            "skip_run": True,
+            "strict_profile": True,
+            "execution_profile": "strict",
+            "policy_path": "policies/strict.json",
+        },
+    )
+    assert pre_run["allowed"] is False
+    assert pre_run["violations"] == ["pre_run.skip_requested"]
+    assert pre_run["effective_limits"]["strict_profile"] is True
+
+    pre_score = evaluate_policy_guardrail(
+        strict,
+        "pre_score_dispatch",
+        context={"skip_score": True, "force_score": False, "policy_path": "policies/strict.json"},
+    )
+    assert pre_score["allowed"] is False
+    assert pre_score["violations"] == ["pre_score_dispatch.skip_requested"]
+    assert pre_score["effective_limits"]["force_score"] is False
+
+    subagent = harnesslib.evaluate_policy_guardrail_hook(
+        strict,
+        "pre_subagent_action",
+        context={
+            "blocked": True,
+            "action_type": "spawn",
+            "agent_type": "worker",
+            "policy_path": "policies/strict.json",
+        },
+    )
+    assert subagent["allowed"] is False
+    assert subagent["violations"] == ["pre_subagent_action.blocked"]
+    assert subagent["effective_limits"]["agent_type"] == "worker"
+
+    retrieval = evaluate_policy_guardrail(
+        strict,
+        "pre_retrieval",
+        context={
+            "retrieval_enabled": False,
+            "retrieval_mode": "hybrid_v1",
+            "retrieval_index_policy": {"max_entries": 3},
+            "policy_path": "policies/strict.json",
+        },
+    )
+    assert retrieval["allowed"] is False
+    assert retrieval["violations"] == ["pre_retrieval.disabled"]
+    assert retrieval["effective_limits"]["retrieval_mode"] == "hybrid_v1"
+
+
+def test_policy_guardrail_context_build_and_disabled_hooks() -> None:
+    strict = load_policy("policies/strict.json")
+
+    blocked_tool_use = evaluate_policy_guardrail(
+        strict,
+        "pre_tool_use",
+        context={"blocked_reasons": ["tool_use.blocked_for_test"]},
+    )
+    assert blocked_tool_use["allowed"] is False
+    assert blocked_tool_use["violations"] == ["tool_use.blocked_for_test"]
+
+    invalid_context_build = evaluate_policy_guardrail(
+        strict,
+        "pre_context_build",
+        context={"blocked": True, "max_candidates": 0, "retrieval_profile_id": "profile-a"},
+    )
+    assert invalid_context_build["allowed"] is False
+    assert invalid_context_build["violations"] == [
+        "pre_context_build.blocked",
+        "pre_context_build.invalid_limits",
+    ]
+    assert invalid_context_build["effective_limits"]["max_candidates"] == 0
+    assert invalid_context_build["effective_limits"]["retrieval_profile_id"] == "profile-a"
+
+    valid_context_build = evaluate_policy_guardrail(
+        strict,
+        "pre_context_build",
+        context={"max_candidates": 4, "retrieval_profile_id": "profile-b"},
+    )
+    assert valid_context_build["allowed"] is True
+    assert valid_context_build["effective_limits"]["max_candidates"] == 4
+
+    disabled_policy = {
+        **strict,
+        "guardrails": {
+            "hooks": {
+                **strict["guardrails"]["hooks"],
+                "pre_subagent_action": {"enabled": False, "allow": True},
+            }
+        },
+    }
+    disabled_subagent = evaluate_policy_guardrail(disabled_policy, "pre_subagent_action")
+    assert disabled_subagent["allowed"] is False
+    assert disabled_subagent["violations"] == ["hook_disabled:pre_subagent_action"]

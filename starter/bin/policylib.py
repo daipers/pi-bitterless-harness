@@ -113,7 +113,10 @@ def train_contextual_policy_model(
     defaults: dict[str, Any],
     dim: int = DEFAULT_POLICY_VECTOR_DIM,
 ) -> dict[str, Any]:
-    features = [vectorize_policy_payload(policy_feature_payload({"features": row[0]}), dim=dim) for row in rows]
+    features = [
+        vectorize_policy_payload(policy_feature_payload({"features": row[0]}), dim=dim)
+        for row in rows
+    ]
     head_buckets: dict[str, dict[str, dict[str, Any]]] = {
         "execution_profile": {},
         "retrieval_budget": {},
@@ -196,7 +199,9 @@ def train_contextual_policy_model(
     }
 
 
-def predict_policy_heads(model: dict[str, Any], payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def predict_policy_heads(
+    model: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
     dim = int(model.get("vector_dim", DEFAULT_POLICY_VECTOR_DIM))
     query_vector = vectorize_policy_payload(payload, dim=dim)
     predictions: dict[str, dict[str, Any]] = {}

@@ -11,21 +11,23 @@ from pathlib import Path
 from control_centerlib import (
     REPO_SORT_KEYS,
     RUN_SORT_KEYS,
+    ActionExplainer,
+    ActionOutcome,
     AlertBadge,
-    ArtifactRecommendation,
     ControlCenterService,
     FleetSnapshot,
-    format_timestamp_ms,
     RepoSnapshot,
     RepoViewState,
     RunFilterState,
     RunRow,
     SavedViewPreset,
+    SelectionGuidance,
     SortState,
     TargetSummary,
     TimelineStep,
     UIAction,
     build_example_config_text,
+    format_timestamp_ms,
     render_duration_ms,
     render_startup_preflight,
     run_startup_preflight,
@@ -81,10 +83,20 @@ class ActivityEntry:
 
 @dataclass(frozen=True)
 class PickerResult:
+    token: str
     action: UIAction
     section: str
     priority: int
     row_index: int
+
+
+@dataclass(frozen=True)
+class RestoreRequest:
+    repo_id: str
+    run_id: str
+    archive_path: str
+    force: bool
+    command_text: str
 
 
 if TEXTUAL_IMPORT_ERROR is None:
@@ -170,6 +182,14 @@ if TEXTUAL_IMPORT_ERROR is None:
           margin-top: 1;
         }
 
+        #picker-help {
+          height: 6;
+          margin-top: 1;
+          padding: 0 1;
+          background: $surface-lighten-1;
+          color: $text-muted;
+        }
+
         .picker-result {
           width: 1fr;
           margin-bottom: 1;
@@ -198,6 +218,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                         yield Static("", id=f"picker-section-{index}", classes="picker-section")
                     for index in range(12):
                         yield Button("", id=f"picker-result-{index}", classes="picker-result")
+                yield Static("", id="picker-help")
 
         def on_mount(self) -> None:
             self.query_one("#picker-query", Input).focus()
@@ -210,9 +231,43 @@ if TEXTUAL_IMPORT_ERROR is None:
             label = action.label
             if action.shortcut_label:
                 label += f" ({action.shortcut_label})"
-            if not action.enabled and action.disabled_reason:
-                label += f" ({action.disabled_reason})"
+            if action.risk_label:
+                label += f" [{action.risk_label}]"
             return label
+
+        def _readiness(self, action: UIAction) -> str:
+            if not action.enabled:
+                return "Unavailable"
+            if action.risk_label in {"Review", "Careful"}:
+                return "Needs attention"
+            return "Ready"
+
+        def _help_text(self, action: UIAction | None) -> str:
+            if action is None:
+                return (
+                    "Use when: Search for an action or command.\n"
+                    "Impact: The highlighted result explains what it will do.\n"
+                    "Next: Press Enter to run the highlighted item.\n"
+                    "State: Ready"
+                )
+            next_line = action.expect_next or "Recent Activity will show what happens next."
+            state = self._readiness(action)
+            if not action.enabled and action.disabled_reason:
+                next_line = action.disabled_reason
+            return "\n".join(
+                [
+                    f"Use when: {action.when_to_use or action.hint or action.label}",
+                    f"Impact: {action.impact_summary or action.hint or 'This updates the current view or repo state.'}",
+                    f"Next: {next_line}",
+                    f"State: {state}",
+                ]
+            )
+
+        def _update_help(self) -> None:
+            action = None
+            if 0 <= self.highlighted_index < len(self.visible_results):
+                action = self.visible_results[self.highlighted_index].action
+            self.query_one("#picker-help", Static).update(self._help_text(action))
 
         def _match_rank(self, result: PickerResult, query: str) -> tuple[int, int, int, str]:
             action = result.action
@@ -258,6 +313,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                     button.variant = "warning"
                 else:
                     button.variant = "default"
+            self._update_help()
 
         def _refresh_results(self, query: str) -> None:
             normalized = query.lower().strip()
@@ -298,7 +354,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                     continue
                 result = self.visible_results[index]
                 button.label = self._display_label(result.action)
-                button.disabled = False
+                button.disabled = not result.action.enabled
                 button.styles.display = "block"
             self._apply_highlight()
 
@@ -317,7 +373,12 @@ if TEXTUAL_IMPORT_ERROR is None:
         def action_submit_selection(self) -> None:
             if not self.visible_results or self.highlighted_index < 0:
                 return
-            self.dismiss(self.visible_results[self.highlighted_index].action.id)
+            result = self.visible_results[self.highlighted_index]
+            action = result.action
+            if not action.enabled:
+                self._update_help()
+                return
+            self.dismiss(result.token)
 
         def on_input_changed(self, event: Input.Changed) -> None:
             if event.input.id == "picker-query":
@@ -340,7 +401,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 return
             index = int(event.button.id.rsplit("-", 1)[1])
             if 0 <= index < len(self.visible_results):
-                self.dismiss(self.visible_results[index].action.id)
+                self.dismiss(self.visible_results[index].token)
 
 
     class ControlCenterApp(App[None]):
@@ -350,7 +411,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         }
 
         #summary-bar {
-          height: 3;
+          height: 4;
           padding: 0 1;
           background: $surface;
           color: $text;
@@ -481,8 +542,8 @@ if TEXTUAL_IMPORT_ERROR is None:
           margin-right: 1;
         }
 
-        #action-hint, #artifact-note {
-          height: 2;
+        #action-explainer, #action-hint, #artifact-note {
+          height: auto;
           padding: 0 1;
           background: $surface-lighten-1;
           color: $text-muted;
@@ -647,6 +708,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                                 for col_index in range(4):
                                     slot = row_index * 4 + col_index
                                     yield Button("", id=f"action-slot-{slot}", classes="action-slot")
+                    yield Static(id="action-explainer")
                     yield Static(id="action-hint")
                     yield Static(id="artifact-note")
                     yield Static(id="recent-activity")
@@ -744,6 +806,172 @@ if TEXTUAL_IMPORT_ERROR is None:
                 else action.label
             )
 
+        def _action_readiness(self, action: UIAction) -> str:
+            if not action.enabled:
+                return "Unavailable"
+            if action.risk_label in {"Review", "Careful"}:
+                return "Needs attention"
+            return "Ready"
+
+        def _action_explainer(self, action: UIAction | None) -> ActionExplainer:
+            repo = self._selected_repo()
+            run = self._selected_run()
+            if (
+                action is not None
+                and repo is not None
+                and run is not None
+                and action.id
+                in {candidate.id for candidate in self.service.build_context_actions(repo.repo.id, run.run_id)}
+            ):
+                return self.service.build_action_explainer(repo.repo.id, run.run_id, action.id)
+            if action is None:
+                return ActionExplainer(
+                    action_id="",
+                    title="What This Does",
+                    summary="Focus an action to see what it does.",
+                    when_to_use="You want help choosing the safest next step.",
+                    impact_summary="The focused action will explain its impact here.",
+                    expect_next="Recent Activity will show what happens next.",
+                    enabled=True,
+                    disabled_reason="",
+                    risk_label="Safe",
+                )
+            return ActionExplainer(
+                action_id=action.id,
+                title=action.label,
+                summary=action.hint or action.label,
+                when_to_use=action.when_to_use or action.hint or action.label,
+                impact_summary=action.impact_summary or action.hint or "This updates the current view or repo state.",
+                expect_next=(
+                    action.disabled_reason
+                    if (not action.enabled and action.disabled_reason)
+                    else (action.expect_next or "Recent Activity will show what happens next.")
+                ),
+                enabled=action.enabled,
+                disabled_reason=action.disabled_reason,
+                risk_label=action.risk_label or ("Safe" if action.enabled else "Review"),
+            )
+
+        def _render_action_explainer(self, explainer: ActionExplainer) -> str:
+            action = UIAction(
+                id=explainer.action_id,
+                label=explainer.title,
+                kind="",
+                scope="",
+                command_text="",
+                enabled=explainer.enabled,
+                disabled_reason=explainer.disabled_reason,
+                risk_label=explainer.risk_label,
+            )
+            return "\n".join(
+                [
+                    "What This Does",
+                    f"Use when: {explainer.when_to_use}",
+                    f"Impact: {explainer.impact_summary}",
+                    f"Next: {explainer.expect_next}",
+                    f"State: {self._action_readiness(action)}",
+                ]
+            )
+
+        def _selection_guidance(self) -> SelectionGuidance | None:
+            repo = self._selected_repo()
+            run = self._selected_run()
+            if repo is None or run is None:
+                return None
+            return self.service.build_selection_guidance(repo.repo.id, run.run_id)
+
+        def _repo_row_state(self, repo: RepoSnapshot) -> str:
+            if repo.runtime_check_ok is False or repo.canary_failing:
+                return "Blocked"
+            if repo.stale_run_count > 0 or repo.canary_stale or repo.queued_count >= 3:
+                return "Watch"
+            return "Ready"
+
+        def _run_next_label(self, repo_id: str, run_id: str) -> str:
+            recommendation = self.service.artifact_recommendation(repo_id, run_id)
+            return {
+                "tab-score": "Next: Score",
+                "tab-transcript": "Next: Transcript",
+                "tab-patch": "Next: Patch",
+                "tab-events": "Next: Events",
+                "tab-overview": "Next: Overview",
+            }.get(recommendation.tab_id, "Next: Wait")
+
+        def _operator_guidance_text(self) -> str:
+            repo = self._selected_repo()
+            run = self._selected_run()
+            if repo is None:
+                return "No repo selected. Add or select a repo to get started."
+            if run is None:
+                return self.service.build_repo_guidance(repo.repo.id)
+            return self.service.build_run_guidance(repo.repo.id, run.run_id)
+
+        def _coerce_action_outcome(
+            self,
+            outcome: ActionOutcome | str,
+            *,
+            failed: bool = False,
+        ) -> ActionOutcome:
+            if isinstance(outcome, ActionOutcome):
+                if failed and outcome.status != "failed":
+                    return ActionOutcome.failed(outcome.message)
+                return outcome
+            return ActionOutcome.failed(outcome) if failed else ActionOutcome.completed(outcome)
+
+        def _action_feedback_message(self, action: UIAction, stage: str, *, result: str = "") -> str:
+            repo = self._selected_repo()
+            run = self._selected_run()
+            repo_name = repo.repo.name if repo is not None else "repo"
+            run_id = run.run_id if run is not None else "selected run"
+            if action.kind == "open":
+                opened = action.label.removeprefix("Open ").strip() or action.label
+                if stage == "failed":
+                    return f"Failed to open {opened.lower()} for {run_id}. {(result or action.disabled_reason).strip()}"
+                return f"Opened {opened} for {run_id}. {(result or action.expect_next or 'The selected tab is ready.').strip()}"
+            if action.kind == "filter":
+                if stage == "failed":
+                    return f"Failed to update filters from {action.label}. {(result or action.disabled_reason).strip()}"
+                return f"Updated filters from {action.label}. {(result or action.expect_next or 'The run list has been narrowed.').strip()}"
+            if action.kind == "preset":
+                if stage == "failed":
+                    return f"Failed to apply saved view {action.label}. {(result or action.disabled_reason).strip()}"
+                return f"Applied saved view {action.label}. {(result or action.expect_next or action.hint or 'The run list was reset for that workflow.').strip()}"
+            if action.id == "cancel-run":
+                prefix = "Requested cancellation" if stage == "completed" else "Failed to request cancellation"
+                return f"{prefix} for {run_id}. {(result or action.expect_next).strip()}"
+            if action.id == "enqueue-run":
+                prefix = "Queued" if stage == "completed" else "Failed to queue"
+                return f"{prefix} {run_id}. {(result or action.expect_next).strip()}"
+            if action.id == "rerun-run":
+                prefix = "Queued rerun" if stage == "started" else "Failed rerun"
+                return f"{prefix} for {run_id}. {(result or action.expect_next).strip()}"
+            if action.id == "archive-run":
+                prefix = "Started archive" if stage == "started" else "Failed archive"
+                return f"{prefix} for {run_id}. {(result or action.expect_next).strip()}"
+            if action.id == "runtime-check":
+                prefix = "Started runtime check" if stage == "started" else "Failed runtime check"
+                return f"{prefix} for {repo_name}. {(result or action.expect_next).strip()}"
+            if action.id == "repo-canary":
+                prefix = "Started canary" if stage == "started" else "Failed canary"
+                return f"{prefix} for {repo_name}. {(result or action.expect_next).strip()}"
+            if action.id == "repo-start":
+                prefix = "Started repo" if stage == "completed" else "Failed repo start"
+                return f"{prefix} for {repo_name}. {(result or action.expect_next).strip()}"
+            if action.id == "repo-stop":
+                prefix = "Stopped repo" if stage == "completed" else "Failed repo stop"
+                return f"{prefix} for {repo_name}. {(result or action.expect_next).strip()}"
+            if action.id == "repo-restart":
+                prefix = "Restarted repo" if stage == "completed" else "Failed repo restart"
+                return f"{prefix} for {repo_name}. {(result or action.expect_next).strip()}"
+            if action.kind == "raw":
+                if stage == "failed":
+                    return f"Failed raw command `{action.command_text}`. {(result or action.disabled_reason).strip()}"
+                if stage == "started":
+                    return f"Started raw command `{action.command_text}`."
+                return f"Ran raw command `{action.command_text}`. {(result or action.expect_next or 'Recent Activity will show the result.').strip()}"
+            verb = "Started" if stage == "started" else ("Failed" if stage == "failed" else "Completed")
+            return f"{verb} {action.label.lower()} for {repo_name}. {(result or action.expect_next or action.hint).strip()}"
+
         def _onboarding_text(self, repo: RepoSnapshot | None, run: RunRow | None) -> str:
             if repo is None:
                 return (
@@ -796,6 +1024,26 @@ if TEXTUAL_IMPORT_ERROR is None:
             )
             self._session_activity[repo_id] = entries[-40:]
 
+        def _managed_command_message(self, repo: RepoSnapshot, command_label: str) -> str:
+            normalized = command_label.strip().lower()
+            if normalized == "runtime check":
+                return f"Runtime check for {repo.repo.name}. Results will appear in Health."
+            if normalized == "real canary":
+                return f"Canary for {repo.repo.name}. Canary results will appear in Health."
+            if normalized.startswith("rerun "):
+                run_id = command_label.split(" ", 1)[1]
+                return f"Rerun for {run_id}. Watch Events for claim and start progress."
+            if normalized.startswith("archive "):
+                run_id = command_label.split(" ", 1)[1]
+                return f"Archive for {run_id}. Archive status will appear in Recent Activity and Health."
+            if normalized.startswith("restore "):
+                run_id = command_label.split(" ", 1)[1]
+                return f"Restore for {run_id}. Restored evidence will appear under the repo runs root."
+            if normalized.startswith("run "):
+                run_id = command_label.split(" ", 1)[1]
+                return f"Run for {run_id}. Watch Events for claim and start progress."
+            return command_label
+
         def _sync_recent_activity(self) -> None:
             for repo in self.snapshot.repos:
                 seen_messages = self._seen_repo_messages.setdefault(repo.repo.id, set())
@@ -822,7 +1070,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                         repo.repo.id,
                         state="RUNNING" if command.state == "running" else command.state.upper(),
                         target=repo.repo.name,
-                        message=command.label,
+                        message=self._managed_command_message(repo, command.label),
                         ts_ms=command.completed_epoch_ms or command.started_epoch_ms,
                     )
 
@@ -861,6 +1109,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                 command_text=f"saved-view {preset.id}",
                 hint=preset.description,
                 group="saved-views",
+                when_to_use=f"You want the built-in {preset.label} workflow.",
+                impact_summary="Resets the filter and sort seed for that saved view.",
+                expect_next=preset.description or "The run list will update for that saved view.",
+                risk_label="Safe",
             )
 
         def _update_saved_views(self) -> None:
@@ -947,9 +1199,11 @@ if TEXTUAL_IMPORT_ERROR is None:
             action = self._current_action_slots.get(focused_id) or self._current_alert_actions.get(focused_id)
             if action is None:
                 action = next((candidate for candidate in actions if candidate.enabled), None)
-            hint = action.hint if action is not None else "Focus an action to see a quick description."
+            explainer = self._action_explainer(action)
+            hint = explainer.summary if explainer.summary else "Focus an action to see a quick description."
             self._action_hint = hint
             try:
+                self.query_one("#action-explainer", Static).update(self._render_action_explainer(explainer))
                 self.query_one("#action-hint", Static).update(f"Action Hint: {hint}")
             except NoMatches:
                 return
@@ -1007,7 +1261,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self._repo_keys.append(repo.repo.id)
                 table.add_row(
                     f"{self.service.repo_health_badge(repo.repo.id)} {repo.repo.name}",
-                    repo.orchestrator.state,
+                    f"{self._repo_row_state(repo)}: {repo.orchestrator.state}",
                     f"{self.service.repo_queue_badge(repo.repo.id)} {repo.queue_depth}",
                     str(repo.in_flight_count),
                     f"{repo.summary.get('pass_rate_percent', 0.0):.1f}%",
@@ -1031,7 +1285,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self._run_keys.append(run.run_id)
                 table.add_row(
                     f"{self.service.run_state_badge(repo.repo.id, run.run_id)} {run.run_id}",
-                    f"{self.service.run_queue_badge(repo.repo.id, run.run_id)} {run.state}",
+                    f"{self.service.run_queue_badge(repo.repo.id, run.run_id)} {run.state} | {self._run_next_label(repo.repo.id, run.run_id)}",
                     "-" if run.overall_pass is None else ("yes" if run.overall_pass else "no"),
                     run.execution_profile or "-",
                     run.primary_error_code or "-",
@@ -1157,11 +1411,19 @@ if TEXTUAL_IMPORT_ERROR is None:
                 "Chat",
                 "=" * 4,
                 "Latest assistant replies can expose follow-up buttons for the next useful action.",
+                "",
+                "Risk labels",
+                "=" * 11,
+                "Safe: view-first action with no repo mutation.",
+                "Review: action is reasonable, but read the explainer first.",
+                "Careful: action changes repo or run state and deserves extra attention.",
+                "Safe next step: the lowest-risk action the detail pane recommends right now.",
             ]
             return "\n".join(lines)
 
         def _render_target_card(self, summary: TargetSummary) -> str:
             safe_actions = ", ".join(action.label for action in summary.recommended_actions) or "-"
+            guidance = summary.selection_guidance
             return "\n".join(
                 [
                     f"Target: {summary.repo_name} ({summary.repo_id})",
@@ -1170,6 +1432,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                         f"State: {summary.run_state} | Pass: {summary.pass_label} | "
                         f"Profile: {summary.profile} | Updated: {summary.age_text}"
                     ),
+                    f"Safe next step: {guidance.safe_next_step}",
+                    f"Why now: {guidance.reason}",
                     f"Safe next actions: {safe_actions}",
                 ]
             )
@@ -1252,6 +1516,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             timeline_strip = self.query_one("#timeline-strip", Static)
             recent_activity = self.query_one("#recent-activity", Static)
             artifact_note = self.query_one("#artifact-note", Static)
+            action_explainer = self.query_one("#action-explainer", Static)
 
             if repo is None:
                 for widget in (
@@ -1270,6 +1535,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                     timeline_strip,
                     recent_activity,
                     artifact_note,
+                    action_explainer,
                 ):
                     widget.update("No repo selected.")
                 self._update_action_rail(())
@@ -1287,6 +1553,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             help_text.update(self._help_text())
             recent_activity.update(self._recent_activity_text(repo.repo.id))
             artifact_note.update(self._artifact_note or "Best artifact note: waiting for a recommendation.")
+            action_explainer.update(self._render_action_explainer(self._action_explainer(None)))
 
             if run is None:
                 empty_message = self._empty_run_message(repo)
@@ -1296,6 +1563,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                             f"Target: {repo.repo.name} ({repo.repo.id})",
                             "Run: none visible",
                             f"Filter: {self._filter_label()}",
+                            f"Safe next step: {self.service.build_repo_guidance(repo.repo.id)}",
                         ]
                     )
                 )
@@ -1382,6 +1650,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                                 f"Pass {self.snapshot.pass_rate_percent:.1f}%",
                             ]
                         ),
+                        self._operator_guidance_text(),
                         " | ".join(
                             [
                                 f"Focus {self._focused_area_label()}",
@@ -1392,7 +1661,6 @@ if TEXTUAL_IMPORT_ERROR is None:
                                 ": picker",
                                 "o best",
                                 "? help",
-                                "q quit",
                             ]
                         ),
                     ]
@@ -1400,12 +1668,9 @@ if TEXTUAL_IMPORT_ERROR is None:
             )
 
         def _default_status_text(self) -> str:
-            repo = self._selected_repo()
-            run = self._selected_run()
             return (
                 f"Ready | Focus {self._focused_area_label()} | "
-                f"Repo {repo.repo.name if repo else '-'} | "
-                f"Run {run.run_id if run else '-'} | "
+                f"{self._operator_guidance_text()} | "
                 "Use : for commands or the action rail for common tasks"
             )
 
@@ -1423,8 +1688,17 @@ if TEXTUAL_IMPORT_ERROR is None:
                 return
             self._set_status(self._default_status_text())
 
+        def _main_view_ready(self) -> bool:
+            try:
+                self.query_one("#repo-table", DataTable)
+            except NoMatches:
+                return False
+            return True
+
         def refresh_data(self) -> None:
             self.snapshot = self.service.refresh()
+            if not self._main_view_ready():
+                return
             self._sync_recent_activity()
             if not self.selected_repo_id and self.snapshot.repos:
                 self.selected_repo_id = self.snapshot.repos[0].repo.id
@@ -1464,6 +1738,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     open_tab="tab-chat",
                     hint="Jump to the Chat tab for guided control actions.",
                     group="all-actions",
+                    when_to_use="You want operator help or follow-up suggestions.",
+                    impact_summary="Switches to the Chat tab without changing repo state.",
+                    expect_next="Chat will show the latest operator conversation and follow-up actions.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "open-health",
@@ -1474,6 +1752,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     open_tab="tab-health",
                     hint="Open repo health, runtime, and canary details.",
                     group="all-actions",
+                    when_to_use="You need repo health, canary, or runtime details.",
+                    impact_summary="Switches to the Health tab without changing repo state.",
+                    expect_next="Health will show the latest runtime and canary information.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "open-help",
@@ -1485,6 +1767,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     hint="Open the quick help tab.",
                     shortcut_label="?",
                     group="all-actions",
+                    when_to_use="You need a reminder about shortcuts, risk labels, or filter behavior.",
+                    impact_summary="Switches to the Help tab.",
+                    expect_next="Help will summarize shortcuts, filters, and safe-next-step guidance.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "filter-failed",
@@ -1494,6 +1780,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter failed",
                     hint="Toggle the Failed chip in the guided filters.",
                     group="all-actions",
+                    when_to_use="You want to focus on failed or cancelled work.",
+                    impact_summary="Toggles the Failed filter chip in the run list.",
+                    expect_next="The run list will narrow to failed work when enabled.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "filter-queued",
@@ -1503,6 +1793,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter queued",
                     hint="Toggle the Queued chip in the guided filters.",
                     group="all-actions",
+                    when_to_use="You want to inspect queued or in-flight work.",
+                    impact_summary="Toggles the Queued filter chip in the run list.",
+                    expect_next="The run list will narrow to queued and active work when enabled.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "filter-capability",
@@ -1512,6 +1806,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter capability",
                     hint="Toggle the Capability chip in the guided filters.",
                     group="all-actions",
+                    when_to_use="You want to focus on capability-profile runs.",
+                    impact_summary="Toggles the Capability filter chip in the run list.",
+                    expect_next="The run list will narrow to capability runs when enabled.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "filter-last24h",
@@ -1521,6 +1819,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter last24h",
                     hint="Toggle the Last 24h chip in the guided filters.",
                     group="all-actions",
+                    when_to_use="You want to limit the view to recent activity.",
+                    impact_summary="Toggles the Last 24h filter chip in the run list.",
+                    expect_next="The run list will narrow to runs updated in the last day when enabled.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "clear-filters",
@@ -1530,6 +1832,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "filter clear",
                     hint="Clear all guided filters and text refinement.",
                     group="all-actions",
+                    when_to_use="You want to widen the run list again.",
+                    impact_summary="Clears all chips and text refinement in the guided filters.",
+                    expect_next="All visible runs will return to the list.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "focus-newest-failed",
@@ -1541,6 +1847,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     disabled_reason="no failed run available",
                     hint="Jump to the newest failed run in the current repo.",
                     group="all-actions",
+                    when_to_use="You want the most recent failure without scanning the list yourself.",
+                    impact_summary="Selects the newest failed run in the current repo.",
+                    expect_next="The failed run will be selected and opened to the recommended artifact.",
+                    risk_label="Safe",
                 ),
                 UIAction(
                     "raw-command",
@@ -1551,6 +1861,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     aliases=("raw", "manual"),
                     hint="Use the original raw command input.",
                     group="all-actions",
+                    when_to_use="You already know the raw command you want to run.",
+                    impact_summary="Opens the original raw command input.",
+                    expect_next="The raw command prompt will open at the bottom of the screen.",
+                    risk_label="Careful",
                 ),
             )
 
@@ -1559,16 +1873,18 @@ if TEXTUAL_IMPORT_ERROR is None:
             run = self._selected_run()
             results: list[PickerResult] = []
             row_index = 0
+            context_actions: tuple[UIAction, ...] = ()
+            context_ids: set[str] = set()
 
             recommended: list[UIAction] = []
             if repo is not None and run is not None:
+                context_actions = self.service.build_context_actions(repo.repo.id, run.run_id)
+                context_ids = {action.id for action in context_actions}
                 alerts = self.service.build_repo_alerts(repo.repo.id) + self.service.build_run_alerts(
                     repo.repo.id, run.run_id
                 )
                 recommended.extend(self._alert_actions(alerts))
-                recommended.extend(
-                    action for action in self.service.build_context_actions(repo.repo.id, run.run_id) if action.enabled
-                )
+                recommended.extend(action for action in context_actions if action.enabled)
             seen_recommended: set[str] = set()
             for action in recommended:
                 if action.id in seen_recommended:
@@ -1576,6 +1892,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 seen_recommended.add(action.id)
                 results.append(
                     PickerResult(
+                        token=f"picker-{row_index}",
                         action=action,
                         section="Recommended Now",
                         priority=0,
@@ -1587,6 +1904,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             for action in self._recent_picker_actions[:5]:
                 results.append(
                     PickerResult(
+                        token=f"picker-{row_index}",
                         action=action,
                         section="Recent Commands",
                         priority=1,
@@ -1598,6 +1916,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             for preset in self._saved_view_presets:
                 results.append(
                     PickerResult(
+                        token=f"picker-{row_index}",
                         action=self._saved_view_action(preset),
                         section="Saved Views",
                         priority=2,
@@ -1608,14 +1927,17 @@ if TEXTUAL_IMPORT_ERROR is None:
 
             all_actions = list(self._navigation_actions())
             if repo is not None and run is not None:
-                all_actions = list(self.service.build_context_actions(repo.repo.id, run.run_id)) + all_actions
+                all_actions = list(context_actions) + all_actions
             seen_all: set[str] = set()
             for action in all_actions:
                 if action.id in seen_all:
                     continue
+                if not action.enabled and action.id not in context_ids:
+                    continue
                 seen_all.add(action.id)
                 results.append(
                     PickerResult(
+                        token=f"picker-{row_index}",
                         action=action,
                         section="All Actions",
                         priority=3,
@@ -1638,7 +1960,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def action_open_command(self) -> None:
             picker_results = self._picker_results()
-            self._picker_actions = {result.action.id: result.action for result in picker_results}
+            self._picker_actions = {result.token: result.action for result in picker_results}
             self.push_screen(
                 CommandPickerScreen(picker_results),
                 callback=self._handle_picker_result,
@@ -1661,20 +1983,24 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._execute_ui_action(action)
 
         def action_open_help(self) -> None:
-            self._remember_picker_action(
-                UIAction(
-                    id="open-help",
-                    label="Open Help",
-                    kind="open",
-                    scope="navigation",
-                    command_text="open help",
-                    open_tab="tab-help",
-                    shortcut_label="?",
-                )
+            action = UIAction(
+                id="open-help",
+                label="Open Help",
+                kind="open",
+                scope="navigation",
+                command_text="open help",
+                open_tab="tab-help",
+                shortcut_label="?",
+                when_to_use="You need a reminder about shortcuts, risk labels, or filter behavior.",
+                impact_summary="Switches to the Help tab.",
+                expect_next="Help will summarize shortcuts, filters, and safe-next-step guidance.",
+                risk_label="Safe",
             )
+            self._remember_picker_action(action)
+            self._record_action_feedback(action, "completed")
             self._set_active_tab("tab-help")
             self._update_detail(force_streams=True)
-            self._set_status("opened help", hold_seconds=2.0)
+            self._set_status(action.expect_next, hold_seconds=2.0)
 
         def action_open_best_artifact(self) -> None:
             repo = self._selected_repo()
@@ -1685,18 +2011,26 @@ if TEXTUAL_IMPORT_ERROR is None:
             if self._suppress_best_artifact_record:
                 self._suppress_best_artifact_record = False
             else:
-                self._record_action_execution(
-                    next(
-                        action
-                        for action in self.service.build_context_actions(repo.repo.id, run.run_id)
-                        if action.id == "open-best-artifact"
-                    )
+                action = next(
+                    action
+                    for action in self.service.build_context_actions(repo.repo.id, run.run_id)
+                    if action.id == "open-best-artifact"
                 )
+                self._record_action_execution(action)
             recommendation = self.service.artifact_recommendation(repo.repo.id, run.run_id)
+            explainer = self.service.build_action_explainer(repo.repo.id, run.run_id, "open-best-artifact")
             self._set_active_tab(recommendation.tab_id)
-            self._artifact_note = f"Best artifact: {recommendation.reason}"
+            self._artifact_note = f"Best artifact: {explainer.expect_next}"
+            self._record_action_feedback(
+                next(
+                    action
+                    for action in self.service.build_context_actions(repo.repo.id, run.run_id)
+                    if action.id == "open-best-artifact"
+                ),
+                "completed",
+            )
             self._update_detail(force_streams=True)
-            self._set_status(recommendation.reason, hold_seconds=2.0)
+            self._set_status(explainer.expect_next, hold_seconds=2.0)
 
         def _open_input(self, mode: str, value: str, placeholder: str) -> None:
             widget = self.query_one("#command-input", Input)
@@ -1868,16 +2202,49 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._apply_filter_state(status_message=f"view: {preset.label.lower()}")
 
         def _record_action_execution(self, action: UIAction) -> None:
+            self._remember_picker_action(action)
+
+        def _record_action_feedback(self, action: UIAction, stage: str, *, result: str = "") -> None:
             repo = self._selected_repo()
             repo_id = repo.repo.id if repo is not None else ""
-            if repo_id:
-                self._record_activity(
-                    repo_id,
-                    state="ACTION",
-                    target=repo.repo.name,
-                    message=action.label,
+            if not repo_id:
+                return
+            state = {
+                "started": "STARTED",
+                "completed": "COMPLETED",
+                "failed": "FAILED",
+            }.get(stage, stage.upper())
+            self._record_activity(
+                repo_id,
+                state=state,
+                target=repo.repo.name,
+                message=self._action_feedback_message(action, stage, result=result),
+            )
+
+        def _finalize_action_result(
+            self,
+            action: UIAction | None,
+            outcome: ActionOutcome | str,
+            *,
+            hold_seconds: float = 3.0,
+            failed: bool = False,
+        ) -> None:
+            resolved = self._coerce_action_outcome(outcome, failed=failed)
+            if action is None:
+                self._set_status(resolved.message, hold_seconds=hold_seconds)
+                return
+            self._record_action_feedback(action, resolved.status, result=resolved.message)
+            status_message = resolved.message
+            next_hint = resolved.next_hint or action.expect_next
+            if resolved.status != "failed" and action.kind == "open" and next_hint:
+                status_message = next_hint
+            elif resolved.status != "failed" and action.kind != "open" and next_hint:
+                status_message = (
+                    resolved.message
+                    if next_hint == resolved.message
+                    else f"{resolved.message}. {next_hint}"
                 )
-            self._remember_picker_action(action)
+            self._set_status(status_message, hold_seconds=hold_seconds)
 
         def _execute_ui_action(self, action: UIAction) -> None:
             if not action.enabled:
@@ -1892,7 +2259,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._record_action_execution(action)
             if action.id == "open-best-artifact":
                 self._suppress_best_artifact_record = True
-            self._execute_command(action.command_text)
+            self._execute_command(action.command_text, action=action)
 
         def _confirm_ui_action(self, action: UIAction, confirmed: bool) -> None:
             if not confirmed:
@@ -1901,7 +2268,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._record_action_execution(action)
             if action.id == "open-best-artifact":
                 self._suppress_best_artifact_record = True
-            self._execute_command(action.command_text)
+            self._execute_command(action.command_text, action=action)
 
         def _select_run(self, run_id: str, *, open_tab: str | None = None) -> None:
             repo = self._selected_repo()
@@ -2056,9 +2423,13 @@ if TEXTUAL_IMPORT_ERROR is None:
                     command_text=value,
                     hint="Repeat the same raw command later from the picker.",
                     group="recent",
+                    when_to_use="You already know the raw command you want to run.",
+                    impact_summary="Executes the raw command exactly as entered.",
+                    expect_next="Recent Activity and the status line will show the command result.",
+                    risk_label="Careful",
                 )
                 self._record_action_execution(action)
-                self._execute_command(value)
+                self._execute_command(value, action=action)
 
         def _parse_sort_command(self, tokens: list[str], *, repo_scope: bool) -> None:
             allowed = REPO_SORT_KEYS if repo_scope else RUN_SORT_KEYS
@@ -2084,13 +2455,15 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self._populate_run_table()
                 self._set_status(f"run sort: {self._sort_label(self.run_sort)}", hold_seconds=2.0)
 
-        def _parse_restore_command(
+        def _parse_restore_request(
             self,
             tokens: list[str],
             repo: RepoSnapshot | None,
             run: RunRow | None,
-        ) -> None:
+        ) -> tuple[RestoreRequest | None, ActionOutcome | None]:
             repo_id = repo.repo.id if repo else ""
+            if not repo_id:
+                return None, ActionOutcome.failed("select a repo first")
             force = "--force" in tokens[1:]
             args = [token for token in tokens[1:] if token != "--force"]
             run_id = run.run_id if run else ""
@@ -2103,25 +2476,92 @@ if TEXTUAL_IMPORT_ERROR is None:
                     run_id = first
             if len(args) > 1:
                 archive_path = args[1]
-            if force:
-                action = UIAction(
-                    id="restore-force",
-                    label=f"Restore evidence for `{run_id or 'selected run'}`",
-                    kind="service",
-                    scope="run",
+            if not run_id and not archive_path:
+                return None, ActionOutcome.failed("provide a run id or archive path")
+            return (
+                RestoreRequest(
+                    repo_id=repo_id,
+                    run_id=run_id,
+                    archive_path=archive_path,
+                    force=force,
                     command_text=" ".join(tokens),
-                    requires_confirmation=True,
-                )
-                self._execute_ui_action(action)
-                return
-            self._set_status(
-                self.service.restore_evidence(repo_id, run_id, archive_path=archive_path, force=force),
-                hold_seconds=3.0,
+                ),
+                None,
             )
 
-        def _execute_special_command(self, tokens: list[str]) -> bool:
+        def _restore_confirmation_action(self, request: RestoreRequest) -> UIAction:
+            target = request.run_id or request.archive_path or "selected run"
+            return UIAction(
+                id="restore-force",
+                label=f"Restore evidence for `{target}`",
+                kind="service",
+                scope="run",
+                command_text=request.command_text,
+                requires_confirmation=True,
+            )
+
+        def _execute_restore_request(self, request: RestoreRequest) -> ActionOutcome:
+            return self.service.restore_evidence(
+                request.repo_id,
+                request.run_id,
+                archive_path=request.archive_path,
+                force=request.force,
+            )
+
+        def _confirm_restore_request(
+            self,
+            request: RestoreRequest,
+            action: UIAction,
+            confirmed: bool,
+        ) -> None:
+            if not confirmed:
+                self._set_status(f"cancelled {action.label.lower()}", hold_seconds=2.0)
+                return
+            self._finalize_action_result(action, self._execute_restore_request(request))
+            self.refresh_data()
+
+        def _parse_restore_command(
+            self,
+            tokens: list[str],
+            repo: RepoSnapshot | None,
+            run: RunRow | None,
+            *,
+            action: UIAction | None = None,
+        ) -> bool:
+            request, error = self._parse_restore_request(tokens, repo, run)
+            if error is not None:
+                self._finalize_action_result(action, error, hold_seconds=2.0)
+                return True
+            if request is None:
+                self._finalize_action_result(
+                    action,
+                    ActionOutcome.failed("Unable to parse restore request."),
+                    hold_seconds=2.0,
+                )
+                return True
+            if request.force:
+                confirm_action = self._restore_confirmation_action(request)
+                outcome_action = action or confirm_action
+                if action is None:
+                    self._record_action_execution(outcome_action)
+                self.push_screen(
+                    ConfirmationScreen(confirm_action),
+                    callback=lambda confirmed: self._confirm_restore_request(
+                        request,
+                        outcome_action,
+                        confirmed,
+                    ),
+                )
+                return False
+            self._finalize_action_result(
+                action,
+                self._execute_restore_request(request),
+                hold_seconds=3.0,
+            )
+            return True
+
+        def _execute_special_command(self, tokens: list[str], action: UIAction | None = None) -> bool:
             repo = self._selected_repo()
-            run = self._selected_run()
             if tokens[0] == "open-best-artifact":
                 self.action_open_best_artifact()
                 return True
@@ -2129,59 +2569,133 @@ if TEXTUAL_IMPORT_ERROR is None:
                 target = tokens[1] if len(tokens) > 1 else ""
                 if target in {"failed", "queued", "capability", "last24h"}:
                     self._toggle_filter(target)
+                    if action is not None:
+                        self._finalize_action_result(
+                            action,
+                            ActionOutcome.completed(
+                                f"filter {target}",
+                                next_hint=action.expect_next,
+                            ),
+                            hold_seconds=2.0,
+                        )
                 elif target == "clear":
                     self._toggle_filter("clear")
+                    if action is not None:
+                        self._finalize_action_result(
+                            action,
+                            ActionOutcome.completed(
+                                "filters cleared",
+                                next_hint=action.expect_next,
+                            ),
+                            hold_seconds=2.0,
+                        )
                 else:
-                    self._set_status(f"unknown filter target: {target or '-'}", hold_seconds=2.0)
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.failed(f"unknown filter target: {target or '-'}"),
+                        hold_seconds=2.0,
+                    )
                 return True
             if tokens[0] == "saved-view":
                 preset_id = tokens[1] if len(tokens) > 1 else ""
+                preset = self.service.saved_view_preset(preset_id)
+                if preset is None:
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.failed(f"unknown saved view: {preset_id}"),
+                        hold_seconds=2.0,
+                    )
+                    return True
                 self._apply_saved_view(preset_id)
+                if action is not None:
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.completed(
+                            f"saved view {preset_id}",
+                            next_hint=action.expect_next,
+                        ),
+                        hold_seconds=2.0,
+                    )
                 return True
             if tokens[:2] == ["focus", "newest-failed"]:
                 if repo is None:
-                    self._set_status("select a repo first", hold_seconds=2.0)
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.failed("select a repo first"),
+                        hold_seconds=2.0,
+                    )
                     return True
                 run_id = self.service.newest_failed_run_id(repo.repo.id)
                 if not run_id:
-                    self._set_status("no failed run available", hold_seconds=2.0)
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.failed("no failed run available"),
+                        hold_seconds=2.0,
+                    )
                     return True
                 recommendation = self.service.artifact_recommendation(repo.repo.id, run_id)
                 self._select_run(
                     run_id,
                     open_tab=recommendation.tab_id,
                 )
-                self._set_status(f"focused {run_id}", hold_seconds=2.0)
+                self._finalize_action_result(
+                    action,
+                    ActionOutcome.completed(
+                        f"focused {run_id}",
+                        next_hint=action.expect_next if action is not None else "",
+                    ),
+                    hold_seconds=2.0,
+                )
                 return True
             if tokens[:3] == ["open", "score", "newest-failed"]:
                 if repo is None:
-                    self._set_status("select a repo first", hold_seconds=2.0)
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.failed("select a repo first"),
+                        hold_seconds=2.0,
+                    )
                     return True
                 run_id = self.service.newest_failed_run_id(repo.repo.id)
                 if not run_id:
-                    self._set_status("no failed run available", hold_seconds=2.0)
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.failed("no failed run available"),
+                        hold_seconds=2.0,
+                    )
                     return True
                 self._select_run(run_id, open_tab="tab-score")
-                self._set_status("opened score", hold_seconds=2.0)
+                self._finalize_action_result(
+                    action,
+                    ActionOutcome.completed(
+                        "opened score",
+                        next_hint=action.expect_next if action is not None else "",
+                    ),
+                    hold_seconds=2.0,
+                )
                 return True
             if tokens[0] == "repo-view-memory":
                 if repo is not None:
                     self._remember_repo_view(repo.repo.id)
-                    self._set_status("saved repo view", hold_seconds=2.0)
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.completed("saved repo view"),
+                        hold_seconds=2.0,
+                    )
                 return True
             return False
 
-        def _execute_command(self, command: str) -> None:
+        def _execute_command(self, command: str, action: UIAction | None = None) -> None:
+            refresh_after_command = True
             try:
                 tokens = shlex.split(command)
             except ValueError as exc:
-                self._set_status(f"command parse error: {exc}", hold_seconds=2.0)
+                self._finalize_action_result(action, f"command parse error: {exc}", hold_seconds=2.0, failed=True)
                 return
             if not tokens:
-                self._set_status("no command entered", hold_seconds=2.0)
+                self._finalize_action_result(action, "no command entered", hold_seconds=2.0, failed=True)
                 return
 
-            if self._execute_special_command(tokens):
+            if self._execute_special_command(tokens, action=action):
                 self.refresh_data()
                 return
 
@@ -2191,20 +2705,25 @@ if TEXTUAL_IMPORT_ERROR is None:
                 if tokens[0] == "archive-run":
                     repo_id = repo.repo.id if repo else ""
                     run_id = tokens[1] if len(tokens) > 1 else (run.run_id if run else "")
-                    self._set_status(self.service.archive_run(repo_id, run_id), hold_seconds=3.0)
+                    self._finalize_action_result(action, self.service.archive_run(repo_id, run_id))
                 elif tokens[0] == "restore-evidence":
-                    self._parse_restore_command(tokens, repo, run)
+                    refresh_after_command = self._parse_restore_command(
+                        tokens,
+                        repo,
+                        run,
+                        action=action,
+                    )
                 elif tokens[0] == "runtime-check":
                     repo_id = tokens[1] if len(tokens) > 1 else (repo.repo.id if repo else "")
-                    self._set_status(self.service.runtime_check(repo_id), hold_seconds=3.0)
+                    self._finalize_action_result(action, self.service.runtime_check(repo_id))
                 elif tokens[0] == "open-run-path":
                     repo_id = repo.repo.id if repo else ""
                     run_id = tokens[1] if len(tokens) > 1 else (run.run_id if run else "")
-                    self._set_status(self.service.open_run_path(repo_id, run_id), hold_seconds=5.0)
+                    self._finalize_action_result(action, self.service.open_run_path(repo_id, run_id), hold_seconds=5.0)
                 elif tokens[0] == "open-archive-path":
                     repo_id = repo.repo.id if repo else ""
                     run_id = tokens[1] if len(tokens) > 1 else (run.run_id if run else "")
-                    self._set_status(self.service.open_archive_path(repo_id, run_id), hold_seconds=5.0)
+                    self._finalize_action_result(action, self.service.open_archive_path(repo_id, run_id), hold_seconds=5.0)
                 elif tokens[0] == "sort-runs":
                     self._parse_sort_command(tokens, repo_scope=False)
                 elif tokens[0] == "sort-repos":
@@ -2212,39 +2731,40 @@ if TEXTUAL_IMPORT_ERROR is None:
                 elif tokens[0] == "toggle-follow":
                     target = tokens[1] if len(tokens) > 1 else _tab_title(self._detail_tab().active)
                     if target not in self.follow_mode:
-                        self._set_status(f"unknown follow target: {target or '-'}", hold_seconds=2.0)
+                        self._finalize_action_result(action, f"unknown follow target: {target or '-'}", hold_seconds=2.0, failed=True)
                     else:
                         self.follow_mode[target] = not self.follow_mode[target]
                         self._update_detail(force_streams=True)
-                        self._set_status(
+                        self._finalize_action_result(
+                            action,
                             f"{target} follow {'enabled' if self.follow_mode[target] else 'disabled'}",
                             hold_seconds=2.0,
                         )
                 elif tokens[0] == "repo":
-                    action = tokens[1] if len(tokens) > 1 else ""
+                    repo_action = tokens[1] if len(tokens) > 1 else ""
                     repo_id = tokens[2] if len(tokens) > 2 else (repo.repo.id if repo else "")
-                    if action == "start":
-                        self._set_status(self.service.start_repo(repo_id), hold_seconds=3.0)
-                    elif action == "stop":
-                        self._set_status(self.service.stop_repo(repo_id), hold_seconds=3.0)
-                    elif action == "restart":
-                        self._set_status(self.service.restart_repo(repo_id), hold_seconds=3.0)
-                    elif action == "canary":
-                        self._set_status(self.service.run_canary(repo_id), hold_seconds=3.0)
+                    if repo_action == "start":
+                        self._finalize_action_result(action, self.service.start_repo(repo_id))
+                    elif repo_action == "stop":
+                        self._finalize_action_result(action, self.service.stop_repo(repo_id))
+                    elif repo_action == "restart":
+                        self._finalize_action_result(action, self.service.restart_repo(repo_id))
+                    elif repo_action == "canary":
+                        self._finalize_action_result(action, self.service.run_canary(repo_id))
                     else:
-                        self._set_status(f"unknown repo action: {action}", hold_seconds=2.0)
+                        self._finalize_action_result(action, f"unknown repo action: {repo_action}", hold_seconds=2.0, failed=True)
                 elif tokens[0] == "run":
-                    action = tokens[1] if len(tokens) > 1 else ""
+                    run_action = tokens[1] if len(tokens) > 1 else ""
                     run_id = tokens[2] if len(tokens) > 2 else (run.run_id if run else "")
                     repo_id = repo.repo.id if repo else ""
-                    if action == "cancel":
-                        self._set_status(self.service.cancel_run(repo_id, run_id), hold_seconds=3.0)
-                    elif action == "enqueue":
-                        self._set_status(self.service.enqueue_run(repo_id, run_id), hold_seconds=3.0)
-                    elif action == "rerun":
-                        self._set_status(self.service.rerun_run(repo_id, run_id), hold_seconds=3.0)
+                    if run_action == "cancel":
+                        self._finalize_action_result(action, self.service.cancel_run(repo_id, run_id))
+                    elif run_action == "enqueue":
+                        self._finalize_action_result(action, self.service.enqueue_run(repo_id, run_id))
+                    elif run_action == "rerun":
+                        self._finalize_action_result(action, self.service.rerun_run(repo_id, run_id))
                     else:
-                        self._set_status(f"unknown run action: {action}", hold_seconds=2.0)
+                        self._finalize_action_result(action, f"unknown run action: {run_action}", hold_seconds=2.0, failed=True)
                 elif tokens[0] == "open":
                     target = tokens[1] if len(tokens) > 1 else "manifest"
                     if target == "chat":
@@ -2265,13 +2785,18 @@ if TEXTUAL_IMPORT_ERROR is None:
                         self.overview_preview = "manifest"
                         self._set_active_tab("tab-overview")
                     self._update_detail(force_streams=True)
-                    self._set_status(f"opened {target}", hold_seconds=2.0)
+                    self._finalize_action_result(
+                        action,
+                        ActionOutcome.completed(f"opened {target}"),
+                        hold_seconds=2.0,
+                    )
                 else:
-                    self._set_status(f"unknown command: {tokens[0]}", hold_seconds=2.0)
+                    self._finalize_action_result(action, f"unknown command: {tokens[0]}", hold_seconds=2.0, failed=True)
             except Exception as exc:  # pragma: no cover - surfaced to operator
-                self._set_status(str(exc), hold_seconds=3.0)
+                self._finalize_action_result(action, str(exc), failed=True)
             finally:
-                self.refresh_data()
+                if refresh_after_command:
+                    self.refresh_data()
 
 
 def build_argument_parser() -> argparse.ArgumentParser:

@@ -55,7 +55,9 @@ registry_schema = json.loads(
 jsonschema.validate(registry, registry_schema)
 PY
 bandit -q --ini "$repo_root/.bandit" -r "$repo_root/starter/bin"
-pip-audit -r "$repo_root/requirements-dev.txt"
+# Temporary exception: pip-audit reports CVE-2026-4539 for Pygments 2.19.2,
+# but there is currently no fixed upstream release to upgrade to.
+pip-audit --ignore-vuln CVE-2026-4539 -r "$repo_root/requirements-dev.txt"
 python3 "$script_dir/scan_secrets.py" "$repo_root"
 if [[ -f "$repo_root/Dockerfile" ]]; then
   trivy fs --scanners vuln,secret,misconfig "$repo_root"

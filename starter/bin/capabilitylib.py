@@ -184,9 +184,7 @@ def _validate_entry(entry: Any, *, index: int, errors: list[str]) -> dict[str, A
         tools = _list_of_strings(entry.get("tools"), field=f"entries[{index}].tools", errors=errors)
         for tool in tools:
             if tool not in SUPPORTED_TOOLS:
-                errors.append(
-                    f"entries[{index}].tools contains unsupported tool: {tool}"
-                )
+                errors.append(f"entries[{index}].tools contains unsupported tool: {tool}")
         return {
             "kind": kind,
             "id": entry_id,
@@ -334,10 +332,14 @@ def load_capability_library(
     for fragment in sorted(fragment_dir.glob("*.yml")) + sorted(fragment_dir.glob("*.yaml")):
         fragment_paths.append(fragment)
     for index, path in enumerate(fragment_paths):
-        payload = root_payload if index == 0 else _normalize_fragment(
-            _load_yaml(path),
-            path=path,
-            require_version=False,
+        payload = (
+            root_payload
+            if index == 0
+            else _normalize_fragment(
+                _load_yaml(path),
+                path=path,
+                require_version=False,
+            )
         )
         entries = payload.get("entries", [])
         if not isinstance(entries, list):
@@ -359,8 +361,7 @@ def load_capability_library(
     if errors:
         raise ValueError("; ".join(errors))
     normalized_entries = [
-        _validate_entry(entry, index=index, errors=[])
-        for index, entry in enumerate(merged_entries)
+        _validate_entry(entry, index=index, errors=[]) for index, entry in enumerate(merged_entries)
     ]
     sanitized_entries = [entry for entry in normalized_entries if entry is not None]
     serialized = json.dumps(
@@ -566,7 +567,9 @@ def evaluate_intercepted_subagent_action(
             profile.get("allow_network", False)
         ):
             violations.append(f"subagents.network_not_allowed:{profile_id}")
-        read_paths = _list_of_strings(request_payload.get("read_paths", []), field="read_paths", errors=[])
+        read_paths = _list_of_strings(
+            request_payload.get("read_paths", []), field="read_paths", errors=[]
+        )
         write_paths = _list_of_strings(
             request_payload.get("write_paths", []), field="write_paths", errors=[]
         )
@@ -680,7 +683,9 @@ def summarize_interception_log(
         runtime_value = entry.get("runtime_seconds")
         agent_id = str(entry.get("agent_id", "")).strip()
         if agent_id and isinstance(runtime_value, int | float) and float(runtime_value) >= 0:
-            runtime_by_agent[agent_id] = max(runtime_by_agent.get(agent_id, 0.0), float(runtime_value))
+            runtime_by_agent[agent_id] = max(
+                runtime_by_agent.get(agent_id, 0.0), float(runtime_value)
+            )
     return {
         "usage_present": bool(entries),
         "usage_version": INTERCEPTION_LOG_VERSION,
@@ -775,7 +780,9 @@ def validate_subagent_usage(
                 normalized,
                 list(profile.get("read_scopes", [])),
             ):
-                result["violations"].append(f"subagents.read_scope_violation:{profile_id}:{path_value}")
+                result["violations"].append(
+                    f"subagents.read_scope_violation:{profile_id}:{path_value}"
+                )
         if write_paths and not bool(profile.get("allow_write", False)):
             result["violations"].append(f"subagents.write_not_allowed:{profile_id}")
         for path_value in write_paths:

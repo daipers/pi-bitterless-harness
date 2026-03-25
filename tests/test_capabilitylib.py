@@ -218,8 +218,7 @@ def test_validate_subagent_usage_enforces_profiles_tools_budgets_and_scopes(
     assert "subagents.tool_not_allowed:reader:write" in invalid["violations"]
     assert "subagents.network_not_allowed:reader" in invalid["violations"]
     assert any(
-        item.startswith("subagents.read_scope_violation:reader:")
-        for item in invalid["violations"]
+        item.startswith("subagents.read_scope_violation:reader:") for item in invalid["violations"]
     )
     assert "subagents.write_not_allowed:reader" in invalid["violations"]
     assert "subagents.token_budget_exceeded:reader" in invalid["violations"]

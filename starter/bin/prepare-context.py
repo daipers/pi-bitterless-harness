@@ -389,24 +389,18 @@ def main(argv: list[str] | None = None) -> int:
                     rerank_pool[0].get("usefulness_probability") if rerank_pool else None
                 ),
                 "second_score": (
-                    rerank_pool[1].get("usefulness_probability")
-                    if len(rerank_pool) > 1
-                    else None
+                    rerank_pool[1].get("usefulness_probability") if len(rerank_pool) > 1 else None
                 ),
                 "score_margin": None,
                 "thresholds": {"probability_threshold": probability_threshold},
             }
         else:
             selected_sources = (
-                []
-                if abstention["abstained"]
-                else rerank_pool[: int(retrieval["max_source_runs"])]
+                [] if abstention["abstained"] else rerank_pool[: int(retrieval["max_source_runs"])]
             )
     else:
         selected_sources = (
-            []
-            if abstention["abstained"]
-            else rerank_pool[: int(retrieval["max_source_runs"])]
+            [] if abstention["abstained"] else rerank_pool[: int(retrieval["max_source_runs"])]
         )
     selected_run_ids = [item["run_id"] for item in selected_sources]
 

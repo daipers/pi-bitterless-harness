@@ -184,6 +184,10 @@ def _serialize_ui_action(action: UIAction) -> dict[str, Any]:
         "hint": action.hint,
         "shortcut_label": action.shortcut_label,
         "group": action.group,
+        "when_to_use": action.when_to_use,
+        "impact_summary": action.impact_summary,
+        "expect_next": action.expect_next,
+        "risk_label": action.risk_label,
     }
 
 
@@ -202,6 +206,10 @@ def _deserialize_ui_action(payload: dict[str, Any]) -> UIAction:
         hint=str(payload.get("hint", "")),
         shortcut_label=str(payload.get("shortcut_label", "")),
         group=str(payload.get("group", "")),
+        when_to_use=str(payload.get("when_to_use", "")),
+        impact_summary=str(payload.get("impact_summary", "")),
+        expect_next=str(payload.get("expect_next", "")),
+        risk_label=str(payload.get("risk_label", "")),
     )
 
 
@@ -273,6 +281,10 @@ class UIAction:
     hint: str = ""
     shortcut_label: str = ""
     group: str = ""
+    when_to_use: str = ""
+    impact_summary: str = ""
+    expect_next: str = ""
+    risk_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -293,6 +305,49 @@ class TimelineStep:
 @dataclass(frozen=True)
 class ArtifactRecommendation:
     tab_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ActionOutcome:
+    status: str
+    message: str
+    next_hint: str = ""
+
+    @classmethod
+    def started(cls, message: str, *, next_hint: str = "") -> ActionOutcome:
+        return cls("started", message, next_hint=next_hint)
+
+    @classmethod
+    def completed(cls, message: str, *, next_hint: str = "") -> ActionOutcome:
+        return cls("completed", message, next_hint=next_hint)
+
+    @classmethod
+    def failed(cls, message: str) -> ActionOutcome:
+        return cls("failed", message)
+
+    def __str__(self) -> str:
+        return self.message
+
+
+@dataclass(frozen=True)
+class ActionExplainer:
+    action_id: str
+    title: str
+    summary: str
+    when_to_use: str
+    impact_summary: str
+    expect_next: str
+    enabled: bool
+    disabled_reason: str
+    risk_label: str
+
+
+@dataclass(frozen=True)
+class SelectionGuidance:
+    headline: str
+    status_summary: str
+    safe_next_step: str
     reason: str
 
 
@@ -318,6 +373,7 @@ class TargetSummary:
     alerts: tuple[AlertBadge, ...]
     recommended_actions: tuple[UIAction, ...]
     recommended_tab: str
+    selection_guidance: SelectionGuidance
 
 
 @dataclass(frozen=True)
@@ -522,7 +578,12 @@ def _slugify_title(value: str) -> str:
 
 def _derive_run_title(prompt: str) -> str:
     cleaned = re.sub(r"\s+", " ", prompt.strip())
-    cleaned = re.sub(r"^(create|start|run|launch|ask)\s+(a\s+)?(new\s+)?(run|task)\s+(to\s+)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(create|start|run|launch|ask)\s+(a\s+)?(new\s+)?(run|task)\s+(to\s+)?",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     words = cleaned.split()
     if not words:
         return "operator-request"
@@ -968,25 +1029,26 @@ class RepoSupervisor:
             self._stderr_handle.close()
             self._stderr_handle = None
 
-    def start(self) -> str:
+    def start(self) -> ActionOutcome:
         self.desired_running = True
         if self.process is not None and self.process.poll() is None:
-            return "orchestrator already running"
+            return ActionOutcome.failed("orchestrator already running")
         self._clear_failure_latch()
         if self._launch_orchestrator():
-            return "orchestrator started"
-        return (
+            return ActionOutcome.completed("orchestrator started")
+        message = (
             "orchestrator entered crash loop"
             if self.crash_loop
             else f"orchestrator launch failed: {self.last_error}"
         )
+        return ActionOutcome.failed(message)
 
-    def stop(self) -> str:
+    def stop(self) -> ActionOutcome:
         self.desired_running = False
         self.next_restart_at = 0.0
         if self.process is None:
             self._persist_status("stopped")
-            return "orchestrator already stopped"
+            return ActionOutcome.failed("orchestrator already stopped")
         if self.process.poll() is None:
             self.process.terminate()
             try:
@@ -1000,19 +1062,20 @@ class RepoSupervisor:
         self._close_orchestrator_logs()
         self._record_message("stopped orchestrator")
         self._persist_status("stopped")
-        return "orchestrator stopped"
+        return ActionOutcome.completed("orchestrator stopped")
 
-    def restart(self) -> str:
+    def restart(self) -> ActionOutcome:
         self.stop()
         self.desired_running = True
         self._clear_failure_latch()
         if self._launch_orchestrator():
-            return "orchestrator restarted"
-        return (
+            return ActionOutcome.completed("orchestrator restarted")
+        message = (
             "orchestrator entered crash loop"
             if self.crash_loop
             else f"orchestrator launch failed: {self.last_error}"
         )
+        return ActionOutcome.failed(message)
 
     def _poll_orchestrator(self) -> None:
         if self.process is not None:
@@ -1052,10 +1115,10 @@ class RepoSupervisor:
         *,
         cwd: pathlib.Path,
         env: dict[str, str] | None = None,
-    ) -> str:
+    ) -> ActionOutcome:
         active = self.active_commands.get(command_id)
         if active is not None and active.exit_code is None:
-            return f"{label} is already running"
+            return ActionOutcome.failed(f"{label} is already running")
         stdout_path, stderr_path = self._command_log_paths(label.replace(" ", "-"))
         stdout_handle = stdout_path.open("ab")
         stderr_handle = stderr_path.open("ab")
@@ -1071,7 +1134,7 @@ class RepoSupervisor:
             message = f"{label} failed to start: {_format_exception(exc)}"
             self.last_action_result = message
             self._record_message(message)
-            return message
+            return ActionOutcome.failed(message)
         finally:
             stdout_handle.close()
             stderr_handle.close()
@@ -1084,9 +1147,9 @@ class RepoSupervisor:
             started_epoch_ms=_now_ms(),
         )
         self._record_message(f"started {label}")
-        return f"{label} started"
+        return ActionOutcome.started(f"{label} started")
 
-    def launch_canary(self) -> str:
+    def launch_canary(self) -> ActionOutcome:
         return self._launch_managed_command(
             "canary",
             "real canary",
@@ -1095,7 +1158,7 @@ class RepoSupervisor:
             env={"PYTHONPATH": str(self.repo.root / "starter" / "bin")},
         )
 
-    def launch_rerun(self, run_dir: pathlib.Path) -> str:
+    def launch_rerun(self, run_dir: pathlib.Path) -> ActionOutcome:
         command_id = f"rerun:{run_dir.name}"
         return self._launch_managed_command(
             command_id,
@@ -1108,7 +1171,7 @@ class RepoSupervisor:
             },
         )
 
-    def launch_run(self, run_dir: pathlib.Path, *, model: str = "") -> str:
+    def launch_run(self, run_dir: pathlib.Path, *, model: str = "") -> ActionOutcome:
         command_id = f"run:{run_dir.name}"
         command = [str(self.repo.root / "starter" / "bin" / "run-task.sh"), str(run_dir)]
         if model:
@@ -1121,7 +1184,7 @@ class RepoSupervisor:
             env={"PYTHONPATH": str(self.repo.root / "starter" / "bin")},
         )
 
-    def launch_archive(self, run_dir: pathlib.Path, archive_path: pathlib.Path) -> str:
+    def launch_archive(self, run_dir: pathlib.Path, archive_path: pathlib.Path) -> ActionOutcome:
         command_id = f"archive:{run_dir.name}"
         return self._launch_managed_command(
             command_id,
@@ -1141,7 +1204,7 @@ class RepoSupervisor:
         destination_root: pathlib.Path,
         *,
         archive_root: str,
-    ) -> str:
+    ) -> ActionOutcome:
         command_id = f"restore:{archive_root}"
         return self._launch_managed_command(
             command_id,
@@ -1155,7 +1218,7 @@ class RepoSupervisor:
             env={"PYTHONPATH": str(self.repo.root / "starter" / "bin")},
         )
 
-    def launch_runtime_check(self) -> str:
+    def launch_runtime_check(self) -> ActionOutcome:
         return self._launch_managed_command(
             "runtime-check",
             "runtime check",
@@ -1171,9 +1234,7 @@ class RepoSupervisor:
             summary_line = stdout_line or stderr_line or "completed successfully"
         else:
             summary_line = (
-                stderr_line
-                or stdout_line
-                or f"failed with exit code {managed.exit_code}"
+                stderr_line or stdout_line or f"failed with exit code {managed.exit_code}"
             )
         self.last_action_result = f"{managed.label}: {summary_line}"
         self._record_message(self.last_action_result)
@@ -1591,6 +1652,13 @@ class ControlCenterService:
             "archive-run": "a",
         }.get(command_text.split()[0], "")
 
+    def _action_readiness(self, action: UIAction) -> str:
+        if not action.enabled:
+            return "Unavailable"
+        if action.risk_label in {"Review", "Careful"}:
+            return "Needs attention"
+        return "Ready"
+
     def _annotate_action(
         self,
         action: UIAction,
@@ -1598,6 +1666,10 @@ class ControlCenterService:
         hint: str = "",
         shortcut_label: str = "",
         group: str = "",
+        when_to_use: str = "",
+        impact_summary: str = "",
+        expect_next: str = "",
+        risk_label: str = "",
     ) -> UIAction:
         return UIAction(
             id=action.id,
@@ -1613,6 +1685,10 @@ class ControlCenterService:
             hint=hint,
             shortcut_label=shortcut_label or self._shortcut_label(action.command_text),
             group=group,
+            when_to_use=when_to_use,
+            impact_summary=impact_summary,
+            expect_next=expect_next,
+            risk_label=risk_label,
         )
 
     def artifact_recommendation(self, repo_id: str, run_id: str) -> ArtifactRecommendation:
@@ -1639,7 +1715,14 @@ class ControlCenterService:
                 "tab-overview",
                 "Opened Overview because no patch artifact is present.",
             )
-        if row.state in {"queued", "claimed", "model_running", "scoring", "score_pending"}:
+        if row.state in {
+            "queued",
+            "claimed",
+            "model_running",
+            "scoring",
+            "score_pending",
+            "model_complete",
+        }:
             return ArtifactRecommendation(
                 "tab-events",
                 "Opened Events because this run is still in progress.",
@@ -1648,6 +1731,110 @@ class ControlCenterService:
 
     def recommended_artifact_tab(self, repo_id: str, run_id: str) -> str:
         return self.artifact_recommendation(repo_id, run_id).tab_id
+
+    def build_repo_guidance(self, repo_id: str) -> str:
+        repo = self._repo_snapshot(repo_id)
+        queue_wait_p95 = int(repo.summary.get("queue_wait_ms", {}).get("p95", 0) or 0)
+        saturation_last_24h = int(
+            repo.summary.get("queue_saturation", {}).get("events_last_24h", 0) or 0
+        )
+        if repo.runtime_check_ok is False:
+            return "Repo runtime check failed. Run Runtime Check before starting new work."
+        if repo.canary_failing:
+            return "Repo canary failed. Open Health before trusting new output."
+        if queue_wait_p95 >= 300_000 or saturation_last_24h > 0:
+            return "Repo queue is backed up. Filtering queued runs is the fastest way to inspect pressure."
+        if repo.queued_count >= 3 or queue_wait_p95 >= 60_000:
+            return "Repo queue is warming up. Queued runs are the best place to inspect demand."
+        if repo.stale_run_count > 0:
+            return "Repo has stale active runs. Filter queued work before launching more."
+        if repo.canary_stale:
+            return "Repo canary is stale. Health shows whether the latest checks are still trustworthy."
+        return "Repo looks healthy. Reviewing the selected run is the safest next step."
+
+    def build_run_guidance(self, repo_id: str, run_id: str) -> str:
+        row = self._run_row(repo_id, run_id)
+        recommendation = self.artifact_recommendation(repo_id, run_id)
+        if row.state in {"failed", "cancelled"} or row.overall_pass is False:
+            return "Selected run failed. Reviewing Score is the safest next step."
+        if row.state == "complete" and row.overall_pass is True:
+            target = "Patch" if recommendation.tab_id == "tab-patch" else "Overview"
+            return f"Selected run passed. Reviewing {target} is the safest next step."
+        if row.state in {"queued", "claimed"}:
+            return "Selected run is queued. Events is the safest place to watch claim and start progress."
+        if row.state in {"model_running", "scoring", "score_pending", "model_complete"}:
+            return (
+                "Selected run is in progress. Events is the safest place to watch it move forward."
+            )
+        return "Selected run is available. Open Best Artifact for the quickest explanation."
+
+    def build_selection_guidance(self, repo_id: str, run_id: str) -> SelectionGuidance:
+        row = self._run_row(repo_id, run_id)
+        repo_guidance = self.build_repo_guidance(repo_id)
+        run_guidance = self.build_run_guidance(repo_id, run_id)
+        artifact_action = next(
+            action
+            for action in self.build_context_actions(repo_id, run_id)
+            if action.id == "open-best-artifact"
+        )
+        if row.state in {"failed", "cancelled"} or row.overall_pass is False:
+            return SelectionGuidance(
+                headline="Failed run selected",
+                status_summary=run_guidance,
+                safe_next_step=artifact_action.label,
+                reason="The score or transcript usually explains a failed run faster than logs or retries.",
+            )
+        if row.state == "complete" and row.overall_pass is True:
+            return SelectionGuidance(
+                headline="Passing run selected",
+                status_summary=run_guidance,
+                safe_next_step=artifact_action.label,
+                reason="Reviewing the best artifact is the lowest-risk way to confirm what changed.",
+            )
+        if row.state in {
+            "queued",
+            "claimed",
+            "model_running",
+            "scoring",
+            "score_pending",
+            "model_complete",
+        }:
+            return SelectionGuidance(
+                headline="Active run selected",
+                status_summary=f"{run_guidance} {repo_guidance}",
+                safe_next_step=artifact_action.label,
+                reason="Watching the run first is safer than changing orchestration while work is in flight.",
+            )
+        return SelectionGuidance(
+            headline="Run selected",
+            status_summary=f"{run_guidance} {repo_guidance}",
+            safe_next_step=artifact_action.label,
+            reason="Open Best Artifact gives the fastest low-risk explanation of the current state.",
+        )
+
+    def build_action_explainer(self, repo_id: str, run_id: str, action_id: str) -> ActionExplainer:
+        action = next(
+            candidate
+            for candidate in self.build_context_actions(repo_id, run_id)
+            if candidate.id == action_id
+        )
+        readiness = self._action_readiness(action)
+        summary = action.hint or action.label
+        if not action.enabled and action.disabled_reason:
+            summary = action.disabled_reason
+        return ActionExplainer(
+            action_id=action.id,
+            title=action.label,
+            summary=summary,
+            when_to_use=action.when_to_use
+            or "Use this when it matches the current repo or run state.",
+            impact_summary=action.impact_summary
+            or "This action changes the current view or repo state.",
+            expect_next=action.expect_next or "Recent Activity will show what happened next.",
+            enabled=action.enabled,
+            disabled_reason=action.disabled_reason,
+            risk_label=action.risk_label or ("Safe" if readiness == "Ready" else "Review"),
+        )
 
     def saved_view_presets(self) -> tuple[SavedViewPreset, ...]:
         return (
@@ -1774,6 +1961,10 @@ class ControlCenterService:
                         ),
                         hint="Re-run the repo runtime health check.",
                         group="recommended",
+                        when_to_use="Runtime support looks unhealthy or you want to verify the repo environment.",
+                        impact_summary="Launches the repo runtime check without changing run artifacts.",
+                        expect_next="Results will appear in Health.",
+                        risk_label="Review",
                     ),
                 )
             )
@@ -1795,6 +1986,10 @@ class ControlCenterService:
                         ),
                         hint="Open the Health tab for repo checks and canary output.",
                         group="recommended",
+                        when_to_use="You need the latest repo health, canary, or runtime details.",
+                        impact_summary="Switches to the Health tab without changing repo state.",
+                        expect_next="Health will show the latest canary and runtime information.",
+                        risk_label="Safe",
                     ),
                 )
             )
@@ -1814,6 +2009,10 @@ class ControlCenterService:
                         ),
                         hint="Open the Health tab for repo checks and canary output.",
                         group="recommended",
+                        when_to_use="You need the latest repo health, canary, or runtime details.",
+                        impact_summary="Switches to the Health tab without changing repo state.",
+                        expect_next="Health will show the latest canary and runtime information.",
+                        risk_label="Safe",
                     ),
                 )
             )
@@ -1833,6 +2032,10 @@ class ControlCenterService:
                         ),
                         hint="Filter the run list to queued and in-flight work.",
                         group="recommended",
+                        when_to_use="Queue pressure or stale active work needs inspection.",
+                        impact_summary="Narrows the run list to queued and in-flight work.",
+                        expect_next="Queued runs will stay visible so you can inspect pressure quickly.",
+                        risk_label="Safe",
                     ),
                 )
             )
@@ -1852,6 +2055,10 @@ class ControlCenterService:
                         ),
                         hint="Filter the run list to queued and in-flight work.",
                         group="recommended",
+                        when_to_use="Queue pressure or stale active work needs inspection.",
+                        impact_summary="Narrows the run list to queued and in-flight work.",
+                        expect_next="Queued runs will stay visible so you can inspect pressure quickly.",
+                        risk_label="Safe",
                     ),
                 )
             )
@@ -1871,13 +2078,15 @@ class ControlCenterService:
                         ),
                         hint="Filter the run list to queued and in-flight work.",
                         group="recommended",
+                        when_to_use="Queue pressure or stale active work needs inspection.",
+                        impact_summary="Narrows the run list to queued and in-flight work.",
+                        expect_next="Queued runs will stay visible so you can inspect pressure quickly.",
+                        risk_label="Safe",
                     ),
                 )
             )
         if repo.in_flight_count > 0:
-            alerts.append(
-                AlertBadge("info", "Runs in flight", f"{repo.in_flight_count} active")
-            )
+            alerts.append(AlertBadge("info", "Runs in flight", f"{repo.in_flight_count} active"))
         alerts.sort(key=lambda item: (_severity_rank(item.severity), item.label.lower()))
         return alerts
 
@@ -1924,6 +2133,10 @@ class ControlCenterService:
                         hint="Open the most useful artifact for the selected run.",
                         shortcut_label="o",
                         group="recommended",
+                        when_to_use="You need the quickest explanation of why this run failed.",
+                        impact_summary="Opens the artifact that best explains the run without changing repo state.",
+                        expect_next="Open Best Artifact will choose the most useful tab for this failed run.",
+                        risk_label="Safe",
                     ),
                 )
             )
@@ -1957,6 +2170,10 @@ class ControlCenterService:
                         hint="Open the most useful artifact for the selected run.",
                         shortcut_label="o",
                         group="recommended",
+                        when_to_use="You need the quickest explanation of this failed or cancelled run.",
+                        impact_summary="Opens the artifact that best explains the run without changing repo state.",
+                        expect_next="Open Best Artifact will choose the most useful tab for this failed run.",
+                        risk_label="Safe",
                     ),
                 )
             )
@@ -1977,6 +2194,10 @@ class ControlCenterService:
                         hint="Open the most useful artifact for the selected run.",
                         shortcut_label="o",
                         group="recommended",
+                        when_to_use="You want the fastest explanation of why this run did not pass.",
+                        impact_summary="Opens the artifact that best explains the run without changing repo state.",
+                        expect_next="Open Best Artifact will choose the most useful tab for this failed run.",
+                        risk_label="Safe",
                     ),
                 )
             )
@@ -2054,6 +2275,7 @@ class ControlCenterService:
         repo = self._repo_snapshot(repo_id)
         row = self._run_row(repo_id, run_id)
         repo_state = repo.orchestrator.state
+        recommendation = self.artifact_recommendation(repo_id, run_id)
         actions = [
             self._annotate_action(
                 UIAction(
@@ -2068,6 +2290,10 @@ class ControlCenterService:
                 hint="Open the artifact that best explains the current run state.",
                 shortcut_label="o",
                 group="recommended",
+                when_to_use="You want the quickest explanation of the selected run.",
+                impact_summary="Opens the most useful artifact tab without changing repo or run state.",
+                expect_next=recommendation.reason,
+                risk_label="Safe",
             ),
             self._annotate_action(
                 UIAction(
@@ -2081,6 +2307,10 @@ class ControlCenterService:
                 ),
                 hint="Open the transcript stream for the selected run.",
                 group="all-actions",
+                when_to_use="You need the raw model or worker transcript for the selected run.",
+                impact_summary="Switches to the Transcript tab for the selected run.",
+                expect_next="Transcript will show the latest streamed messages for this run.",
+                risk_label="Safe",
             ),
             self._annotate_action(
                 UIAction(
@@ -2096,6 +2326,10 @@ class ControlCenterService:
                 ),
                 hint="Open the evaluation output when a score artifact is available.",
                 group="all-actions",
+                when_to_use="You want evaluation output and pass/fail details for this run.",
+                impact_summary="Switches to the Score tab if a score artifact exists.",
+                expect_next="Score will show evaluation results and failure context.",
+                risk_label="Safe",
             ),
             self._annotate_action(
                 UIAction(
@@ -2108,6 +2342,10 @@ class ControlCenterService:
                 ),
                 hint="Run the repo runtime compatibility check.",
                 group="all-actions",
+                when_to_use="Runtime support looks unhealthy or you want to verify the repo environment.",
+                impact_summary="Launches the repo runtime check without altering run artifacts.",
+                expect_next="Results will appear in Health.",
+                risk_label="Review",
             ),
             self._annotate_action(
                 UIAction(
@@ -2121,6 +2359,10 @@ class ControlCenterService:
                 hint="Archive evidence for the selected run.",
                 shortcut_label="a",
                 group="all-actions",
+                when_to_use="You want to preserve run evidence before cleanup or sharing.",
+                impact_summary="Launches evidence archiving for the selected run.",
+                expect_next="Archive status will appear in Recent Activity and Health when complete.",
+                risk_label="Review",
             ),
             self._annotate_action(
                 UIAction(
@@ -2136,6 +2378,10 @@ class ControlCenterService:
                 ),
                 hint="Cancel a non-terminal run.",
                 group="all-actions",
+                when_to_use="The selected run is still active and should stop.",
+                impact_summary="Requests cancellation for the current run.",
+                expect_next="Watch Events for cancellation progress.",
+                risk_label="Careful",
             ),
             self._annotate_action(
                 UIAction(
@@ -2160,6 +2406,10 @@ class ControlCenterService:
                 ),
                 hint="Place the selected run back into the queue when eligible.",
                 group="all-actions",
+                when_to_use="The selected run is eligible to be picked up again.",
+                impact_summary="Places the selected run back into the queue.",
+                expect_next="Watch Events for queue claim and start progress.",
+                risk_label="Review",
             ),
             self._annotate_action(
                 UIAction(
@@ -2170,11 +2420,17 @@ class ControlCenterService:
                     command_text=f"run rerun {run_id}",
                     requires_confirmation=True,
                     enabled=_is_terminal_state(row.state),
-                    disabled_reason="run is not terminal" if not _is_terminal_state(row.state) else "",
+                    disabled_reason="run is not terminal"
+                    if not _is_terminal_state(row.state)
+                    else "",
                     aliases=("rerun", "retry"),
                 ),
                 hint="Create a fresh attempt for a terminal run.",
                 group="all-actions",
+                when_to_use="A terminal run needs a fresh attempt.",
+                impact_summary="Launches a new rerun attempt for this run.",
+                expect_next="Watch Events for claim and start progress.",
+                risk_label="Careful",
             ),
             self._annotate_action(
                 UIAction(
@@ -2189,6 +2445,10 @@ class ControlCenterService:
                 ),
                 hint="Start the orchestrator for this repo.",
                 group="all-actions",
+                when_to_use="This repo's orchestrator is stopped and you want it managing runs again.",
+                impact_summary="Starts the repo orchestrator.",
+                expect_next="Repo status and queue activity will appear in Health and Recent Activity.",
+                risk_label="Review",
             ),
             self._annotate_action(
                 UIAction(
@@ -2204,6 +2464,10 @@ class ControlCenterService:
                 ),
                 hint="Stop the orchestrator for this repo.",
                 group="all-actions",
+                when_to_use="You need to halt the orchestrator for this repo.",
+                impact_summary="Stops repo orchestration and prevents further automatic work.",
+                expect_next="Health will show the repo as stopped.",
+                risk_label="Careful",
             ),
             self._annotate_action(
                 UIAction(
@@ -2219,6 +2483,10 @@ class ControlCenterService:
                 ),
                 hint="Restart the orchestrator for this repo.",
                 group="all-actions",
+                when_to_use="The orchestrator needs a clean restart.",
+                impact_summary="Stops and starts the repo orchestrator.",
+                expect_next="Health and Recent Activity will show the restart result.",
+                risk_label="Careful",
             ),
             self._annotate_action(
                 UIAction(
@@ -2231,6 +2499,10 @@ class ControlCenterService:
                 ),
                 hint="Run the real canary check for this repo.",
                 group="all-actions",
+                when_to_use="You want a fresh real-world canary result for this repo.",
+                impact_summary="Launches the repo canary check.",
+                expect_next="Canary results will appear in Health.",
+                risk_label="Review",
             ),
         ]
         return tuple(actions)
@@ -2244,7 +2516,11 @@ class ControlCenterService:
         )[:3]
         alerts = tuple(self._repo_alerts(repo) + list(self.build_run_alerts(repo_id, run_id)))
         pass_label = (
-            "pass" if row.overall_pass is True else "fail" if row.overall_pass is False else "pending"
+            "pass"
+            if row.overall_pass is True
+            else "fail"
+            if row.overall_pass is False
+            else "pending"
         )
         return TargetSummary(
             repo_id=repo.repo.id,
@@ -2257,6 +2533,7 @@ class ControlCenterService:
             alerts=alerts,
             recommended_actions=safe_actions,
             recommended_tab=self.recommended_artifact_tab(repo_id, run_id),
+            selection_guidance=self.build_selection_guidance(repo_id, run_id),
         )
 
     def _chat_log_path(self, repo_id: str) -> pathlib.Path:
@@ -2288,9 +2565,7 @@ class ControlCenterService:
                 "run_id": run_id,
                 "action_name": action_name,
                 "resulting_run_id": resulting_run_id,
-                "follow_up_actions": [
-                    _serialize_ui_action(action) for action in follow_up_actions
-                ],
+                "follow_up_actions": [_serialize_ui_action(action) for action in follow_up_actions],
             },
         )
 
@@ -2382,7 +2657,11 @@ class ControlCenterService:
 
     def _failed_runs_summary(self, repo_id: str) -> str:
         repo = self._repo_snapshot(repo_id)
-        failed = [run for run in repo.runs if run.state in {"failed", "cancelled"} or run.overall_pass is False]
+        failed = [
+            run
+            for run in repo.runs
+            if run.state in {"failed", "cancelled"} or run.overall_pass is False
+        ]
         if not failed:
             return "No failed runs are visible in the current window."
         lines = ["Failed runs:"]
@@ -2564,7 +2843,9 @@ class ControlCenterService:
             "",
             "Task preview",
             "=" * 12,
-            _build_chat_task_text("", title=title, prompt=prompt).split("## Result JSON schema")[0].rstrip(),
+            _build_chat_task_text("", title=title, prompt=prompt)
+            .split("## Result JSON schema")[0]
+            .rstrip(),
             "",
             "Type `confirm` to proceed or `cancel` to discard.",
         ]
@@ -2593,7 +2874,9 @@ class ControlCenterService:
 
     def _create_chat_run(self, repo_id: str, pending: ChatPendingAction) -> ChatSubmissionResult:
         repo = self._repo_config(repo_id)
-        profile = str(pending.payload.get("profile", "")).strip() or repo.default_profile or "strict"
+        profile = (
+            str(pending.payload.get("profile", "")).strip() or repo.default_profile or "strict"
+        )
         model = str(pending.payload.get("model", "")).strip()
         launch_mode = str(pending.payload.get("launch_mode", "launch")).strip() or "launch"
         title = str(pending.payload.get("title", "")).strip() or _derive_run_title(pending.prompt)
@@ -2608,7 +2891,13 @@ class ControlCenterService:
         )
         if completed.returncode != 0:
             reply = f"run creation failed: {(completed.stderr or completed.stdout).strip() or completed.returncode}"
-            self._chat_append(repo_id, role="system", message_type="action_result", content=reply, action_name="new_run")
+            self._chat_append(
+                repo_id,
+                role="system",
+                message_type="action_result",
+                content=reply,
+                action_name="new_run",
+            )
             return ChatSubmissionResult(reply=reply)
 
         run_ref = ""
@@ -2619,7 +2908,13 @@ class ControlCenterService:
         run_dir = (repo.root / "starter" / run_ref).resolve() if run_ref else None
         if run_dir is None or not run_dir.exists():
             reply = "run creation failed: could not resolve the created run directory"
-            self._chat_append(repo_id, role="system", message_type="action_result", content=reply, action_name="new_run")
+            self._chat_append(
+                repo_id,
+                role="system",
+                message_type="action_result",
+                content=reply,
+                action_name="new_run",
+            )
             return ChatSubmissionResult(reply=reply)
 
         task_path = run_dir / "task.md"
@@ -2638,7 +2933,7 @@ class ControlCenterService:
             f"Created run `{run_id}`.\n"
             f"Profile: {profile}\n"
             f"Model: {model or '(harness default)'}\n"
-            f"Action: {action_result}"
+            f"Action: {action_result.message}"
         )
         self._chat_append(
             repo_id,
@@ -2652,7 +2947,9 @@ class ControlCenterService:
         self._save_pending_action(repo_id, None)
         return ChatSubmissionResult(reply=reply, focus_run_id=run_id, follow_up_actions=())
 
-    def _execute_pending_action(self, repo_id: str, pending: ChatPendingAction) -> ChatSubmissionResult:
+    def _execute_pending_action(
+        self, repo_id: str, pending: ChatPendingAction
+    ) -> ChatSubmissionResult:
         if pending.action_type == "new_run":
             return self._create_chat_run(repo_id, pending)
 
@@ -2687,18 +2984,24 @@ class ControlCenterService:
                 force=force,
             )
         else:
-            reply = f"unsupported pending action: {action_name or pending.action_type}"
+            reply = ActionOutcome.failed(
+                f"unsupported pending action: {action_name or pending.action_type}"
+            )
         self._chat_append(
             repo_id,
             role="system",
             message_type="action_result",
-            content=reply,
+            content=reply.message,
             run_id=run_id,
             action_name=action_name,
             follow_up_actions=(),
         )
         self._save_pending_action(repo_id, None)
-        return ChatSubmissionResult(reply=reply, focus_run_id=run_id, follow_up_actions=())
+        return ChatSubmissionResult(
+            reply=reply.message,
+            focus_run_id=run_id,
+            follow_up_actions=(),
+        )
 
     def _pending_simple_action(
         self,
@@ -2741,7 +3044,6 @@ class ControlCenterService:
         selected_run_id: str,
         tokens: list[str],
     ) -> ChatSubmissionResult:
-        repo = self._repo_snapshot(repo_id)
         if tokens[0] in {"/new", "new"}:
             profile = ""
             model = ""
@@ -2774,7 +3076,9 @@ class ControlCenterService:
                 break
             prompt = " ".join(prompt_parts).strip()
             if not prompt:
-                reply = "Usage: /new [--profile PROFILE] [--model MODEL] [--queue] <operator request>"
+                reply = (
+                    "Usage: /new [--profile PROFILE] [--model MODEL] [--queue] <operator request>"
+                )
                 self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
                 return ChatSubmissionResult(reply=reply)
             return self._draft_new_run(
@@ -2788,13 +3092,25 @@ class ControlCenterService:
             action = tokens[1] if len(tokens) > 1 else ""
             target_repo_id = tokens[2] if len(tokens) > 2 else repo_id
             if action == "start":
-                return self._pending_simple_action(target_repo_id, action_name="repo_start", label=f"Start repo `{target_repo_id}`")
+                return self._pending_simple_action(
+                    target_repo_id, action_name="repo_start", label=f"Start repo `{target_repo_id}`"
+                )
             if action == "stop":
-                return self._pending_simple_action(target_repo_id, action_name="repo_stop", label=f"Stop repo `{target_repo_id}`")
+                return self._pending_simple_action(
+                    target_repo_id, action_name="repo_stop", label=f"Stop repo `{target_repo_id}`"
+                )
             if action == "restart":
-                return self._pending_simple_action(target_repo_id, action_name="repo_restart", label=f"Restart repo `{target_repo_id}`")
+                return self._pending_simple_action(
+                    target_repo_id,
+                    action_name="repo_restart",
+                    label=f"Restart repo `{target_repo_id}`",
+                )
             if action == "canary":
-                return self._pending_simple_action(target_repo_id, action_name="repo_canary", label=f"Run canary for repo `{target_repo_id}`")
+                return self._pending_simple_action(
+                    target_repo_id,
+                    action_name="repo_canary",
+                    label=f"Run canary for repo `{target_repo_id}`",
+                )
         if tokens[0] == "run":
             action = tokens[1] if len(tokens) > 1 else ""
             run_id = tokens[2] if len(tokens) > 2 else selected_run_id
@@ -2803,18 +3119,35 @@ class ControlCenterService:
                 self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
                 return ChatSubmissionResult(reply=reply)
             if action == "cancel":
-                return self._pending_simple_action(repo_id, action_name="run_cancel", label=f"Cancel run `{run_id}`", run_id=run_id)
+                return self._pending_simple_action(
+                    repo_id, action_name="run_cancel", label=f"Cancel run `{run_id}`", run_id=run_id
+                )
             if action == "enqueue":
-                return self._pending_simple_action(repo_id, action_name="run_enqueue", label=f"Enqueue run `{run_id}`", run_id=run_id)
+                return self._pending_simple_action(
+                    repo_id,
+                    action_name="run_enqueue",
+                    label=f"Enqueue run `{run_id}`",
+                    run_id=run_id,
+                )
             if action == "rerun":
-                return self._pending_simple_action(repo_id, action_name="run_rerun", label=f"Rerun run `{run_id}`", run_id=run_id)
+                return self._pending_simple_action(
+                    repo_id, action_name="run_rerun", label=f"Rerun run `{run_id}`", run_id=run_id
+                )
         if tokens[0] == "runtime-check":
-            return self._pending_simple_action(repo_id, action_name="runtime_check", label=f"Run runtime check for repo `{repo_id}`")
+            return self._pending_simple_action(
+                repo_id,
+                action_name="runtime_check",
+                label=f"Run runtime check for repo `{repo_id}`",
+            )
         if tokens[0] == "archive-run":
             run_id = tokens[1] if len(tokens) > 1 else selected_run_id
-            return self._pending_simple_action(repo_id, action_name="archive_run", label=f"Archive run `{run_id}`", run_id=run_id)
+            return self._pending_simple_action(
+                repo_id, action_name="archive_run", label=f"Archive run `{run_id}`", run_id=run_id
+            )
         if tokens[0] == "restore-evidence":
-            run_id = tokens[1] if len(tokens) > 1 and not tokens[1].startswith("/") else selected_run_id
+            run_id = (
+                tokens[1] if len(tokens) > 1 and not tokens[1].startswith("/") else selected_run_id
+            )
             archive_path = ""
             if len(tokens) > 1 and tokens[1].startswith("/"):
                 archive_path = tokens[1]
@@ -2843,8 +3176,16 @@ class ControlCenterService:
             open_tab = tab_map.get(target)
             if open_tab:
                 reply = f"Opened {target}."
-                self._chat_append(repo_id, role="assistant", message_type="reply", content=reply, run_id=selected_run_id)
-                return ChatSubmissionResult(reply=reply, focus_run_id=selected_run_id, open_tab=open_tab)
+                self._chat_append(
+                    repo_id,
+                    role="assistant",
+                    message_type="reply",
+                    content=reply,
+                    run_id=selected_run_id,
+                )
+                return ChatSubmissionResult(
+                    reply=reply, focus_run_id=selected_run_id, open_tab=open_tab
+                )
         reply = f"Unsupported chat command: {' '.join(tokens)}"
         self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
         return ChatSubmissionResult(reply=reply)
@@ -2875,7 +3216,9 @@ class ControlCenterService:
             if normalized in {"cancel", "no", "discard"}:
                 self._save_pending_action(repo_id, None)
                 reply = f"Cancelled pending action: {pending.label}"
-                self._chat_append(repo_id, role="system", message_type="action_result", content=reply)
+                self._chat_append(
+                    repo_id, role="system", message_type="action_result", content=reply
+                )
                 return ChatSubmissionResult(reply=reply)
             reply = "A pending action is waiting. Type `confirm` to proceed or `cancel` to discard."
             self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
@@ -2888,7 +3231,11 @@ class ControlCenterService:
             self._chat_append(repo_id, role="assistant", message_type="reply", content=reply)
             return ChatSubmissionResult(reply=reply)
 
-        if tokens and (tokens[0].startswith("/") or tokens[0] in {"repo", "run", "runtime-check", "archive-run", "restore-evidence", "open", "new"}):
+        if tokens and (
+            tokens[0].startswith("/")
+            or tokens[0]
+            in {"repo", "run", "runtime-check", "archive-run", "restore-evidence", "open", "new"}
+        ):
             return self._command_tokens_to_chat(repo_id, selected_run_id, tokens)
 
         if "failed run" in normalized or normalized.startswith("show failed"):
@@ -2924,7 +3271,11 @@ class ControlCenterService:
                 follow_up_actions=follow_up_actions,
             )
             return ChatSubmissionResult(reply=reply, follow_up_actions=follow_up_actions)
-        if ("selected run" in normalized or "current run" in normalized or "run status" in normalized) and selected_run_id:
+        if (
+            "selected run" in normalized
+            or "current run" in normalized
+            or "run status" in normalized
+        ) and selected_run_id:
             reply = self._run_status_summary(repo_id, selected_run_id)
             follow_up_actions = self._current_run_follow_ups(repo_id, selected_run_id)
             self._chat_append(
@@ -2942,27 +3293,47 @@ class ControlCenterService:
                 follow_up_actions=follow_up_actions,
             )
         if normalized.startswith("restart repo"):
-            return self._pending_simple_action(repo_id, action_name="repo_restart", label=f"Restart repo `{repo_id}`")
+            return self._pending_simple_action(
+                repo_id, action_name="repo_restart", label=f"Restart repo `{repo_id}`"
+            )
         if normalized.startswith("start repo"):
-            return self._pending_simple_action(repo_id, action_name="repo_start", label=f"Start repo `{repo_id}`")
+            return self._pending_simple_action(
+                repo_id, action_name="repo_start", label=f"Start repo `{repo_id}`"
+            )
         if normalized.startswith("stop repo"):
-            return self._pending_simple_action(repo_id, action_name="repo_stop", label=f"Stop repo `{repo_id}`")
+            return self._pending_simple_action(
+                repo_id, action_name="repo_stop", label=f"Stop repo `{repo_id}`"
+            )
         if normalized.startswith("run canary") or normalized.startswith("canary"):
-            return self._pending_simple_action(repo_id, action_name="repo_canary", label=f"Run canary for repo `{repo_id}`")
+            return self._pending_simple_action(
+                repo_id, action_name="repo_canary", label=f"Run canary for repo `{repo_id}`"
+            )
         if normalized.startswith("runtime check"):
-            return self._pending_simple_action(repo_id, action_name="runtime_check", label=f"Run runtime check for repo `{repo_id}`")
+            return self._pending_simple_action(
+                repo_id,
+                action_name="runtime_check",
+                label=f"Run runtime check for repo `{repo_id}`",
+            )
         if normalized.startswith("rerun run "):
             run_id = normalized.split("rerun run ", 1)[1].strip()
-            return self._pending_simple_action(repo_id, action_name="run_rerun", label=f"Rerun run `{run_id}`", run_id=run_id)
+            return self._pending_simple_action(
+                repo_id, action_name="run_rerun", label=f"Rerun run `{run_id}`", run_id=run_id
+            )
         if normalized.startswith("cancel run "):
             run_id = normalized.split("cancel run ", 1)[1].strip()
-            return self._pending_simple_action(repo_id, action_name="run_cancel", label=f"Cancel run `{run_id}`", run_id=run_id)
+            return self._pending_simple_action(
+                repo_id, action_name="run_cancel", label=f"Cancel run `{run_id}`", run_id=run_id
+            )
         if normalized.startswith("enqueue run "):
             run_id = normalized.split("enqueue run ", 1)[1].strip()
-            return self._pending_simple_action(repo_id, action_name="run_enqueue", label=f"Enqueue run `{run_id}`", run_id=run_id)
+            return self._pending_simple_action(
+                repo_id, action_name="run_enqueue", label=f"Enqueue run `{run_id}`", run_id=run_id
+            )
         if normalized.startswith("archive run "):
             run_id = normalized.split("archive run ", 1)[1].strip()
-            return self._pending_simple_action(repo_id, action_name="archive_run", label=f"Archive run `{run_id}`", run_id=run_id)
+            return self._pending_simple_action(
+                repo_id, action_name="archive_run", label=f"Archive run `{run_id}`", run_id=run_id
+            )
 
         if normalized.endswith("?"):
             reply = (
@@ -2974,37 +3345,37 @@ class ControlCenterService:
 
         return self._draft_new_run(repo_id, message)
 
-    def start_repo(self, repo_id: str) -> str:
+    def start_repo(self, repo_id: str) -> ActionOutcome:
         return self.supervisors[repo_id].start()
 
-    def stop_repo(self, repo_id: str) -> str:
+    def stop_repo(self, repo_id: str) -> ActionOutcome:
         return self.supervisors[repo_id].stop()
 
-    def restart_repo(self, repo_id: str) -> str:
+    def restart_repo(self, repo_id: str) -> ActionOutcome:
         return self.supervisors[repo_id].restart()
 
-    def run_canary(self, repo_id: str) -> str:
+    def run_canary(self, repo_id: str) -> ActionOutcome:
         return self.supervisors[repo_id].launch_canary()
 
-    def runtime_check(self, repo_id: str) -> str:
+    def runtime_check(self, repo_id: str) -> ActionOutcome:
         return self.supervisors[repo_id].launch_runtime_check()
 
-    def cancel_run(self, repo_id: str, run_id: str) -> str:
+    def cancel_run(self, repo_id: str, run_id: str) -> ActionOutcome:
         row = self._run_row(repo_id, run_id)
         if _is_terminal_state(row.state):
-            return f"{run_id} is already terminal"
+            return ActionOutcome.failed(f"{run_id} is already terminal")
         cancel_path = row.run_dir / ".orchestrator-cancel"
         cancel_path.write_text("cancelled\n", encoding="utf-8")
-        return f"cancellation requested for {run_id}"
+        return ActionOutcome.completed(f"cancellation requested for {run_id}")
 
-    def enqueue_run(self, repo_id: str, run_id: str) -> str:
+    def enqueue_run(self, repo_id: str, run_id: str) -> ActionOutcome:
         row = self._run_row(repo_id, run_id)
         if _is_terminal_state(row.state):
-            return f"{run_id} is terminal and cannot be enqueued"
+            return ActionOutcome.failed(f"{run_id} is terminal and cannot be enqueued")
         if _run_is_locked(row.run_dir):
-            return f"{run_id} is locked and cannot be enqueued"
+            return ActionOutcome.failed(f"{run_id} is locked and cannot be enqueued")
         if row.run_queue_state in {"queued", "claimed", "model_running"}:
-            return f"{run_id} is already queued or running"
+            return ActionOutcome.failed(f"{run_id} is already queued or running")
         supervisor = self.supervisors[repo_id]
         queue_entries = harvester.read_queue_entries(supervisor.run_queue_path)
         prior_attempt = (
@@ -3026,12 +3397,12 @@ class ControlCenterService:
             },
         )
         (row.run_dir / "run.state").write_text("queued\n", encoding="utf-8")
-        return f"enqueued {run_id}"
+        return ActionOutcome.completed(f"enqueued {run_id}")
 
-    def rerun_run(self, repo_id: str, run_id: str) -> str:
+    def rerun_run(self, repo_id: str, run_id: str) -> ActionOutcome:
         row = self._run_row(repo_id, run_id)
         if not _is_terminal_state(row.state):
-            return f"{run_id} is not terminal and cannot be rerun"
+            return ActionOutcome.failed(f"{run_id} is not terminal and cannot be rerun")
         cancel_path = row.run_dir / ".orchestrator-cancel"
         if cancel_path.exists():
             cancel_path.unlink()
@@ -3044,10 +3415,10 @@ class ControlCenterService:
         row = self._run_row(repo_id, run_id)
         return row.run_dir.with_suffix(".tgz")
 
-    def archive_run(self, repo_id: str, run_id: str) -> str:
+    def archive_run(self, repo_id: str, run_id: str) -> ActionOutcome:
         row = self._run_row(repo_id, run_id)
         if not row.run_dir.exists():
-            return f"run directory is missing for {run_id}"
+            return ActionOutcome.failed(f"run directory is missing for {run_id}")
         archive_path = self.archive_path(repo_id, run_id)
         return self.supervisors[repo_id].launch_archive(row.run_dir, archive_path)
 
@@ -3058,20 +3429,22 @@ class ControlCenterService:
         *,
         archive_path: str = "",
         force: bool = False,
-    ) -> str:
+    ) -> ActionOutcome:
         repo = next(item for item in self.config.repos if item.id == repo_id)
         if archive_path:
             resolved_archive = pathlib.Path(archive_path).expanduser().resolve()
         else:
             resolved_archive = self.archive_path(repo_id, run_id).resolve()
         if not resolved_archive.exists():
-            return f"archive not found: {resolved_archive}"
+            return ActionOutcome.failed(f"archive not found: {resolved_archive}")
         archive_root = _archive_root_name(resolved_archive)
         if not archive_root:
-            return f"could not inspect archive: {resolved_archive}"
+            return ActionOutcome.failed(f"could not inspect archive: {resolved_archive}")
         destination_dir = repo.runs_root / archive_root
         if destination_dir.exists() and not force:
-            return f"restore target exists: {destination_dir} (rerun with --force)"
+            return ActionOutcome.failed(
+                f"restore target exists: {destination_dir} (rerun with --force)"
+            )
         return self.supervisors[repo_id].launch_restore(
             resolved_archive,
             repo.runs_root,
@@ -3088,16 +3461,14 @@ class ControlCenterService:
         except OSError:
             return False
 
-    def open_run_path(self, repo_id: str, run_id: str) -> str:
-        return str(self._run_row(repo_id, run_id).run_dir)
+    def open_run_path(self, repo_id: str, run_id: str) -> ActionOutcome:
+        return ActionOutcome.completed(str(self._run_row(repo_id, run_id).run_dir))
 
-    def open_archive_path(self, repo_id: str, run_id: str) -> str:
+    def open_archive_path(self, repo_id: str, run_id: str) -> ActionOutcome:
         archive_path = self.archive_path(repo_id, run_id).resolve()
-        return (
-            f"{archive_path}"
-            if archive_path.exists()
-            else f"{archive_path} (missing)"
-        )
+        if archive_path.exists():
+            return ActionOutcome.completed(f"{archive_path}")
+        return ActionOutcome.failed(f"{archive_path} (missing)")
 
     def read_artifact(self, repo_id: str, run_id: str, kind: str) -> str:
         row = self._run_row(repo_id, run_id)
@@ -3241,26 +3612,29 @@ def format_timestamp_ms(value: int | float | None) -> str:
 
 def build_example_config_text(repo_root: pathlib.Path) -> str:
     sibling = repo_root.parent / "another-bitterless-harness"
-    return "\n".join(
-        [
-            "[ui]",
-            "refresh_interval_seconds = 1.0",
-            "window_days = 30",
-            "",
-            "[[repo]]",
-            'id = "main"',
-            f'name = "{repo_root.name}"',
-            f'root = "{repo_root}"',
-            "auto_start = true",
-            'default_model = "openai/gpt-5.4-mini"',
-            "max_model_workers = 2",
-            "max_score_workers = 2",
-            "",
-            "[[repo]]",
-            'id = "secondary"',
-            'name = "Another Harness"',
-            f'root = "{sibling}"',
-            "auto_start = false",
-            'default_model = "anthropic/claude-sonnet-4"',
-        ]
-    ) + "\n"
+    return (
+        "\n".join(
+            [
+                "[ui]",
+                "refresh_interval_seconds = 1.0",
+                "window_days = 30",
+                "",
+                "[[repo]]",
+                'id = "main"',
+                f'name = "{repo_root.name}"',
+                f'root = "{repo_root}"',
+                "auto_start = true",
+                'default_model = "openai/gpt-5.4-mini"',
+                "max_model_workers = 2",
+                "max_score_workers = 2",
+                "",
+                "[[repo]]",
+                'id = "secondary"',
+                'name = "Another Harness"',
+                f'root = "{sibling}"',
+                "auto_start = false",
+                'default_model = "anthropic/claude-sonnet-4"',
+            ]
+        )
+        + "\n"
+    )

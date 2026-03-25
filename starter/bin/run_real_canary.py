@@ -326,10 +326,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     env = base_env(policy_candidate=args.policy_candidate, bundle_candidate=args.bundle_candidate)
     model = env.get("HARNESS_REAL_PI_MODEL", "")
-    label_slug = "".join(
-        character if character.isalnum() or character in {"-", "_"} else "-"
-        for character in str(args.label or "default").strip().lower()
-    ).strip("-") or "default"
+    label_slug = (
+        "".join(
+            character if character.isalnum() or character in {"-", "_"} else "-"
+            for character in str(args.label or "default").strip().lower()
+        ).strip("-")
+        or "default"
+    )
     summary_name = f"real-canary-{label_slug}-{time.strftime('%Y%m%d-%H%M%S')}.summary.json"
     summary_path = (
         pathlib.Path(args.summary_path).resolve()

@@ -183,7 +183,9 @@ def build_retrieval_example(
         "generated_at": now_utc(),
         "example_id": f"run:{run_dir.name}",
         "query": {
-            "task_title": context_manifest.get("query", {}).get("task_title", query.get("task_title")),
+            "task_title": context_manifest.get("query", {}).get(
+                "task_title", query.get("task_title")
+            ),
             "goal": context_manifest.get("query", {}).get(
                 "goal", query.get("sections", {}).get("Goal", "")
             ),
@@ -258,9 +260,7 @@ def build_policy_example(
     task = task_payload(run_dir)
     timings = manifest.get("timings", {}) if isinstance(manifest.get("timings"), dict) else {}
     candidates = (
-        manifest.get("candidates", {})
-        if isinstance(manifest.get("candidates"), dict)
-        else {}
+        manifest.get("candidates", {}) if isinstance(manifest.get("candidates"), dict) else {}
     )
     return {
         "policy_example_version": "v1",
